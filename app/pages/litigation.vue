@@ -49,7 +49,12 @@ import {
   litigationImportRanges,
   litigationMonthBounds,
   litigationNoBaselineMonths,
+  litigationCheckedAtKey,
+  litigationNeedsFetch,
+  litigationRowCheckedAt,
   litigationRowNeedsAttention,
+  reduceWageReportForDriver,
+  restoreLitigationChecks,
   LITIGATION_CHECK_KEYS,
   LITIGATION_CHECK_LABELS,
   LITIGATION_CHECK_STATE_LABELS,
@@ -59,6 +64,8 @@ import {
   type LitigationErrorRow,
   type LitigationFetched,
   type LitigationImportOutcome,
+  type LitigationStoredItem,
+  type LitigationStoredUnkoGaps,
   type LitigationTimecardPushOutcome,
 } from '~/utils/litigation-errors'
 import { parseKintaiWindowReport } from '~/utils/kintai-diff-view'
@@ -454,8 +461,12 @@ const caseMonths = computed<string[]>(() =>
 const errAlcOps = ref(new Map<string, LitigationAlcOpsEntry>())
 /** キー `乗務員CD|YYYY-MM` */
 const errUnkoGaps = ref(new Map<string, LitigationFetched<KintaiUnkoGaps>>())
-/** キー `YYYY-MM` (会社全体を 1 回で読む) */
+/** キー `乗務員CD|YYYY-MM` (会社全体を 1 回で読み、乗務員ごとに切り出す) */
 const errWageReports = ref(new Map<string, LitigationFetched<WageReportResponse>>())
+/** 保存時刻 (キー `種類|乗務員CD|YYYY-MM`)。relay の D1 に残した結果を開き直したときに出す */
+const errCheckedAt = ref(new Map<string, string>())
+const errorsStoreLoading = ref(false)
+const errorsStoreError = ref('')
 const errorsRunning = ref(false)
 const errorsFinished = ref(false)
 const errorsProgress = ref<{ done: number, total: number, label: string } | null>(null)
@@ -468,12 +479,57 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
   errAlcOps.value = new Map()
   errUnkoGaps.value = new Map()
   errWageReports.value = new Map()
+  errCheckedAt.value = new Map()
+  errorsStoreError.value = ''
   errorsRunning.value = false
   errorsFinished.value = false
   errorsProgress.value = null
   importResults.value = new Map()
   timecardPushResults.value = []
+  if (openCase.value) loadStoredChecks(errorsEpoch, openCase.value.caseId)
 })
+
+/** 保存済みの検知結果を読む (開き直したら前回の結果を出す)。読めなくても検知は回せる。 */
+async function loadStoredChecks(epoch: number, caseId: string) {
+  errorsStoreLoading.value = true
+  try {
+    const res = await $fetch<unknown>('/restraint-api/litigation-checks', {
+      headers: authHeaders(),
+      query: { case_id: caseId },
+    })
+    if (epoch !== errorsEpoch) return
+    const restored = restoreLitigationChecks(res)
+    errAlcOps.value = restored.alcOps
+    errUnkoGaps.value = restored.unkoGaps
+    errWageReports.value = restored.wageReports
+    errCheckedAt.value = restored.checkedAt
+  }
+  catch (e) {
+    if (epoch === errorsEpoch) errorsStoreError.value = `保存済みの検知結果を読めませんでした: ${describeCaughtError(e, '画面を再読み込みしてください')}`
+  }
+  finally {
+    if (epoch === errorsEpoch) errorsStoreLoading.value = false
+  }
+}
+
+/** 取れた結果を 1 ステップぶん保存する。**保存に失敗しても検知は止めない** (画面には出す)。 */
+async function saveChecks(epoch: number, items: LitigationStoredItem[]) {
+  const caseId = openCase.value?.caseId
+  if (!caseId || epoch !== errorsEpoch) return
+  try {
+    const res = await $fetch<{ checkedAt?: unknown }>('/restraint-api/litigation-checks', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: { caseId, items },
+    })
+    if (epoch !== errorsEpoch) return
+    const at = typeof res?.checkedAt === 'string' ? res.checkedAt : new Date().toISOString()
+    for (const it of items) errCheckedAt.value.set(litigationCheckedAtKey(it.kind, it.key), at)
+  }
+  catch (e) {
+    if (epoch === errorsEpoch) errorsStoreError.value = `検知結果を保存できませんでした (開き直すとこの分は未実行に戻ります): ${describeCaughtError(e, '「続きから」でやり直してください')}`
+  }
+}
 
 const errorRows = computed<LitigationErrorRow[]>(() => buildLitigationErrorRows({
   driverCds: openCase.value?.driverCds ?? [],
@@ -507,27 +563,33 @@ async function loadAlcOps(epoch: number, driverCd: string, from: string, to: str
   }
   if (epoch !== errorsEpoch) return
   for (const [m, entry] of entries) errAlcOps.value.set(litigationDriverMonthKey(driverCd, m), entry)
+  await saveChecks(epoch, entries.map(([m, entry]) => ({ kind: 'alcOps', key: litigationDriverMonthKey(driverCd, m), payload: entry })))
 }
 
 async function loadUnkoGaps(epoch: number, driverCd: string, month: string) {
   let entry: LitigationFetched<KintaiUnkoGaps>
+  let stored: LitigationStoredUnkoGaps
   try {
     const res = await $fetch<unknown>('/restraint-api/kintai/unko-gaps', {
       headers: authHeaders(),
       query: { month, driver_cd: driverCd },
     })
     entry = { ok: true, value: parseKintaiUnkoGaps(res) }
+    stored = { ok: true, raw: res }
   }
   catch (e) {
     entry = { ok: false, reason: describeCaughtError(e, ERRORS_RETRY) }
+    stored = entry
   }
   if (epoch !== errorsEpoch) return
-  errUnkoGaps.value.set(litigationDriverMonthKey(driverCd, month), entry)
+  const key = litigationDriverMonthKey(driverCd, month)
+  errUnkoGaps.value.set(key, entry)
+  await saveChecks(epoch, [{ kind: 'unkoGaps', key, payload: stored }])
 }
 
 /** 最低賃金の不変条件は GCP の拘束で計算した wage-report にだけ付く (Refs #1123)。
  * **読むだけ** — wage-snapshot (最低賃金チェックの自動保存) は呼ばない。 */
-async function loadWageReport(epoch: number, month: string) {
+async function loadWageReport(epoch: number, month: string, driverCds: readonly string[]) {
   let entry: LitigationFetched<WageReportResponse>
   try {
     const res = await $fetch<WageReportResponse>('/restraint-api/wage-report', {
@@ -540,33 +602,66 @@ async function loadWageReport(epoch: number, month: string) {
     entry = { ok: false, reason: describeCaughtError(e, ERRORS_RETRY) }
   }
   if (epoch !== errorsEpoch) return
-  errWageReports.value.set(month, entry)
+  const items: LitigationStoredItem[] = driverCds.map((cd) => {
+    const key = litigationDriverMonthKey(cd, month)
+    const cut = reduceWageReportForDriver(entry, cd)
+    errWageReports.value.set(key, cut)
+    return { kind: 'wageReport', key, payload: cut }
+  })
+  await saveChecks(epoch, items)
 }
 
-/** 4 つの検知を**直列に**回す (wage-report は 1 か月 15〜64 秒かかり、同じ DO を奪い合わせない)。
- * 軽いものから先に回し、最後に wage-report を月ごとに読む。 */
-async function runErrorChecks() {
+interface ErrorCheckStep { label: string, run: (epoch: number) => Promise<void> }
+
+/**
+ * 検知のステップ。`onlyMissing` (続きから) なら、まだ取っていない・取りに行って失敗した
+ * 結果 (`litigationNeedsFetch`) を含むステップだけにする。軽いものから並べ、最後に
+ * wage-report を月ごとに読む。
+ */
+function buildErrorSteps(onlyMissing: boolean): ErrorCheckStep[] {
   const target = openCase.value
-  if (!target || errorsRunning.value) return
-  const epoch = ++errorsEpoch
+  if (!target) return []
   const months = caseMonths.value
-  const steps: { label: string, run: () => Promise<void> }[] = [
-    ...outputChunks.value.map(c => ({
-      label: `alc の運行 ${c.driverCd} ${c.label}`,
-      run: () => loadAlcOps(epoch, c.driverCd, c.from, c.to, litigationChunkMonths(c)),
-    })),
-    ...target.driverCds.flatMap(cd => months.map(m => ({
-      label: `勤怠に無い運行 ${cd} ${m}`,
-      run: () => loadUnkoGaps(epoch, cd, m),
-    }))),
-    ...months.map(m => ({
-      label: `最低賃金の不変条件 ${m} (1 か月 15〜64 秒)`,
-      run: () => loadWageReport(epoch, m),
-    })),
+  const need = (entry: { ok: boolean } | undefined) => !onlyMissing || litigationNeedsFetch(entry)
+  const key = litigationDriverMonthKey
+  return [
+    ...outputChunks.value
+      .filter(c => litigationChunkMonths(c).some(m => need(errAlcOps.value.get(key(c.driverCd, m)))))
+      .map(c => ({
+        label: `alc の運行 ${c.driverCd} ${c.label}`,
+        run: (epoch: number) => loadAlcOps(epoch, c.driverCd, c.from, c.to, litigationChunkMonths(c)),
+      })),
+    ...target.driverCds.flatMap(cd => months
+      .filter(m => need(errUnkoGaps.value.get(key(cd, m))))
+      .map(m => ({
+        label: `勤怠に無い運行 ${cd} ${m}`,
+        run: (epoch: number) => loadUnkoGaps(epoch, cd, m),
+      }))),
+    ...months
+      .filter(m => target.driverCds.some(cd => need(errWageReports.value.get(key(cd, m)))))
+      .map(m => ({
+        label: `最低賃金の不変条件 ${m} (1 か月 15〜64 秒)`,
+        run: (epoch: number) => loadWageReport(epoch, m, target.driverCds),
+      })),
   ]
-  errAlcOps.value = new Map()
-  errUnkoGaps.value = new Map()
-  errWageReports.value = new Map()
+}
+
+/** 保存時刻の表示 (JST の「M/D HH:mm」) */
+function fmtCheckedAt(iso: string): string {
+  return new Date(iso).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+/** 「続きから」で回すステップ数 (ボタンに出す) */
+const missingErrorSteps = computed(() => buildErrorSteps(true).length)
+
+/** 4 つの検知を**直列に**回す (wage-report は 1 か月 15〜64 秒かかり、同じ DO を奪い合わせない)。
+ * 取れたステップから保存するので、途中で止めても「続きから」で残りだけ回せる。
+ * 全部やり直すときも前回の結果は消さず、取れた順に上書きする (止めても前回分が残る)。 */
+async function runErrorChecks(onlyMissing: boolean) {
+  if (!openCase.value || errorsRunning.value || errorsStoreLoading.value) return
+  const epoch = ++errorsEpoch
+  const steps = buildErrorSteps(onlyMissing)
+  errorsStoreError.value = ''
   errorsRunning.value = true
   errorsFinished.value = false
   errorsProgress.value = { done: 0, total: steps.length, label: '' }
@@ -574,7 +669,7 @@ async function runErrorChecks() {
     for (const [i, step] of steps.entries()) {
       if (epoch !== errorsEpoch) return
       errorsProgress.value = { done: i, total: steps.length, label: step.label }
-      await step.run()
+      await step.run(epoch)
     }
     if (epoch === errorsEpoch) errorsProgress.value = { done: steps.length, total: steps.length, label: '' }
   }
@@ -1146,18 +1241,29 @@ function fmtDateTime(iso: string): string {
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
             「照合先なし」はその月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない月です (異常とは数えません)。
             2026-01 より前の勤怠は GCP へ運んでいないので、その期間は全員が照合先なしになります。「勤怠を GCP へ運ぶ」で照合先なしの月をオンプレから運べます (会社全体を月単位で運びます)。運んでも照合先なしのまま残る乗務員は、オンプレの勤務時間登録 (運行NO の付いた勤怠) にその運行が無い乗務員です。
-            Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで保存はしません)。
+            Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで、最低賃金チェックの保存はしません)。
+            検知の結果は案件ごとに保存し、開き直すと前回の結果を出します (月の下の時刻がその行の材料を取った時刻)。「続きから」は、まだ取っていない・取れなかった分だけを回します。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
             <UButton
               icon="i-lucide-search-check"
-              label="検知を実行"
+              :label="errCheckedAt.size > 0 ? '検知を全部やり直す' : '検知を実行'"
               :loading="errorsRunning"
-              :disabled="errorsRunning || importingKey !== null || timecardPushing || errorRows.length === 0"
+              :disabled="errorsRunning || errorsStoreLoading || importingKey !== null || timecardPushing || errorRows.length === 0"
               data-testid="litigation-errors-run"
-              @click="runErrorChecks"
+              @click="runErrorChecks(false)"
             />
+            <UButton
+              v-if="errCheckedAt.size > 0"
+              icon="i-lucide-play"
+              :label="`続きから (${missingErrorSteps} 件)`"
+              variant="soft"
+              :disabled="errorsRunning || errorsStoreLoading || importingKey !== null || timecardPushing || missingErrorSteps === 0"
+              data-testid="litigation-errors-resume"
+              @click="runErrorChecks(true)"
+            />
+            <span v-if="errorsStoreLoading" class="text-sm text-gray-500" data-testid="litigation-errors-store-loading">保存済みの結果を読み込み中…</span>
             <UButton
               v-if="noBaselineMonths.length > 0 || timecardPushResults.length > 0"
               icon="i-lucide-database-zap"
@@ -1178,6 +1284,8 @@ function fmtDateTime(iso: string): string {
               異常あり・判定できないがある行だけ
             </label>
           </div>
+
+          <div v-if="errorsStoreError" class="text-xs text-red-600 dark:text-red-400" data-testid="litigation-errors-store-error">{{ errorsStoreError }}</div>
 
           <div v-if="timecardPushResults.length > 0" class="text-xs space-y-0.5" data-testid="litigation-timecard-push-results">
             <div
@@ -1218,7 +1326,12 @@ function fmtDateTime(iso: string): string {
                   :data-row="`${row.driverCd}|${row.month}`"
                 >
                   <td class="px-3 py-2 whitespace-nowrap">{{ driverLabel(row.driverCd) }} ({{ row.driverCd }})</td>
-                  <td class="px-3 py-2 whitespace-nowrap">{{ row.month }}</td>
+                  <td class="px-3 py-2 whitespace-nowrap">
+                    {{ row.month }}
+                    <div v-if="litigationRowCheckedAt(errCheckedAt, `${row.driverCd}|${row.month}`)" class="text-xs text-gray-500" data-testid="litigation-row-checked-at">
+                      {{ fmtCheckedAt(litigationRowCheckedAt(errCheckedAt, `${row.driverCd}|${row.month}`)!) }}
+                    </div>
+                  </td>
                   <td v-for="k in LITIGATION_CHECK_KEYS" :key="k" class="px-3 py-2 min-w-40" :data-check="k">
                     <span class="text-xs rounded px-2 py-0.5 whitespace-nowrap" :class="CHECK_STATE_CLASS[row.cells[k].state]">
                       {{ LITIGATION_CHECK_STATE_LABELS[row.cells[k].state] }}

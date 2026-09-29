@@ -318,6 +318,14 @@ import {
   type LitigationCaseD1Row,
 } from "./litigation-case";
 import {
+  buildLitigationCheckDeleteStatement,
+  buildLitigationCheckListResponse,
+  buildLitigationCheckListStatement,
+  buildLitigationCheckUpsertStatement,
+  normalizeLitigationCheckPut,
+  type LitigationCheckD1Row,
+} from "./litigation-check";
+import {
   isClericalJob,
   kintaiR2Paths,
   mergeSummarySources,
@@ -4568,6 +4576,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/litigation-cases" && request.method === "DELETE") {
       return this.handleLitigationCasesDelete(record!, url);
     }
+    // ---- 訴訟用の準備ページのエラータブの検知結果 (D1、Refs #1133) ----
+    if (url.pathname === "/restraint-api/litigation-checks" && request.method === "GET") {
+      return this.handleLitigationChecksGet(record!, url);
+    }
+    if (url.pathname === "/restraint-api/litigation-checks" && request.method === "PUT") {
+      return this.handleLitigationChecksPut(request, record!);
+    }
     // ---- 勤怠 (タイムカード) の取得とアーカイブ (Refs #424 PR-A) ----
     if (url.pathname === "/restraint-api/kintai/fetch" && request.method === "POST") {
       return this.handleKintaiFetch(record!, url);
@@ -5475,12 +5490,69 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!caseId) return dvrJsonError(400, "case_id が必要です");
     try {
       const stmt = buildLitigationCaseDeleteStatement(record.compId, caseId);
-      await db.prepare(stmt.sql).bind(...stmt.params).run();
+      const checks = buildLitigationCheckDeleteStatement(record.compId, caseId);
+      await db.batch([
+        db.prepare(stmt.sql).bind(...stmt.params),
+        db.prepare(checks.sql).bind(...checks.params),
+      ]);
     } catch (err) {
       console.error(JSON.stringify({ litigation_cases_delete: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "案件の削除に失敗しました");
     }
     return Response.json({ deleted: true });
+  }
+
+  /** GET /restraint-api/litigation-checks?case_id= — エラータブの保存済み検知結果 (Refs #1133)。 */
+  private async handleLitigationChecksGet(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    const caseId = url.searchParams.get("case_id");
+    if (!caseId) return dvrJsonError(400, "case_id が必要です");
+    try {
+      const stmt = buildLitigationCheckListStatement(record.compId, caseId);
+      const result = await db.prepare(stmt.sql).bind(...stmt.params).all<LitigationCheckD1Row>();
+      return Response.json({ items: buildLitigationCheckListResponse(result.results ?? []) });
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_checks_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "検知結果の取得に失敗しました");
+    }
+  }
+
+  /**
+   * PUT /restraint-api/litigation-checks — エラータブの検知結果を保存する (Refs #1133)。
+   * 案件が同じ comp に無ければ 404 (他社の案件 ID や削除済みの案件に書かない)。
+   * 書き込み先の comp はセッション record から取る (body の値は見ない)。
+   */
+  private async handleLitigationChecksPut(request: Request, record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    let input: ReturnType<typeof normalizeLitigationCheckPut>;
+    try {
+      input = normalizeLitigationCheckPut(raw);
+    } catch (err) {
+      if (err instanceof LitigationCaseError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const nowIso = new Date().toISOString();
+    try {
+      const getStmt = buildLitigationCaseGetStatement(record.compId, input.caseId);
+      const found = await db.prepare(getStmt.sql).bind(...getStmt.params).first<LitigationCaseD1Row>();
+      if (!found) return dvrJsonError(404, "案件が見つかりません");
+      await db.batch(input.items.map((item) => {
+        const stmt = buildLitigationCheckUpsertStatement(record.compId, input.caseId, item, nowIso);
+        return db.prepare(stmt.sql).bind(...stmt.params);
+      }));
+      return Response.json({ saved: input.items.length, checkedAt: nowIso });
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_checks_put: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "検知結果の保存に失敗しました");
+    }
   }
 
   /**

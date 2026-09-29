@@ -73,6 +73,7 @@ export default defineConfig({
         'src/dvr-ingest.ts',
         'src/vehicle-state-ingest.ts',
         'src/litigation-case.ts',
+        'src/litigation-check.ts',
       ],
       thresholds: {
         lines: 100,

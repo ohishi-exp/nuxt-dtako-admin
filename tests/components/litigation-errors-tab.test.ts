@@ -73,14 +73,19 @@ const OK_INV = {
 interface Call { via: '$fetch' | 'fetch', method: string, url: string, body?: unknown }
 /** unko-gaps の 2 月の応答に載せる勤怠側の件数 (undefined ならキーを載せない = 旧 rust)。 */
 let febOnpremOps: number | undefined
+/** `GET /restraint-api/litigation-checks` が返す保存済みの結果 */
+let storedItems: unknown[] = []
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
 /** `$fetch` を URL で振り分けるモック。呼び出しは全部 `calls` に積む。 */
 function stubDollarFetch() {
-  vi.stubGlobal('$fetch', vi.fn(async (url: string, opts: { method?: string, query?: Record<string, string> } = {}) => {
+  vi.stubGlobal('$fetch', vi.fn(async (url: string, opts: { method?: string, query?: Record<string, string>, body?: unknown } = {}) => {
     const q = opts.query ?? {}
-    calls.push({ via: '$fetch', method: opts.method ?? 'GET', url: `${url}?${new URLSearchParams(q).toString()}` })
+    calls.push({ via: '$fetch', method: opts.method ?? 'GET', url: `${url}?${new URLSearchParams(q).toString()}`, body: opts.body })
+    if (url === '/restraint-api/litigation-checks') {
+      return opts.method === 'PUT' ? { saved: 1, checkedAt: '2026-09-29T03:04:00.000Z' } : { items: storedItems }
+    }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
     if (url === '/restraint-api/kintai/unko-gaps') {
@@ -151,6 +156,7 @@ function cell(w: VueWrapper, row: string, check: string) {
 beforeEach(() => {
   calls = []
   febOnpremOps = undefined
+  storedItems = []
   saved.length = 0
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -345,6 +351,84 @@ describe('出力タブの ZIP にエラー一覧.csv を入れる', () => {
     const alerts = w.findAllComponents({ name: 'UAlert' })
     expect(alerts.map(a => a.props('color'))).toEqual(['error'])
     expect(alerts[0]!.text()).toContain('エラー一覧.csv / 変更記録.csv だけを入れて保存しました')
+    w.unmount()
+  })
+})
+
+describe('エラータブ: 検知結果の保存と続きから', () => {
+  function mountAndOpen() {
+    return (async () => {
+      const w = mount(Page, {
+        global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+      })
+      await settle()
+      await buttonByText(w, '開く').trigger('click')
+      await buttonByText(w, 'エラー').trigger('click')
+      await settle()
+      return w
+    })()
+  }
+
+  it('★ 取れた結果をステップごとに保存する (wage-report は乗務員ぶんだけ切り出す)', async () => {
+    const w = await openErrorsTabAndRun()
+    const puts = calls.filter(c => c.url.startsWith('/restraint-api/litigation-checks') && c.method === 'PUT')
+    const items = puts.flatMap(c => (c.body as { caseId: string, items: { kind: string, key: string, payload: unknown }[] }).items.map(it => ({ ...it, caseId: (c.body as { caseId: string }).caseId })))
+    expect(items.every(it => it.caseId === 'c1')).toBe(true)
+    expect(items.map(it => `${it.kind} ${it.key}`)).toEqual([
+      'alcOps 1078|2025-01', 'alcOps 1078|2025-02',
+      'unkoGaps 1078|2025-01', 'unkoGaps 1078|2025-02',
+      'wageReport 1078|2025-01', 'wageReport 1078|2025-02',
+    ])
+    // 勤怠に無い運行は受け側の応答そのまま、失敗は理由ごと
+    expect(items[3]!.payload).toMatchObject({ ok: true, raw: { drivers: [{ driver_cd: '1078' }] } })
+    expect(items[5]!.payload).toMatchObject({ ok: false })
+    // 保存時刻が行に出る
+    expect(w.find('tr[data-row="1078|2025-01"] [data-testid="litigation-row-checked-at"]').text()).toContain('9/29')
+    w.unmount()
+  })
+
+  it('★ 開き直すと前回の結果を出し、「続きから」は取れていない分だけ回す', async () => {
+    const at = '2026-09-28T01:00:00.000Z'
+    const rep = { ok: true, value: { month: '2025-01', restraint_source: 'gcp', no_data_drivers: [], warnings: [], rows: [{ summary: { driverCd: '1078' }, invariants: OK_INV }] } }
+    storedItems = [
+      { kind: 'alcOps', key: '1078|2025-01', payload: { ok: true, days: 2, dropped: [] }, checkedAt: at },
+      { kind: 'alcOps', key: '1078|2025-02', payload: { ok: true, days: 0, dropped: [] }, checkedAt: at },
+      { kind: 'unkoGaps', key: '1078|2025-01', payload: { ok: true, raw: { gcp_etags_available: true, driver_cds_available: true, drivers: [] } }, checkedAt: at },
+      { kind: 'unkoGaps', key: '1078|2025-02', payload: { ok: false, reason: '502 …' }, checkedAt: at },
+      { kind: 'wageReport', key: '1078|2025-01', payload: rep, checkedAt: at },
+    ]
+    api.getYTimePreview.mockClear()
+    const w = await mountAndOpen()
+    // 検知を押さなくても前回の結果が出る
+    expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('異常なし')
+    expect(cell(w, '1078|2025-01', 'invariants')).toContain('異常なし')
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('判定できない')
+    expect(cell(w, '1078|2025-02', 'invariants')).toContain('未実行')
+    expect(api.getYTimePreview).not.toHaveBeenCalled()
+    // 取れていないのは 2 月の勤怠に無い運行と 2 月の最低賃金の 2 件
+    calls = []
+    await buttonByText(w, '続きから (2 件)').trigger('click')
+    await settle()
+    expect(api.getYTimePreview).not.toHaveBeenCalled()
+    expect(calls.filter(c => c.method === 'GET' && !c.url.startsWith('/restraint-api/litigation-checks')).map(c => c.url)).toEqual([
+      '/restraint-api/kintai/unko-gaps?month=2025-02&driver_cd=1078',
+      '/restraint-api/wage-report?month=2025-02&source=gcp',
+    ])
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('異常あり')
+    // 全部やり直すボタンもある (前回の結果がある時の文言)
+    expect(buttonByText(w, '検知を全部やり直す').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('保存済みの結果を読めなくても画面は壊れず、検知は回せる', async () => {
+    const orig = (globalThis as { $fetch: (...a: unknown[]) => unknown }).$fetch
+    vi.stubGlobal('$fetch', vi.fn(async (url: string, opts: { method?: string } = {}) => {
+      if (url === '/restraint-api/litigation-checks' && (opts.method ?? 'GET') === 'GET') throw Object.assign(new Error('x'), { statusCode: 502 })
+      return orig(url, opts)
+    }))
+    const w = await mountAndOpen()
+    expect(w.find('[data-testid="litigation-errors-store-error"]').text()).toContain('保存済みの検知結果を読めませんでした')
+    expect(buttonByText(w, '検知を実行').attributes('disabled')).toBeUndefined()
     w.unmount()
   })
 })
