@@ -58,6 +58,7 @@ export default defineConfig({
         'src/gcp-day-summaries.ts',
         'src/dtako-day-events-lookup.ts',
         'src/dtako-day-operations-list.ts',
+        'src/onprem-month-operations.ts',
         'src/theearth-login-session.ts',
         'src/scrape-error-artifact.ts',
         'src/scrape-error-reader.ts',

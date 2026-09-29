@@ -8,7 +8,7 @@
  * | --- | --- | --- |
  * | `alcOps` alc の運行 | Y時間の勤務日 (JSON) を月に畳んだ日数 | `getYTimePreview` (区切り 1 つにつき 1 回) と出力タブの `empty` |
  * | `yTime` Y時間の欠け | 同じプレビューの警告 (Y時間に入らなかった運行) + ZIP を作った冊はテンプレに書けなかった日 | `getYTimePreview` (alcOps と同じ応答) / `POST /api/y-time-export` (出力タブ) |
- * | `unkoGaps` alc にあって勤怠に無い運行 | 受け側の分類をそのまま (勤怠側が 0 件なら照合先なし) | `GET /restraint-api/kintai/unko-gaps?month=&driver_cd=` |
+ * | `unkoGaps` alc にあってオンプレのデジタコに無い運行 | alc の運行とオンプレ `dtako_rows` の運行を、運行を始めた月・先頭 22 桁で突き合わせる | `getOperations` (alc、読取日で 2 か月) / `GET /restraint-api/kintai/onprem-month-operations?month=&driver_cd=` |
  * | `invariants` 最低賃金の不変条件 (条件1〜3) | relay が付ける `invariants` | `GET /restraint-api/wage-report?source=gcp&month=` |
  *
  * ## 判定は 4 つ — **取れなかったことを 0 件と同じ見た目にしない** (map skill「PR の基準」(7))
@@ -19,7 +19,6 @@
  * | `ok` | 異常なし (調べて、無かった) |
  * | `unknown` | 判定できない — 取りに行ったが取れなかった / 取れたが判断材料が欠けていた。`message` に理由 |
  * | `pending` | 未実行 — まだ取りに行っていない |
- * | `noBaseline` | 照合先なし — 突き合わせる相手 (GCP へ運んだ勤怠のうち運行NO 付きの、この乗務員の行) がその月 0 件。異常ではない。**2026-01 より前は誰も運んでいない** ので、「勤怠を GCP へ運ぶ」で入れれば照合できる |
  *
  * `unknown` と `pending` を分けるのは、「調べたが分からなかった」と「まだ調べていない」で
  * 次の一手が違うため (前者は理由を読む、後者はボタンを押す)。
@@ -28,15 +27,13 @@
  * wage-report を読むだけで、`restraint-wage.vue` の computed やタブは流用しない。
  */
 import type { LitigationOutputChunk, LitigationOutputResult } from './litigation-output'
-import type { KintaiUnkoGaps } from './kintai-unko-gaps'
-import { kintaiUnkoGapsReadability, parseKintaiUnkoGaps } from './kintai-unko-gaps'
 import type { WageInvariantCheck, WageReportResponse, WageReportRow } from './restraint-wage-view'
 import { fmtShiftOverlap, invariantRowStatus, nextYm } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
 import { csvCell } from './wage-range-view'
 
 export type LitigationCheckKey = 'alcOps' | 'yTime' | 'unkoGaps' | 'invariants'
-export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending' | 'noBaseline'
+export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending'
 
 /** 列の並び (表・CSV・印刷で共通) */
 export const LITIGATION_CHECK_KEYS: readonly LitigationCheckKey[] = ['alcOps', 'yTime', 'unkoGaps', 'invariants']
@@ -44,7 +41,7 @@ export const LITIGATION_CHECK_KEYS: readonly LitigationCheckKey[] = ['alcOps', '
 export const LITIGATION_CHECK_LABELS: Record<LitigationCheckKey, string> = {
   alcOps: 'alc の運行',
   yTime: 'Y時間の欠け',
-  unkoGaps: 'alc にあって勤怠に無い運行',
+  unkoGaps: 'alc にあってオンプレのデジタコに無い運行',
   invariants: '最低賃金の不変条件',
 }
 
@@ -53,7 +50,6 @@ export const LITIGATION_CHECK_STATE_LABELS: Record<LitigationCheckState, string>
   ok: '異常なし',
   unknown: '判定できない',
   pending: '未実行',
-  noBaseline: '照合先なし',
 }
 
 export interface LitigationCheckCell {
@@ -227,39 +223,54 @@ export function yTimeCell(month: string, result: LitigationOutputResult | null, 
   return fromOutput ?? fromPreview ?? { state: 'pending', message: '未実行 — 「検知を実行」で調べます' }
 }
 
-/** 「alc にあって勤怠に無い運行」の運行NOを何件まで文に並べるか */
+/** 「alc にあってオンプレのデジタコに無い運行」 / Y時間に入らなかった運行の運行NOを何件まで文に並べるか */
 const UNKO_NO_PREVIEW = 3
 
-export function unkoGapsCell(driverCd: string, entry: LitigationFetched<KintaiUnkoGaps> | undefined): LitigationCheckCell {
+/**
+ * alc とオンプレのデジタコ運行の突き合わせ 1 乗務員 × 1 月ぶん (どちらも先頭 22 桁・運行を始めた月で絞った一覧)。
+ *
+ * **照合先は `time_card_dtako` (タイムカードに紐付く勤務時間登録) ではなくオンプレの `dtako_rows`**
+ * — 前者は打刻しない乗務員 (営業所所属など) に無いのが正常で、デジタコの運行が揃っているかの
+ * 照合先にならない (1590 の 2023〜2025 がすべて「照合先なし」になっていた、2026-09-29)。
+ */
+export interface LitigationDtakoOps {
+  alc: string[]
+  onprem: string[]
+  /** オンプレの一覧が上流の上限で切れていた */
+  onpremTruncated: boolean
+}
+
+/** 運行NO の一覧から、運行を始めた月 (先頭 4 桁 `YYMM`) が `month` のものを先頭 22 桁にして返す (昇順・重複なし)。
+ * 2 名乗務の相方 (23 桁目だけ違う) は 1 つにまとまる。 */
+export function opeNosStartedInMonth(unkoNos: readonly string[], month: string): string[] {
+  const prefix = `${month.slice(2, 4)}${month.slice(5, 7)}`
+  return [...new Set(unkoNos.filter(u => /^\d{22,23}$/.test(u) && u.startsWith(prefix)).map(u => u.slice(0, 22)))].sort()
+}
+
+/**
+ * alc の運行を読取日で引く期間。**運行を始めた月の初日〜翌月末** — 読取日は帰庫の後
+ * (長距離は運行開始から 10 日以上後) なので、始めた月だけで引くと月末の運行を取りこぼす。
+ * 引いたあと [`opeNosStartedInMonth`] で始めた月に絞る。
+ */
+export function litigationAlcReadingRange(month: string): { from: string, to: string } {
+  return { from: `${month}-01`, to: litigationMonthBounds(nextYm(month)).to }
+}
+
+export function unkoGapsCell(entry: LitigationFetched<LitigationDtakoOps> | undefined): LitigationCheckCell {
   if (!entry) return { state: 'pending', message: '未実行 — 「検知を実行」で調べます' }
   if (!entry.ok) return { state: 'unknown', message: entry.reason }
-  const g = entry.value
-  const readability = kintaiUnkoGapsReadability(g)
-  if (readability === 'etags_unavailable') {
-    return { state: 'unknown', message: 'GCP 側の運行一覧が引けていない — 0 件とは言えない' }
+  const { alc, onprem, onpremTruncated } = entry.value
+  const onpremSet = new Set(onprem)
+  const missing = alc.filter(u => !onpremSet.has(u))
+  if (missing.length > 0) {
+    const shown = missing.slice(0, UNKO_NO_PREVIEW).join(', ')
+    const more = missing.length > UNKO_NO_PREVIEW ? ' ほか' : ''
+    return { state: 'ng', message: `オンプレのデジタコに無い運行 ${missing.length} 件: ${shown}${more}` }
   }
-  if (readability === 'driver_cds_unavailable') {
-    return { state: 'unknown', message: 'alc が乗務員CD を返していない — 0 件とは言えない' }
+  if (onpremTruncated) {
+    return { state: 'unknown', message: 'オンプレの運行一覧が途中で切れている — 無いとは言えない' }
   }
-  // 乗務員CD 指定で呼ぶと受け側の「勤怠側にも運行がある月だけ」の絞り込みが外れるので、
-  // 勤怠側が 0 件の月は alc の運行が全部「勤怠に無い」に数えられる。異常とは言わずに分ける
-  if (g.onpremOperationsInMonth === 0) {
-    return { state: 'noBaseline', message: 'この月のこの乗務員の運行NO 付きの勤怠が GCP に無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で運べる (2026-01 より前は未運搬)。運んでも残るなら、この乗務員は運行NO 付きの打刻が無い (営業所所属など)' }
-  }
-  const mine = g.drivers.find(d => d.driverCd === driverCd)
-  if (mine && mine.unkoNos.length > 0) {
-    const shown = mine.unkoNos.slice(0, UNKO_NO_PREVIEW).join(', ')
-    const more = mine.unkoNos.length > UNKO_NO_PREVIEW ? ' ほか' : ''
-    const count = mine.truncated ? `${mine.unkoNos.length} 件以上` : `${mine.unkoNos.length} 件`
-    return { state: 'ng', message: `勤怠に無い運行 ${count}: ${shown}${more}` }
-  }
-  if (g.driversTruncated) {
-    return { state: 'unknown', message: '乗務員の一覧が途中で切れていて、この乗務員が入っていない' }
-  }
-  const unknownDriver = g.unknownDriverUnkoNos.length > 0
-    ? ` (乗務員が分からない運行 ${g.unknownDriverUnkoNos.length} 件はこの判定に入らない)`
-    : ''
-  return { state: 'ok', message: `勤怠に無い運行なし${unknownDriver}` }
+  return { state: 'ok', message: `オンプレのデジタコに無い運行なし (alc ${alc.length} 件・オンプレ ${onprem.length} 件)` }
 }
 
 /** 崩れている条件を 1 文に並べる (`ng` のときだけ呼ぶ)。 */
@@ -309,7 +320,7 @@ export interface LitigationErrorInput {
   /** キー `乗務員CD|YYYY-MM` */
   alcOps: ReadonlyMap<string, LitigationAlcOpsEntry>
   /** キー `乗務員CD|YYYY-MM` */
-  unkoGaps: ReadonlyMap<string, LitigationFetched<KintaiUnkoGaps>>
+  unkoGaps: ReadonlyMap<string, LitigationFetched<LitigationDtakoOps>>
   /** キー `乗務員CD|YYYY-MM` (会社全体を 1 回で読み、乗務員ごとに [`reduceWageReportForDriver`] で切り出す) */
   wageReports: ReadonlyMap<string, LitigationFetched<WageReportResponse>>
 }
@@ -331,7 +342,7 @@ export function buildLitigationErrorRows(input: LitigationErrorInput): Litigatio
       const cells: Record<LitigationCheckKey, LitigationCheckCell> = {
         alcOps: alcOpsCell(input.alcOps.get(key), chunkResult),
         yTime: yTimeCell(month, chunkResult, input.alcOps.get(key)),
-        unkoGaps: unkoGapsCell(driverCd, input.unkoGaps.get(key)),
+        unkoGaps: unkoGapsCell(input.unkoGaps.get(key)),
         invariants: invariantsCell(driverCd, input.wageReports.get(key)),
       }
       out.push({ driverCd, month, cells, canImport: cells.alcOps.state === 'ng' })
@@ -344,7 +355,7 @@ export function buildLitigationErrorRows(input: LitigationErrorInput): Litigatio
 export function countLitigationErrorCells(
   rows: readonly LitigationErrorRow[],
 ): Record<LitigationCheckKey, Record<LitigationCheckState, number>> {
-  const zero = (): Record<LitigationCheckState, number> => ({ ng: 0, ok: 0, unknown: 0, pending: 0, noBaseline: 0 })
+  const zero = (): Record<LitigationCheckState, number> => ({ ng: 0, ok: 0, unknown: 0, pending: 0 })
   const out = { alcOps: zero(), yTime: zero(), unkoGaps: zero(), invariants: zero() }
   for (const r of rows) {
     for (const k of LITIGATION_CHECK_KEYS) out[k][r.cells[k].state]++
@@ -352,7 +363,7 @@ export function countLitigationErrorCells(
   return out
 }
 
-/** 1 つでも異常あり / 判定できないがある行か (表の「異常あり・判定できないがある行だけ」で絞る。照合先なしは入れない) */
+/** 1 つでも異常あり / 判定できないがある行か (表の「異常あり・判定できないがある行だけ」で絞る) */
 export function litigationRowNeedsAttention(row: LitigationErrorRow): boolean {
   return LITIGATION_CHECK_KEYS.some(k => row.cells[k].state === 'ng' || row.cells[k].state === 'unknown')
 }
@@ -460,70 +471,6 @@ export function classifyLitigationImport(httpStatus: number | null, body: unknow
   return { kind: 'error', message: reason }
 }
 
-// ---- 勤怠を GCP へ運ぶ (照合先なしの月) ----
-
-/**
- * 照合先なし (`unkoGaps` が `noBaseline`) の乗務員 × 月。月の古い順、同じ月は乗務員の順。
- * 運ぶ口 (`POST /restraint-api/kintai/refresh/timecard?driver_cd=`) は**その乗務員ぶんだけ**
- * 運ぶので、乗務員 × 月ごとに 1 回呼ぶ (全乗務員を運ぶと 1 か月数秒〜十数秒かかり、
- * 他の乗務員の畳み直しまで走る)。
- */
-export function litigationNoBaselineTargets(rows: readonly LitigationErrorRow[]): { driverCd: string, month: string }[] {
-  return rows
-    .filter(r => r.cells.unkoGaps.state === 'noBaseline')
-    .map(r => ({ driverCd: r.driverCd, month: r.month }))
-    .sort((a, b) => (a.month === b.month ? a.driverCd.localeCompare(b.driverCd, undefined, { numeric: true }) : a.month < b.month ? -1 : 1))
-}
-
-/** `refresh/timecard` の応答 1 回ぶん (`kintai-diff-view.ts` の `parseKintaiWindowReport` で読んだもの) の要点 */
-export interface LitigationTimecardPushReport {
-  events: number
-  /** 運行NO の種類数。古い relay は null */
-  operations: number | null
-  daysWritten: number
-  misplaced: number
-  unknownStates: readonly string[]
-}
-
-export interface LitigationTimecardPushOutcome {
-  /** `noOperations` = 打刻はあるが運行NO 付きの行が無い (運んでも照合先にならない) */
-  kind: 'ok' | 'noOperations' | 'error'
-  message: string
-}
-
-/**
- * 1 乗務員 × 1 月ぶんの運び結果を 1 文にする。`reason` は通信・HTTP 失敗のとき呼び出し側が
- * 組んだ 1 文 (`report` は null)。書き込みは受け側の日単位署名が守るので、`daysWritten: 0` は
- * 「既に運んである」であって「動かなかった」ではない。`misplaced` / `unknownStates` は運び方が
- * 壊れている印なので失敗として出す (MCP `run_kintai_relay` の説明と同じ読み方)。
- *
- * **照合先になるのは運行NO 付きの行 (勤務時間登録) だけ**なので、打刻 (始業/終業) しか無い
- * 乗務員は運んでも照合先なしのまま — 営業所所属など打刻しない乗務員がこうなる (1590 の
- * 2023〜2025 で実測、2026-09-29)。これを「運んだ」と同じ見た目にしない。
- */
-export function classifyLitigationTimecardPush(
-  report: LitigationTimecardPushReport | null,
-  reason: string,
-): LitigationTimecardPushOutcome {
-  if (!report) return { kind: 'error', message: reason }
-  if (report.misplaced > 0) return { kind: 'error', message: `運び方が崩れた行 ${report.misplaced} 件 (misplaced)` }
-  if (report.unknownStates.length > 0) {
-    return { kind: 'error', message: `受け側に無い打刻の種類: ${report.unknownStates.join(', ')}` }
-  }
-  if (report.events === 0) {
-    return { kind: 'noOperations', message: 'オンプレにこの乗務員のこの月の打刻が無い — この月は照合できない' }
-  }
-  if (report.operations === 0) {
-    return {
-      kind: 'noOperations',
-      message: `打刻 ${report.events} 件はあるが運行NO 付き (勤務時間登録) が無い — 営業所所属など打刻しない乗務員はこうなり、この月は照合できない`,
-    }
-  }
-  const ops = report.operations === null ? '' : `運行 ${report.operations} 件、`
-  if (report.daysWritten === 0) return { kind: 'ok', message: `変わった日なし (既に運んである。${ops}打刻 ${report.events} 件)` }
-  return { kind: 'ok', message: `${report.daysWritten} 日ぶん運んだ (${ops}打刻 ${report.events} 件)` }
-}
-
 // ---- 検知結果の保存 (`GET/PUT /restraint-api/litigation-checks`) ----
 //
 // 検知は 1 案件で 10〜40 分かかる (最低賃金の不変条件が 1 か月 15〜64 秒) ので、取れた結果を
@@ -540,9 +487,6 @@ export interface LitigationStoredItem {
   payload: unknown
 }
 
-/** 勤怠に無い運行は受け側の応答をそのまま残し、読み戻すときに `parseKintaiUnkoGaps` を通す
- * (読み方が変わっても保存し直さずに済む)。 */
-export type LitigationStoredUnkoGaps = { ok: true, raw: unknown } | { ok: false, reason: string }
 
 /**
  * 会社全体の wage-report から 1 乗務員ぶんを切り出す (保存する大きさを抑える)。
@@ -572,7 +516,7 @@ export function reduceWageReportForDriver(
 
 export interface LitigationRestoredChecks {
   alcOps: Map<string, LitigationAlcOpsEntry>
-  unkoGaps: Map<string, LitigationFetched<KintaiUnkoGaps>>
+  unkoGaps: Map<string, LitigationFetched<LitigationDtakoOps>>
   wageReports: Map<string, LitigationFetched<WageReportResponse>>
   /** キー `種類|乗務員CD|YYYY-MM` ([`litigationCheckedAtKey`]) → 保存時刻 (ISO) */
   checkedAt: Map<string, string>
@@ -591,8 +535,17 @@ function restoreAlcOps(p: Record<string, unknown>): LitigationAlcOpsEntry | null
   return typeof p.reason === 'string' ? { ok: false, notFound: p.notFound === true, reason: p.reason } : null
 }
 
-function restoreUnkoGaps(p: Record<string, unknown>): LitigationFetched<KintaiUnkoGaps> | null {
-  if (p.ok === true) return { ok: true, value: parseKintaiUnkoGaps(p.raw) }
+const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string')
+
+/** 勤怠 (time_card_dtako) と突き合わせていた頃の保存 (`{ok:true, raw}`) は形が違うので捨てる
+ * (その行は「未実行」に戻り、「続きから」で取り直される)。 */
+function restoreUnkoGaps(p: Record<string, unknown>): LitigationFetched<LitigationDtakoOps> | null {
+  if (p.ok === true) {
+    const v = p.value
+    return isRecord(v) && isStringArray(v.alc) && isStringArray(v.onprem)
+      ? { ok: true, value: { alc: v.alc, onprem: v.onprem, onpremTruncated: v.onpremTruncated === true } }
+      : null
+  }
   return typeof p.reason === 'string' ? { ok: false, reason: p.reason } : null
 }
 

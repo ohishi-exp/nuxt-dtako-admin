@@ -6,7 +6,7 @@
  * 開き直せる土台。案件を「開く」と詳細にタブが出る。「出力」タブ (#c1133-2) は
  * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめる。
  * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
- * Y時間の欠け / alc にあって勤怠に無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
+ * Y時間の欠け / alc にあってオンプレのデジタコに無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
  * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
  * 1 つの紙面にする。変更記録のタブは後続 PR (#c1133-6) が足す。
  *
@@ -20,7 +20,7 @@
  */
 import JSZip from 'jszip'
 import type { Driver } from '~/types'
-import { getDrivers, getYTimePreview, getDtakoOperationChanges, currentAccessToken, getViewerComps } from '~/utils/api'
+import { getDrivers, getYTimePreview, getOperations, getDtakoOperationChanges, currentAccessToken, getViewerComps } from '~/utils/api'
 import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
@@ -37,7 +37,6 @@ import {
 import {
   buildLitigationErrorRows,
   classifyLitigationImport,
-  classifyLitigationTimecardPush,
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
   foldYTimeDroppedByMonth,
@@ -48,7 +47,8 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
-  litigationNoBaselineTargets,
+  litigationAlcReadingRange,
+  opeNosStartedInMonth,
   litigationCheckedAtKey,
   litigationNeedsFetch,
   litigationRowCheckedAt,
@@ -65,11 +65,8 @@ import {
   type LitigationFetched,
   type LitigationImportOutcome,
   type LitigationStoredItem,
-  type LitigationStoredUnkoGaps,
-  type LitigationTimecardPushOutcome,
+  type LitigationDtakoOps,
 } from '~/utils/litigation-errors'
-import { parseKintaiWindowReport } from '~/utils/kintai-diff-view'
-import { parseKintaiUnkoGaps, type KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
 import {
   alcRecordingSinceNotice,
   buildAlcChangeRows,
@@ -460,7 +457,7 @@ const caseMonths = computed<string[]>(() =>
 /** キー `乗務員CD|YYYY-MM` */
 const errAlcOps = ref(new Map<string, LitigationAlcOpsEntry>())
 /** キー `乗務員CD|YYYY-MM` */
-const errUnkoGaps = ref(new Map<string, LitigationFetched<KintaiUnkoGaps>>())
+const errUnkoGaps = ref(new Map<string, LitigationFetched<LitigationDtakoOps>>())
 /** キー `乗務員CD|YYYY-MM` (会社全体を 1 回で読み、乗務員ごとに切り出す) */
 const errWageReports = ref(new Map<string, LitigationFetched<WageReportResponse>>())
 /** 保存時刻 (キー `種類|乗務員CD|YYYY-MM`)。relay の D1 に残した結果を開き直したときに出す */
@@ -485,7 +482,6 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
   errorsFinished.value = false
   errorsProgress.value = null
   importResults.value = new Map()
-  timecardPushResults.value = []
   if (openCase.value) loadStoredChecks(errorsEpoch, openCase.value.caseId)
 })
 
@@ -566,25 +562,43 @@ async function loadAlcOps(epoch: number, driverCd: string, from: string, to: str
   await saveChecks(epoch, entries.map(([m, entry]) => ({ kind: 'alcOps', key: litigationDriverMonthKey(driverCd, m), payload: entry })))
 }
 
+/** alc の運行 (読取日で運行を始めた月〜翌月末を引く)。ページを回し切る (1 ページ最大 200 件)。 */
+async function fetchAlcUnkoNos(driverCd: string, month: string): Promise<string[]> {
+  const { from, to } = litigationAlcReadingRange(month)
+  const out: string[] = []
+  // 安全弁: 応答の total が壊れていても回り続けない (200 件 × 20 = 4,000 件。1 乗務員 2 か月の実数を大きく超える)
+  for (let page = 1; page <= 20; page++) {
+    const res = await getOperations({ driver_cd: driverCd, date_from: from, date_to: to, page, per_page: 200 })
+    out.push(...res.operations.map(o => o.unko_no))
+    if (res.operations.length === 0 || page * res.per_page >= res.total) break
+  }
+  return out
+}
+
+/** alc にあってオンプレのデジタコに無い運行。alc とオンプレ `dtako_rows` の運行を、運行を始めた月・先頭 22 桁で突き合わせる。 */
 async function loadUnkoGaps(epoch: number, driverCd: string, month: string) {
-  let entry: LitigationFetched<KintaiUnkoGaps>
-  let stored: LitigationStoredUnkoGaps
+  let entry: LitigationFetched<LitigationDtakoOps>
   try {
-    const res = await $fetch<unknown>('/restraint-api/kintai/unko-gaps', {
-      headers: authHeaders(),
-      query: { month, driver_cd: driverCd },
-    })
-    entry = { ok: true, value: parseKintaiUnkoGaps(res) }
-    stored = { ok: true, raw: res }
+    const [alcUnkoNos, onprem] = await Promise.all([
+      fetchAlcUnkoNos(driverCd, month),
+      $fetch<{ ope_nos?: unknown, truncated?: unknown }>('/restraint-api/kintai/onprem-month-operations', {
+        headers: authHeaders(),
+        query: { month, driver_cd: driverCd },
+      }),
+    ])
+    const onpremOpeNos = Array.isArray(onprem?.ope_nos) ? onprem.ope_nos.filter((u): u is string => typeof u === 'string') : []
+    entry = {
+      ok: true,
+      value: { alc: opeNosStartedInMonth(alcUnkoNos, month), onprem: onpremOpeNos, onpremTruncated: onprem?.truncated === true },
+    }
   }
   catch (e) {
     entry = { ok: false, reason: describeCaughtError(e, ERRORS_RETRY) }
-    stored = entry
   }
   if (epoch !== errorsEpoch) return
   const key = litigationDriverMonthKey(driverCd, month)
   errUnkoGaps.value.set(key, entry)
-  await saveChecks(epoch, [{ kind: 'unkoGaps', key, payload: stored }])
+  await saveChecks(epoch, [{ kind: 'unkoGaps', key, payload: entry }])
 }
 
 /** 最低賃金の不変条件は GCP の拘束で計算した wage-report にだけ付く (Refs #1123)。
@@ -634,7 +648,7 @@ function buildErrorSteps(onlyMissing: boolean): ErrorCheckStep[] {
     ...target.driverCds.flatMap(cd => months
       .filter(m => need(errUnkoGaps.value.get(key(cd, m))))
       .map(m => ({
-        label: `勤怠に無い運行 ${cd} ${m}`,
+        label: `オンプレのデジタコとの突き合わせ ${cd} ${m}`,
         run: (epoch: number) => loadUnkoGaps(epoch, cd, m),
       }))),
     ...months
@@ -706,7 +720,7 @@ async function postImport(driverCd: string, range: { from: string, to: string })
 
 /**
  * 運行月とその翌月 (読取日) を **1 か月ずつ直列に** 取り込む (relay の期間上限 31 日、
- * theearth のセッションロック)。1 本でも取り込めたら、その行の alc の運行と「勤怠に無い運行」を
+ * theearth のセッションロック)。1 本でも取り込めたら、その行の alc の運行と「オンプレのデジタコに無い運行」を
  * 読み直す。**取り込み直後は CSV 分割が終わるまで運行が見えないことがある**ので、0 件のまま
  * でも取り込みが失敗したとは限らない (画面の注記で伝える)。
  */
@@ -733,54 +747,6 @@ async function importMonth(row: LitigationErrorRow) {
   }
   finally {
     importingKey.value = null
-  }
-}
-
-// --- 勤怠を GCP へ運ぶ (照合先なしの月): オンプレの打刻を乗務員 × 月ごとに GCP へ運ぶ ---
-// restraint-wage の「① 打刻の運び直し」と同じ口 (`refresh/timecard`) に `driver_cd` を付けて、
-// **案件の乗務員ぶんだけ**運ぶ (受け側は名乗った乗務員にしか触らない)。1 回に 1 か月
-// (12 か月まとめると受け側が 413、2026-09-29 実測)。押し直しても変わった日しか書かない。
-// 受け側は運んだ乗務員を畳み直す (day_summaries が変わりうる — 最低賃金の不変条件は取り直しが要る)。
-const timecardPushing = ref(false)
-const timecardPushResults = ref<{ driverCd: string, month: string, outcome: LitigationTimecardPushOutcome }[]>([])
-/** 運んでも照合先にならないと分かった乗務員 × 月 (運行NO 付きの打刻が無い) は、押し直しても同じなので外す */
-const noBaselineTargets = computed(() => {
-  const hopeless = new Set(timecardPushResults.value.filter(r => r.outcome.kind === 'noOperations').map(r => `${r.driverCd}|${r.month}`))
-  return litigationNoBaselineTargets(errorRows.value).filter(t => !hopeless.has(`${t.driverCd}|${t.month}`))
-})
-const TIMECARD_PUSH_RETRY = '「勤怠を GCP へ運ぶ」を押してやり直してください'
-
-async function pushTimecard(driverCd: string, month: string): Promise<LitigationTimecardPushOutcome> {
-  try {
-    const res = await $fetch<unknown>('/restraint-api/kintai/refresh/timecard', {
-      method: 'POST',
-      headers: authHeaders(),
-      query: { month, month_count: 1, driver_cd: driverCd, apply: true },
-    })
-    return classifyLitigationTimecardPush(parseKintaiWindowReport(res), '応答を読めませんでした')
-  }
-  catch (e) {
-    return classifyLitigationTimecardPush(null, describeCaughtError(e, TIMECARD_PUSH_RETRY))
-  }
-}
-
-/** 照合先なしの乗務員 × 月を 1 つずつ直列に運び、運べたものは「勤怠に無い運行」を読み直す。 */
-async function pushNoBaselineMonths() {
-  if (!openCase.value || timecardPushing.value) return
-  const epoch = errorsEpoch
-  const targets = noBaselineTargets.value
-  timecardPushing.value = true
-  timecardPushResults.value = []
-  try {
-    for (const { driverCd, month } of targets) {
-      const outcome = await pushTimecard(driverCd, month)
-      if (epoch !== errorsEpoch) return
-      timecardPushResults.value = [...timecardPushResults.value, { driverCd, month, outcome }]
-      if (outcome.kind === 'ok') await loadUnkoGaps(epoch, driverCd, month)
-    }
-  }
-  finally {
-    timecardPushing.value = false
   }
 }
 
@@ -928,7 +894,6 @@ const CHECK_STATE_CLASS: Record<LitigationCheckState, string> = {
   ok: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
   unknown: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
   pending: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-  noBaseline: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
 }
 const IMPORT_KIND_CLASS: Record<LitigationImportOutcome['kind'], string> = {
   ok: 'text-green-700 dark:text-green-400',
@@ -1240,8 +1205,7 @@ function fmtDateTime(iso: string): string {
             乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・alc にあるのに勤怠 (オンプレから運んだ運行) に無い運行があるか・
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
-            「照合先なし」はその月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない月です (異常とは数えません)。
-            2026-01 より前の勤怠は GCP へ運んでいないので、その期間は全員が照合先なしになります。「勤怠を GCP へ運ぶ」で照合先なしの月を、案件の乗務員ぶんだけオンプレから運べます。運んでも照合先なしのまま残る乗務員は、運行NO 付きの打刻 (勤務時間登録) が無い乗務員です (営業所所属など打刻しない乗務員)。
+            「alc にあってオンプレのデジタコに無い運行」は、alc の運行とオンプレのデジタコ運行 (dtako_rows) を、運行を始めた月・運行NO の先頭 22 桁で突き合わせます (タイムカードの有無に関係なく照合できます)。
             Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで、最低賃金チェックの保存はしません)。
             検知の結果は案件ごとに保存し、開き直すと前回の結果を出します (月の下の時刻がその行の材料を取った時刻)。「続きから」は、まだ取っていない・取れなかった分だけを回します。
           </p>
@@ -1251,7 +1215,7 @@ function fmtDateTime(iso: string): string {
               icon="i-lucide-search-check"
               :label="errCheckedAt.size > 0 ? '検知を全部やり直す' : '検知を実行'"
               :loading="errorsRunning"
-              :disabled="errorsRunning || errorsStoreLoading || importingKey !== null || timecardPushing || errorRows.length === 0"
+              :disabled="errorsRunning || errorsStoreLoading || importingKey !== null || errorRows.length === 0"
               data-testid="litigation-errors-run"
               @click="runErrorChecks(false)"
             />
@@ -1260,21 +1224,11 @@ function fmtDateTime(iso: string): string {
               icon="i-lucide-play"
               :label="`続きから (${missingErrorSteps} 件)`"
               variant="soft"
-              :disabled="errorsRunning || errorsStoreLoading || importingKey !== null || timecardPushing || missingErrorSteps === 0"
+              :disabled="errorsRunning || errorsStoreLoading || importingKey !== null || missingErrorSteps === 0"
               data-testid="litigation-errors-resume"
               @click="runErrorChecks(true)"
             />
             <span v-if="errorsStoreLoading" class="text-sm text-gray-500" data-testid="litigation-errors-store-loading">保存済みの結果を読み込み中…</span>
-            <UButton
-              v-if="noBaselineTargets.length > 0 || timecardPushResults.length > 0"
-              icon="i-lucide-database-zap"
-              :label="`勤怠を GCP へ運ぶ (照合先なし ${noBaselineTargets.length} 件)`"
-              variant="soft"
-              :loading="timecardPushing"
-              :disabled="timecardPushing || errorsRunning || importingKey !== null || noBaselineTargets.length === 0"
-              data-testid="litigation-timecard-push"
-              @click="pushNoBaselineMonths"
-            />
             <span v-if="errorsProgress" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-errors-progress">
               {{ errorsProgress.done }} / {{ errorsProgress.total }}
               <template v-if="errorsRunning && errorsProgress.label">— {{ errorsProgress.label }}</template>
@@ -1288,19 +1242,9 @@ function fmtDateTime(iso: string): string {
 
           <div v-if="errorsStoreError" class="text-xs text-red-600 dark:text-red-400" data-testid="litigation-errors-store-error">{{ errorsStoreError }}</div>
 
-          <div v-if="timecardPushResults.length > 0" class="text-xs space-y-0.5" data-testid="litigation-timecard-push-results">
-            <div
-              v-for="r in timecardPushResults"
-              :key="`${r.driverCd}|${r.month}`"
-              :class="r.outcome.kind === 'ok' ? 'text-gray-600 dark:text-gray-400' : r.outcome.kind === 'noOperations' ? 'text-amber-700 dark:text-amber-400' : 'text-red-600 dark:text-red-400'"
-            >
-              {{ r.month }} {{ driverLabel(r.driverCd) }} ({{ r.driverCd }}): {{ r.outcome.message }}
-            </div>
-          </div>
-
           <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-errors-summary">
             <span v-for="k in LITIGATION_CHECK_KEYS" :key="k">
-              {{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }} / 異常なし {{ errorCounts[k].ok }} / 判定できない {{ errorCounts[k].unknown }} / 未実行 {{ errorCounts[k].pending }}<template v-if="errorCounts[k].noBaseline > 0"> / 照合先なし {{ errorCounts[k].noBaseline }}</template>
+              {{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }} / 異常なし {{ errorCounts[k].ok }} / 判定できない {{ errorCounts[k].unknown }} / 未実行 {{ errorCounts[k].pending }}
             </span>
           </div>
 
@@ -1347,7 +1291,7 @@ function fmtDateTime(iso: string): string {
                       size="xs"
                       variant="soft"
                       :loading="importingKey === `${row.driverCd}|${row.month}`"
-                      :disabled="importingKey !== null || errorsRunning || timecardPushing"
+                      :disabled="importingKey !== null || errorsRunning"
                       data-testid="litigation-import"
                       @click="importMonth(row)"
                     />
@@ -1483,7 +1427,7 @@ function fmtDateTime(iso: string): string {
 
         <h2 class="font-bold mt-2">エラー</h2>
         <div class="litigation-print-meta">
-          <template v-for="(k, i) in LITIGATION_CHECK_KEYS" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }}・異常なし {{ errorCounts[k].ok }}・判定できない {{ errorCounts[k].unknown }}・未実行 {{ errorCounts[k].pending }}<template v-if="errorCounts[k].noBaseline > 0">・照合先なし {{ errorCounts[k].noBaseline }}</template></template>
+          <template v-for="(k, i) in LITIGATION_CHECK_KEYS" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }}・異常なし {{ errorCounts[k].ok }}・判定できない {{ errorCounts[k].unknown }}・未実行 {{ errorCounts[k].pending }}</template>
         </div>
         <table class="litigation-print-table">
           <thead>
