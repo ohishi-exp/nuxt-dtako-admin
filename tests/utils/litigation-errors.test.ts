@@ -10,7 +10,6 @@ import {
   alcOpsCell,
   buildLitigationErrorRows,
   classifyLitigationImport,
-  classifyLitigationTimecardPush,
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
   foldYTimeDroppedByMonth,
@@ -22,7 +21,8 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
-  litigationNoBaselineTargets,
+  litigationAlcReadingRange,
+  opeNosStartedInMonth,
   litigationNeedsFetch,
   litigationRowCheckedAt,
   litigationRowNeedsAttention,
@@ -32,10 +32,10 @@ import {
   yTimeCell,
   type LitigationAlcOpsEntry,
   type LitigationErrorInput,
+  type LitigationDtakoOps,
   type LitigationFetched,
 } from '~/utils/litigation-errors'
 import type { LitigationOutputChunk, LitigationOutputResult } from '~/utils/litigation-output'
-import { parseKintaiUnkoGaps, type KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
 import type { WageInvariantCheck, WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
 
 function result(over: Partial<LitigationOutputResult> = {}): LitigationOutputResult {
@@ -54,11 +54,8 @@ function result(over: Partial<LitigationOutputResult> = {}): LitigationOutputRes
   }
 }
 
-function gaps(raw: Record<string, unknown>): LitigationFetched<KintaiUnkoGaps> {
-  return {
-    ok: true,
-    value: parseKintaiUnkoGaps({ gcp_etags_available: true, driver_cds_available: true, drivers: [], ...raw }),
-  }
+function dtako(alc: string[], onprem: string[], onpremTruncated = false): LitigationFetched<LitigationDtakoOps> {
+  return { ok: true, value: { alc, onprem, onpremTruncated } }
 }
 
 const OK_INV: WageInvariantCheck = {
@@ -224,52 +221,40 @@ describe('yTimeCell (Y時間の欠け)', () => {
   })
 })
 
-describe('unkoGapsCell (alc にあって勤怠に無い運行)', () => {
-  it('未実行 / 取れなかった', () => {
-    expect(unkoGapsCell('1078', undefined).state).toBe('pending')
-    expect(unkoGapsCell('1078', { ok: false, reason: '502 …' })).toEqual({ state: 'unknown', message: '502 …' })
+describe('unkoGapsCell (alc にあってオンプレのデジタコに無い運行)', () => {
+  it('未実行・取れなかったは異常なしにしない', () => {
+    expect(unkoGapsCell(undefined).state).toBe('pending')
+    expect(unkoGapsCell({ ok: false, reason: '502 …' })).toEqual({ state: 'unknown', message: '502 …' })
   })
 
-  it('★ gcp_etags_available / driver_cds_available が false なら 0 件と言わず判定できない', () => {
-    expect(unkoGapsCell('1078', gaps({ gcp_etags_available: false })).message).toBe('GCP 側の運行一覧が引けていない — 0 件とは言えない')
-    expect(unkoGapsCell('1078', gaps({ driver_cds_available: false })).message).toBe('alc が乗務員CD を返していない — 0 件とは言えない')
-    expect(unkoGapsCell('1078', gaps({ driver_cds_available: false })).state).toBe('unknown')
+  it('★ alc にあってオンプレに無い運行を異常ありにする (3 件まで並べる)', () => {
+    const alc = ['a', 'b', 'c', 'd', 'e']
+    expect(unkoGapsCell(dtako(alc, ['e']))).toEqual({ state: 'ng', message: 'オンプレのデジタコに無い運行 4 件: a, b, c ほか' })
+    expect(unkoGapsCell(dtako(['a', 'b'], ['b']))).toEqual({ state: 'ng', message: 'オンプレのデジタコに無い運行 1 件: a' })
   })
 
-  it('その乗務員に勤怠に無い運行があれば異常あり (3 件まで並べる、切り詰めは「以上」)', () => {
-    const g = gaps({ drivers: [{ driver_cd: '1078', unko_nos: ['a', 'b', 'c', 'd'], truncated: true }] })
-    expect(unkoGapsCell('1078', g)).toEqual({ state: 'ng', message: '勤怠に無い運行 4 件以上: a, b, c ほか' })
-    const g2 = gaps({ drivers: [{ driver_cd: 1078, unko_nos: ['a'] }] })
-    expect(unkoGapsCell('1078', g2)).toEqual({ state: 'ng', message: '勤怠に無い運行 1 件: a' })
+  it('★ 全部揃っていれば異常なし (オンプレにだけある運行は数えない)。タイムカードの有無は関係ない', () => {
+    // 1590 の 2023-06 の形: alc 7 件がオンプレに全部あり、オンプレには 5/29 出発の運行も (月で絞る前の話なのでここでは 8 件)
+    expect(unkoGapsCell(dtako(['a', 'b'], ['a', 'b', 'x']))).toEqual({ state: 'ok', message: 'オンプレのデジタコに無い運行なし (alc 2 件・オンプレ 3 件)' })
+    expect(unkoGapsCell(dtako([], []))).toEqual({ state: 'ok', message: 'オンプレのデジタコに無い運行なし (alc 0 件・オンプレ 0 件)' })
   })
 
-  it('他の乗務員の分だけなら異常なし。乗務員不明の運行は判定に入らないと添える', () => {
-    const g = gaps({ drivers: [{ driver_cd: '9999', unko_nos: ['x'] }, { driver_cd: '1078', unko_nos: [] }] })
-    expect(unkoGapsCell('1078', g)).toEqual({ state: 'ok', message: '勤怠に無い運行なし' })
-    const g2 = gaps({ unknown_driver_unko_nos: ['y', 'z'] })
-    expect(unkoGapsCell('1078', g2)).toEqual({ state: 'ok', message: '勤怠に無い運行なし (乗務員が分からない運行 2 件はこの判定に入らない)' })
+  it('オンプレの一覧が切れていて全部見つかったとは言えないなら判定できない (見つからない分は異常ありが優先)', () => {
+    expect(unkoGapsCell(dtako(['a'], ['a'], true)).state).toBe('unknown')
+    expect(unkoGapsCell(dtako(['a', 'z'], ['a'], true)).state).toBe('ng')
+  })
+})
+
+describe('opeNosStartedInMonth / litigationAlcReadingRange', () => {
+  it('運行を始めた月のものだけを 22 桁にし、2 名乗務の相方は 1 つにまとめる', () => {
+    expect(opeNosStartedInMonth([
+      '2306130752470000003834', '23061307524700000038342', '2305291229130000004010', '2307010000000000004010', 'x', '2306060955130000004010',
+    ], '2023-06')).toEqual(['2306060955130000004010', '2306130752470000003834'])
   })
 
-  it('★ 勤怠側にこの乗務員の運行が 0 件の月は、alc の運行が全部並んでも異常ありにせず照合先なし', () => {
-    const g = gaps({ driver_cd: 1590, onprem_operations_in_month: 0, drivers: [{ driver_cd: '1590', unko_nos: ['a', 'b'] }] })
-    expect(unkoGapsCell('1590', g)).toEqual({
-      state: 'noBaseline',
-      message: 'この月のこの乗務員の運行NO 付きの勤怠が GCP に無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で運べる (2026-01 より前は未運搬)。運んでも残るなら、この乗務員は運行NO 付きの打刻が無い (営業所所属など)',
-    })
-  })
-
-  it('陰性対照: 勤怠側に 1 件以上あれば従来どおり異常あり / 件数が無い (旧 rust) も従来どおり', () => {
-    const drivers = [{ driver_cd: '1078', unko_nos: ['a'] }]
-    expect(unkoGapsCell('1078', gaps({ onprem_operations_in_month: 3, drivers })).state).toBe('ng')
-    expect(unkoGapsCell('1078', gaps({ drivers })).state).toBe('ng')
-  })
-
-  it('★ 照合先なしでも、GCP 側の運行一覧が引けていなければ判定できないが優先', () => {
-    expect(unkoGapsCell('1590', gaps({ onprem_operations_in_month: 0, gcp_etags_available: false })).state).toBe('unknown')
-  })
-
-  it('乗務員の一覧が切れていてこの乗務員が居なければ判定できない', () => {
-    expect(unkoGapsCell('1078', gaps({ drivers_truncated: true })).state).toBe('unknown')
+  it('alc は読取日で「始めた月の初日〜翌月末」を引く (月末の運行は翌月に読み取られる)', () => {
+    expect(litigationAlcReadingRange('2023-06')).toEqual({ from: '2023-06-01', to: '2023-07-31' })
+    expect(litigationAlcReadingRange('2023-12')).toEqual({ from: '2023-12-01', to: '2024-01-31' })
   })
 })
 
@@ -344,17 +329,10 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     const rows = buildLitigationErrorRows(input())
     expect(rows.map(r => `${r.driverCd}|${r.month}`)).toEqual(['1078|2025-01', '1078|2025-02', '2000|2025-01', '2000|2025-02'])
     const counts = countLitigationErrorCells(rows)
-    expect(counts.alcOps).toEqual({ ng: 0, ok: 0, unknown: 0, pending: 4, noBaseline: 0 })
+    expect(counts.alcOps).toEqual({ ng: 0, ok: 0, unknown: 0, pending: 4 })
     expect(counts.invariants.pending).toBe(4)
     expect(rows.some(litigationRowNeedsAttention)).toBe(false)
     expect(rows.every(r => !r.canImport)).toBe(true)
-  })
-
-  it('★ 照合先なしは異常と数えない (印刷の「異常あり・判定できない行だけ」に入らない)', () => {
-    const [row] = buildLitigationErrorRows(input())
-    const cells = { ...row!.cells, unkoGaps: { state: 'noBaseline' as const, message: '' } }
-    expect(litigationRowNeedsAttention({ ...row!, cells })).toBe(false)
-    expect(litigationRowNeedsAttention({ ...row!, cells: { ...cells, yTime: { state: 'ng' as const, message: '' } } })).toBe(true)
   })
 
   it('乗務員 × 月の素材を正しい行に配り、alc 0 件の行だけ取り込みボタンを出す', () => {
@@ -365,7 +343,7 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     const rows = buildLitigationErrorRows(input({
       results: [result({ missingDates: ['2025-02-03'], missingCount: 1 }), null],
       alcOps,
-      unkoGaps: new Map([['2000|2025-02', gaps({ drivers: [{ driver_cd: '2000', unko_nos: ['u1'] }] })]]),
+      unkoGaps: new Map([['2000|2025-02', dtako(['u1'], [])]]),
       // 会社全体の応答を乗務員ごとに切り出して置く (画面と同じ)
       wageReports: new Map(['1078', '2000'].map(cd => [`${cd}|2025-01`, reduceWageReportForDriver(report([wageRow('1078'), wageRow('2000', { restraint_missing: true })]), cd)])),
     }))
@@ -406,7 +384,7 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     const csv = litigationErrorsCsv(rows, cd => (cd === '1078' ? '山田 太郎' : cd), [])
     expect(csv.startsWith('﻿')).toBe(true)
     const lines = csv.slice(1).trimEnd().split('\n')
-    expect(lines[0]).toBe('乗務員CD,氏名,月,alc の運行 判定,alc の運行 内容,Y時間の欠け 判定,Y時間の欠け 内容,alc にあって勤怠に無い運行 判定,alc にあって勤怠に無い運行 内容,最低賃金の不変条件 判定,最低賃金の不変条件 内容')
+    expect(lines[0]).toBe('乗務員CD,氏名,月,alc の運行 判定,alc の運行 内容,Y時間の欠け 判定,Y時間の欠け 内容,alc にあってオンプレのデジタコに無い運行 判定,alc にあってオンプレのデジタコに無い運行 内容,最低賃金の不変条件 判定,最低賃金の不変条件 内容')
     expect(lines[1]).toContain('1078,山田 太郎,2025-01,未実行,')
     expect(lines[1]).toContain(',判定できない,"失敗, ""理由""",')
     expect(lines).toHaveLength(2)
@@ -457,47 +435,6 @@ describe('取り込みボタン', () => {
   })
 })
 
-describe('勤怠を GCP へ運ぶ (照合先なしの月)', () => {
-  function rowOf(month: string, state: 'noBaseline' | 'ng' | 'pending') {
-    const cell = { state, message: '' }
-    return {
-      driverCd: '1590',
-      month,
-      cells: { alcOps: cell, yTime: cell, unkoGaps: cell, invariants: cell },
-      canImport: false,
-    }
-  }
-
-  it('照合先なしの乗務員 × 月だけを、月の古い順 (同じ月は乗務員の順) に出す', () => {
-    const rows = [rowOf('2024-02', 'noBaseline'), { ...rowOf('2023-12', 'noBaseline'), driverCd: '10' }, rowOf('2023-12', 'noBaseline'), rowOf('2024-01', 'ng'), { ...rowOf('2024-02', 'noBaseline'), driverCd: '2000' }]
-    expect(litigationNoBaselineTargets(rows).map(t => `${t.driverCd}|${t.month}`)).toEqual(['10|2023-12', '1590|2023-12', '1590|2024-02', '2000|2024-02'])
-    expect(litigationNoBaselineTargets([rowOf('2024-01', 'pending')])).toEqual([])
-  })
-
-  const rep = (over: Partial<{ events: number, operations: number | null, daysWritten: number, misplaced: number, unknownStates: string[] }> = {}) =>
-    ({ events: 40, operations: 5, daysWritten: 22, misplaced: 0, unknownStates: [], ...over })
-
-  it('運んだ日数・既に運んである を運行の件数つきで言う (古い relay は運行の件数を言わない)', () => {
-    expect(classifyLitigationTimecardPush(rep(), '')).toEqual({ kind: 'ok', message: '22 日ぶん運んだ (運行 5 件、打刻 40 件)' })
-    expect(classifyLitigationTimecardPush(rep({ daysWritten: 0 }), '')).toEqual({ kind: 'ok', message: '変わった日なし (既に運んである。運行 5 件、打刻 40 件)' })
-    expect(classifyLitigationTimecardPush(rep({ operations: null }), '')).toEqual({ kind: 'ok', message: '22 日ぶん運んだ (打刻 40 件)' })
-  })
-
-  it('★ 打刻が無い / 運行NO 付きが無い は「運んだ」にせず、照合できないと言い切る', () => {
-    expect(classifyLitigationTimecardPush(rep({ events: 0, operations: 0, daysWritten: 0 }), '')).toEqual({ kind: 'noOperations', message: 'オンプレにこの乗務員のこの月の打刻が無い — この月は照合できない' })
-    expect(classifyLitigationTimecardPush(rep({ operations: 0 }), '')).toEqual({
-      kind: 'noOperations',
-      message: '打刻 40 件はあるが運行NO 付き (勤務時間登録) が無い — 営業所所属など打刻しない乗務員はこうなり、この月は照合できない',
-    })
-  })
-
-  it('★ misplaced / 受け側に無い種類は運び方が壊れている印なので失敗、通信失敗は理由をそのまま', () => {
-    expect(classifyLitigationTimecardPush(rep({ misplaced: 2 }), '')).toEqual({ kind: 'error', message: '運び方が崩れた行 2 件 (misplaced)' })
-    expect(classifyLitigationTimecardPush(rep({ unknownStates: ['x', 'y'] }), '')).toEqual({ kind: 'error', message: '受け側に無い打刻の種類: x, y' })
-    expect(classifyLitigationTimecardPush(null, '502 …')).toEqual({ kind: 'error', message: '502 …' })
-  })
-})
-
 describe('検知結果の保存 (切り出し・読み戻し・続きから)', () => {
   it('★ wage-report は 1 乗務員ぶんだけ残し、切り出しても判定は変わらない', () => {
     const inv = { ...OK_INV, unaccounted: { diffMinutes: 3, kind: 'other' as const } }
@@ -518,7 +455,7 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
       items: [
         { kind: 'alcOps', key: '1590|2023-06', payload: { ok: true, days: 20, dropped: [] }, checkedAt: '2026-09-29T02:00:00Z' },
         { kind: 'alcOps', key: '1590|2023-07', payload: { ok: false, notFound: true, reason: '404' }, checkedAt: '2026-09-29T02:00:00Z' },
-        { kind: 'unkoGaps', key: '1590|2023-06', payload: { ok: true, raw: { onprem_operations_in_month: 0, gcp_etags_available: true } }, checkedAt: '2026-09-29T01:00:00Z' },
+        { kind: 'unkoGaps', key: '1590|2023-06', payload: { ok: true, value: { alc: ['a'], onprem: ['a', 'b'] } }, checkedAt: '2026-09-29T01:00:00Z' },
         { kind: 'unkoGaps', key: '1590|2023-07', payload: { ok: false, reason: '502' }, checkedAt: '2026-09-29T03:00:00Z' },
         { kind: 'wageReport', key: '1590|2023-06', payload: report([wageRow('1590')]), checkedAt: '2026-09-29T04:00:00Z' },
         { kind: 'wageReport', key: '1590|2023-07', payload: { ok: false, reason: 'x' }, checkedAt: '2026-09-29T04:00:00Z' },
@@ -526,8 +463,7 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
     })
     expect(r.alcOps.get('1590|2023-06')).toEqual({ ok: true, days: 20, dropped: [] })
     expect(r.alcOps.get('1590|2023-07')).toEqual({ ok: false, notFound: true, reason: '404' })
-    const g = r.unkoGaps.get('1590|2023-06')
-    expect(g?.ok && g.value.onpremOperationsInMonth).toBe(0)
+    expect(r.unkoGaps.get('1590|2023-06')).toEqual({ ok: true, value: { alc: ['a'], onprem: ['a', 'b'], onpremTruncated: false } })
     expect(r.unkoGaps.get('1590|2023-07')).toEqual({ ok: false, reason: '502' })
     expect(invariantsCell('1590', r.wageReports.get('1590|2023-06')).state).toBe('ok')
     expect(r.wageReports.get('1590|2023-07')).toEqual({ ok: false, reason: 'x' })
@@ -549,6 +485,9 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
         { kind: 'alcOps', key: 'b', payload: { ok: true, days: '3', dropped: [] }, checkedAt: at },
         { kind: 'alcOps', key: 'c', payload: { ok: false }, checkedAt: at },
         { kind: 'unkoGaps', key: 'd', payload: { ok: false }, checkedAt: at },
+        // 勤怠 (time_card_dtako) と突き合わせていた頃の保存は形が違うので捨てる → 続きからで取り直される
+        { kind: 'unkoGaps', key: 'd2', payload: { ok: true, raw: { onprem_operations_in_month: 0 } }, checkedAt: at },
+        { kind: 'unkoGaps', key: 'd3', payload: { ok: true, value: { alc: ['a'], onprem: [1] } }, checkedAt: at },
         { kind: 'wageReport', key: 'e', payload: { ok: true, value: { rows: [] } }, checkedAt: at },
         { kind: 'wageReport', key: 'f', payload: { ok: true, value: null }, checkedAt: at },
         { kind: 'wageReport', key: 'g', payload: { ok: false }, checkedAt: at },

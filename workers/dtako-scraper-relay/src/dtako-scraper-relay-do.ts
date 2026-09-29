@@ -114,6 +114,7 @@ import {
 } from "./cron-batch";
 import { pickOnpremUnkoNoFromDayEvents } from "./dtako-day-events-lookup";
 import { pickDayOperationsList } from "./dtako-day-operations-list";
+import { pickOnpremMonthOperations } from "./onprem-month-operations";
 import {
   annotateFoldStaleness,
   clearRunningPointer,
@@ -688,6 +689,7 @@ const KINTAI_SINGLE_COMP_PATHS = new Set([
   "/restraint-api/kintai/refresh/mysql",
   "/restraint-api/kintai/day-events-lookup",
   "/restraint-api/kintai/day-operations",
+  "/restraint-api/kintai/onprem-month-operations",
   // 上の口の写し (R2)
   "/restraint-api/kintai/archive",
   "/restraint-api/kintai/diff-cache",
@@ -4650,6 +4652,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/day-operations" && request.method === "GET") {
       return this.handleKintaiDayOperationsList(url);
     }
+    if (url.pathname === "/restraint-api/kintai/onprem-month-operations" && request.method === "GET") {
+      return this.handleKintaiOnpremMonthOperations(url);
+    }
     if (url.pathname === "/restraint-api/kintai/alc-upload" && request.method === "POST") {
       return this.handleKintaiAlcUpload(record!, request);
     }
@@ -7500,6 +7505,52 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ kintai_day_events_lookup: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, err instanceof Error ? err.message : "day-events の取得に失敗しました");
+    }
+  }
+
+  /**
+   * GET /restraint-api/kintai/onprem-month-operations?month=&driver_cd= — オンプレの
+   * デジタコ運行 (`dtako_rows`) のうち、その乗務員が対象月に始めた運行の先頭 22 桁
+   * (訴訟準備「alc にあってオンプレのデジタコに無い運行」、Refs #1133)。
+   * 上流は `GET /api/kintai/reading-dates` (`onprem-month-operations.ts` 参照)。**読むだけ。**
+   */
+  private async handleKintaiOnpremMonthOperations(url: URL): Promise<Response> {
+    const driverCd = url.searchParams.get("driver_cd") || "";
+    if (!/^\d{1,10}$/.test(driverCd)) {
+      return dvrJsonError(400, "driver_cd は乗務員CD (数字) で指定してください");
+    }
+    const month = url.searchParams.get("month") || "";
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return dvrJsonError(400, `month は YYYY-MM で指定してください: "${month}"`);
+    }
+    const creds = await this.ichibanCreds("kintai_onprem_month_operations");
+    if (!creds) return dvrJsonError(503, "オンプレの取得先 (NUXT_ICHIBAN_*) が未設定です");
+    try {
+      const q = new URLSearchParams({ month, driver: driverCd });
+      const upstream = await fetch(`${creds.apiUrl}/api/kintai/reading-dates?${q.toString()}`, {
+        headers: {
+          "CF-Access-Client-Id": creds.clientId,
+          "CF-Access-Client-Secret": creds.clientSecret,
+        },
+      });
+      const text = await upstream.text();
+      if (!upstream.ok) {
+        return dvrJsonError(502, `reading-dates が ${upstream.status} を返しました: ${text.slice(0, 300)}`);
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        return dvrJsonError(502, `reading-dates の応答がJSONではありません: ${text.slice(0, 300)}`);
+      }
+      const picked = pickOnpremMonthOperations(raw, month);
+      console.log(
+        JSON.stringify({ kintai_onprem_month_operations: "ok", month, count: picked.opeNos.length, truncated: picked.truncated }),
+      );
+      return Response.json({ month, driver_cd: driverCd, ope_nos: picked.opeNos, truncated: picked.truncated });
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_onprem_month_operations: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "reading-dates の取得に失敗しました");
     }
   }
 

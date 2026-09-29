@@ -22,7 +22,7 @@ import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
 
 const { api, saved } = vi.hoisted(() => ({
-  api: { getDrivers: vi.fn(), getYTimePreview: vi.fn() },
+  api: { getDrivers: vi.fn(), getYTimePreview: vi.fn(), getOperations: vi.fn() },
   saved: [] as { blob: Blob, name: string }[],
 }))
 
@@ -36,6 +36,7 @@ vi.mock('~/utils/api', async importOriginal => ({
   ...(await importOriginal<typeof import('~/utils/api')>()),
   getDrivers: api.getDrivers,
   getYTimePreview: api.getYTimePreview,
+  getOperations: api.getOperations,
 }))
 
 /** `useState` は Nuxt app instance が要る (`[nuxt] instance unavailable`)。この画面は
@@ -71,8 +72,8 @@ const OK_INV = {
 }
 
 interface Call { via: '$fetch' | 'fetch', method: string, url: string, body?: unknown }
-/** unko-gaps の 2 月の応答に載せる勤怠側の件数 (undefined ならキーを載せない = 旧 rust)。 */
-let febOnpremOps: number | undefined
+/** オンプレのデジタコ運行 (onprem-month-operations) の 2 月の応答に載せる 22 桁 */
+let febOnpremOpeNos: string[] = []
 /** `GET /restraint-api/litigation-checks` が返す保存済みの結果 */
 let storedItems: unknown[] = []
 let calls: Call[] = []
@@ -88,14 +89,9 @@ function stubDollarFetch() {
     }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
-    if (url === '/restraint-api/kintai/unko-gaps') {
-      if (q.month === '2025-01') return { gcp_etags_available: false, driver_cds_available: true, drivers: [] }
-      return {
-        gcp_etags_available: true,
-        driver_cds_available: true,
-        ...(febOnpremOps === undefined ? {} : { onprem_operations_in_month: febOnpremOps }),
-        drivers: [{ driver_cd: '1078', unko_nos: ['2502100000000000001234'] }],
-      }
+    if (url === '/restraint-api/kintai/onprem-month-operations') {
+      if (q.month === '2025-01') throw Object.assign(new Error('reading-dates が 502'), { statusCode: 502 })
+      return { month: q.month, driver_cd: q.driver_cd, ope_nos: febOnpremOpeNos, truncated: false }
     }
     if (url === '/restraint-api/wage-report') {
       if (q.month === '2025-02') throw Object.assign(new Error('boom'), { statusCode: 504 })
@@ -155,7 +151,19 @@ function cell(w: VueWrapper, row: string, check: string) {
 
 beforeEach(() => {
   calls = []
-  febOnpremOps = undefined
+  febOnpremOpeNos = []
+  // alc の運行: 2 月に始めた運行が 1 本 (2 名乗務の相方つき) と、前月に始めて 2 月に読み取った運行
+  api.getOperations.mockReset()
+  api.getOperations.mockResolvedValue({
+    operations: [
+      { unko_no: '25021000000000000012341' },
+      { unko_no: '25021000000000000012342' },
+      { unko_no: '25013100000000000012341' },
+    ],
+    total: 3,
+    page: 1,
+    per_page: 200,
+  })
   storedItems = []
   saved.length = 0
   localStorage.clear()
@@ -203,10 +211,11 @@ describe('エラータブ: 3 状態の出し分け', () => {
     expect(cell(w, '1078|2025-01', 'alcOps')).toContain('異常なし')
     expect(cell(w, '1078|2025-01', 'alcOps')).toContain('勤務日 2 日')
     expect(cell(w, '1078|2025-02', 'alcOps')).toContain('異常あり')
-    // alc にあって勤怠に無い運行: 1 月は GCP 側が引けていない → 判定できない (0 件と言わない)
+    // alc にあってオンプレのデジタコに無い運行: 1 月はオンプレが 502 → 判定できない (0 件と言わない)
     expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('判定できない')
-    expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('0 件とは言えない')
+    expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('502')
     expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('異常あり')
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('オンプレのデジタコに無い運行 1 件: 2502100000000000001234')
     // 最低賃金の不変条件: 2 月は wage-report が 504 → 判定できない
     expect(cell(w, '1078|2025-01', 'invariants')).toContain('異常なし')
     expect(cell(w, '1078|2025-02', 'invariants')).toContain('判定できない')
@@ -237,21 +246,25 @@ describe('エラータブ: Y時間の欠けを ZIP なしで判定する', () =>
   })
 })
 
-describe('エラータブ: 照合先なし', () => {
-  it('★ 勤怠側にこの乗務員の運行が 0 件の月は「異常あり」でなく照合先なしと出し、件数の行にも出す', async () => {
-    febOnpremOps = 0
+describe('エラータブ: alc とオンプレのデジタコの突き合わせ', () => {
+  it('★ alc は読取日で「始めた月〜翌月末」を引き、始めた月の運行だけをオンプレと 22 桁で突き合わせる', async () => {
+    febOnpremOpeNos = ['2502100000000000001234']
     const w = await openErrorsTabAndRun()
-    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('照合先なし')
-    expect(cell(w, '1078|2025-02', 'unkoGaps')).not.toContain('異常あり')
-    expect(w.text()).toContain('照合先なし 1')
+    expect(api.getOperations).toHaveBeenCalledWith({ driver_cd: '1078', date_from: '2025-02-01', date_to: '2025-03-31', page: 1, per_page: 200 })
+    expect(calls.map(c => c.url)).toContain('/restraint-api/kintai/onprem-month-operations?month=2025-02&driver_cd=1078')
+    // 前月に始めた運行 (2501…) は 2 月の突き合わせに入らない。タイムカード (勤怠) の口は呼ばない
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('オンプレのデジタコに無い運行なし (alc 1 件・オンプレ 1 件)')
+    expect(calls.filter(c => c.url.includes('/kintai/unko-gaps') || c.url.includes('/kintai/refresh/timecard'))).toHaveLength(0)
+    expect(w.text()).not.toContain('照合先なし')
     w.unmount()
   })
 
-  it('陰性対照: 勤怠側に 1 件以上あれば従来どおり異常あり、件数の行に照合先なしは出ない', async () => {
-    febOnpremOps = 2
+  it('alc の運行が 200 件を超えるときはページを回し切る', async () => {
+    api.getOperations
+      .mockResolvedValueOnce({ operations: [{ unko_no: '25010100000000000012341' }], total: 201, page: 1, per_page: 200 })
+      .mockResolvedValueOnce({ operations: [{ unko_no: '25010200000000000012341' }], total: 201, page: 2, per_page: 200 })
     const w = await openErrorsTabAndRun()
-    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('異常あり')
-    expect(w.text()).not.toContain('照合先なし 1')
+    expect(api.getOperations.mock.calls.slice(0, 2).map(c => (c[0] as { page: number }).page)).toEqual([1, 2])
     w.unmount()
   })
 })
@@ -380,7 +393,8 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
       'wageReport 1078|2025-01', 'wageReport 1078|2025-02',
     ])
     // 勤怠に無い運行は受け側の応答そのまま、失敗は理由ごと
-    expect(items[3]!.payload).toMatchObject({ ok: true, raw: { drivers: [{ driver_cd: '1078' }] } })
+    // alc とオンプレの 22 桁の一覧をそのまま残す
+    expect(items[3]!.payload).toEqual({ ok: true, value: { alc: ['2502100000000000001234'], onprem: [], onpremTruncated: false } })
     expect(items[5]!.payload).toMatchObject({ ok: false })
     // 保存時刻が行に出る
     expect(w.find('tr[data-row="1078|2025-01"] [data-testid="litigation-row-checked-at"]').text()).toContain('9/29')
@@ -393,7 +407,7 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
     storedItems = [
       { kind: 'alcOps', key: '1078|2025-01', payload: { ok: true, days: 2, dropped: [] }, checkedAt: at },
       { kind: 'alcOps', key: '1078|2025-02', payload: { ok: true, days: 0, dropped: [] }, checkedAt: at },
-      { kind: 'unkoGaps', key: '1078|2025-01', payload: { ok: true, raw: { gcp_etags_available: true, driver_cds_available: true, drivers: [] } }, checkedAt: at },
+      { kind: 'unkoGaps', key: '1078|2025-01', payload: { ok: true, value: { alc: ['a'], onprem: ['a'] } }, checkedAt: at },
       { kind: 'unkoGaps', key: '1078|2025-02', payload: { ok: false, reason: '502 …' }, checkedAt: at },
       { kind: 'wageReport', key: '1078|2025-01', payload: rep, checkedAt: at },
     ]
@@ -405,13 +419,13 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
     expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('判定できない')
     expect(cell(w, '1078|2025-02', 'invariants')).toContain('未実行')
     expect(api.getYTimePreview).not.toHaveBeenCalled()
-    // 取れていないのは 2 月の勤怠に無い運行と 2 月の最低賃金の 2 件
+    // 取れていないのは 2 月のデジタコの突き合わせと 2 月の最低賃金の 2 件
     calls = []
     await buttonByText(w, '続きから (2 件)').trigger('click')
     await settle()
     expect(api.getYTimePreview).not.toHaveBeenCalled()
     expect(calls.filter(c => c.method === 'GET' && !c.url.startsWith('/restraint-api/litigation-checks')).map(c => c.url)).toEqual([
-      '/restraint-api/kintai/unko-gaps?month=2025-02&driver_cd=1078',
+      '/restraint-api/kintai/onprem-month-operations?month=2025-02&driver_cd=1078',
       '/restraint-api/wage-report?month=2025-02&source=gcp',
     ])
     expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('異常あり')
