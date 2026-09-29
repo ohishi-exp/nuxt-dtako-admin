@@ -29,8 +29,8 @@
  */
 import type { LitigationOutputChunk, LitigationOutputResult } from './litigation-output'
 import type { KintaiUnkoGaps } from './kintai-unko-gaps'
-import { kintaiUnkoGapsReadability } from './kintai-unko-gaps'
-import type { WageInvariantCheck, WageReportResponse } from './restraint-wage-view'
+import { kintaiUnkoGapsReadability, parseKintaiUnkoGaps } from './kintai-unko-gaps'
+import type { WageInvariantCheck, WageReportResponse, WageReportRow } from './restraint-wage-view'
 import { fmtShiftOverlap, invariantRowStatus, nextYm } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
 import { csvCell } from './wage-range-view'
@@ -310,7 +310,7 @@ export interface LitigationErrorInput {
   alcOps: ReadonlyMap<string, LitigationAlcOpsEntry>
   /** キー `乗務員CD|YYYY-MM` */
   unkoGaps: ReadonlyMap<string, LitigationFetched<KintaiUnkoGaps>>
-  /** キー `YYYY-MM` (会社全体を 1 回で読む) */
+  /** キー `乗務員CD|YYYY-MM` (会社全体を 1 回で読み、乗務員ごとに [`reduceWageReportForDriver`] で切り出す) */
   wageReports: ReadonlyMap<string, LitigationFetched<WageReportResponse>>
 }
 
@@ -332,7 +332,7 @@ export function buildLitigationErrorRows(input: LitigationErrorInput): Litigatio
         alcOps: alcOpsCell(input.alcOps.get(key), chunkResult),
         yTime: yTimeCell(month, chunkResult, input.alcOps.get(key)),
         unkoGaps: unkoGapsCell(driverCd, input.unkoGaps.get(key)),
-        invariants: invariantsCell(driverCd, input.wageReports.get(month)),
+        invariants: invariantsCell(driverCd, input.wageReports.get(key)),
       }
       out.push({ driverCd, month, cells, canImport: cells.alcOps.state === 'ng' })
     }
@@ -503,4 +503,137 @@ export function classifyLitigationTimecardPush(
   if (report.events === 0) return { kind: 'ok', message: 'オンプレにこの月の打刻が無い (運ぶものなし)' }
   if (report.daysWritten === 0) return { kind: 'ok', message: `変わった日なし (既に運んである。打刻 ${report.events} 件)` }
   return { kind: 'ok', message: `${report.daysWritten} 日ぶん運んだ (会社全体、打刻 ${report.events} 件)` }
+}
+
+// ---- 検知結果の保存 (`GET/PUT /restraint-api/litigation-checks`) ----
+//
+// 検知は 1 案件で 10〜40 分かかる (最低賃金の不変条件が 1 か月 15〜64 秒) ので、取れた結果を
+// 案件ごとに relay の D1 に残し、開き直したら前回の結果を出す。**保存するのは取りに行った
+// 結果 (取得の成否ごと) で、判定 (セル) ではない** — セルは出力タブの ZIP の結果とも
+// 合わせて毎回組み直すため (`buildLitigationErrorRows`)。
+
+export type LitigationStoredKind = 'alcOps' | 'unkoGaps' | 'wageReport'
+
+/** PUT の 1 件 (`key` は `乗務員CD|YYYY-MM`)。 */
+export interface LitigationStoredItem {
+  kind: LitigationStoredKind
+  key: string
+  payload: unknown
+}
+
+/** 勤怠に無い運行は受け側の応答をそのまま残し、読み戻すときに `parseKintaiUnkoGaps` を通す
+ * (読み方が変わっても保存し直さずに済む)。 */
+export type LitigationStoredUnkoGaps = { ok: true, raw: unknown } | { ok: false, reason: string }
+
+/**
+ * 会社全体の wage-report から 1 乗務員ぶんを切り出す (保存する大きさを抑える)。
+ * 残すのは [`invariantsCell`] が読む項目だけ — 行は `summary.driverCd` / `restraint_missing` /
+ * `invariants` しか持たないので、**他の画面の表示には使わないこと**。
+ */
+export function reduceWageReportForDriver(
+  entry: LitigationFetched<WageReportResponse>,
+  driverCd: string,
+): LitigationFetched<WageReportResponse> {
+  if (!entry.ok) return entry
+  const v = entry.value
+  const rows = v.rows
+    .filter(r => r.summary.driverCd === driverCd)
+    .map(r => ({ summary: { driverCd }, restraint_missing: r.restraint_missing, invariants: r.invariants }) as unknown as WageReportRow)
+  return {
+    ok: true,
+    value: {
+      month: v.month,
+      rows,
+      no_data_drivers: v.no_data_drivers.filter(d => d === driverCd),
+      warnings: [],
+      restraint_source: v.restraint_source,
+    },
+  }
+}
+
+export interface LitigationRestoredChecks {
+  alcOps: Map<string, LitigationAlcOpsEntry>
+  unkoGaps: Map<string, LitigationFetched<KintaiUnkoGaps>>
+  wageReports: Map<string, LitigationFetched<WageReportResponse>>
+  /** キー `種類|乗務員CD|YYYY-MM` ([`litigationCheckedAtKey`]) → 保存時刻 (ISO) */
+  checkedAt: Map<string, string>
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+function restoreAlcOps(p: Record<string, unknown>): LitigationAlcOpsEntry | null {
+  if (p.ok === true) {
+    return typeof p.days === 'number' && Array.isArray(p.dropped)
+      ? { ok: true, days: p.days, dropped: p.dropped as LitigationYTimeDropped[] }
+      : null
+  }
+  return typeof p.reason === 'string' ? { ok: false, notFound: p.notFound === true, reason: p.reason } : null
+}
+
+function restoreUnkoGaps(p: Record<string, unknown>): LitigationFetched<KintaiUnkoGaps> | null {
+  if (p.ok === true) return { ok: true, value: parseKintaiUnkoGaps(p.raw) }
+  return typeof p.reason === 'string' ? { ok: false, reason: p.reason } : null
+}
+
+function restoreWageReport(p: Record<string, unknown>): LitigationFetched<WageReportResponse> | null {
+  if (p.ok === true) {
+    const v = p.value
+    return isRecord(v) && Array.isArray(v.rows) && Array.isArray(v.no_data_drivers)
+      ? { ok: true, value: v as unknown as WageReportResponse }
+      : null
+  }
+  return typeof p.reason === 'string' ? { ok: false, reason: p.reason } : null
+}
+
+/**
+ * `GET /restraint-api/litigation-checks` の応答を画面の Map に戻す。**形の崩れた 1 件は捨てる**
+ * (その行は「未実行」に戻るだけで、一覧全体は壊さない)。
+ */
+export function restoreLitigationChecks(raw: unknown): LitigationRestoredChecks {
+  const out: LitigationRestoredChecks = { alcOps: new Map(), unkoGaps: new Map(), wageReports: new Map(), checkedAt: new Map() }
+  const items = isRecord(raw) && Array.isArray(raw.items) ? raw.items : []
+  for (const it of items) {
+    if (!isRecord(it) || typeof it.key !== 'string' || typeof it.checkedAt !== 'string' || !isRecord(it.payload)) continue
+    const p = it.payload
+    let restored = false
+    if (it.kind === 'alcOps') {
+      const e = restoreAlcOps(p)
+      if (e) out.alcOps.set(it.key, e)
+      restored = e !== null
+    }
+    else if (it.kind === 'unkoGaps') {
+      const e = restoreUnkoGaps(p)
+      if (e) out.unkoGaps.set(it.key, e)
+      restored = e !== null
+    }
+    else if (it.kind === 'wageReport') {
+      const e = restoreWageReport(p)
+      if (e) out.wageReports.set(it.key, e)
+      restored = e !== null
+    }
+    if (restored) out.checkedAt.set(litigationCheckedAtKey(it.kind as LitigationStoredKind, it.key), it.checkedAt)
+  }
+  return out
+}
+
+/** 保存時刻の Map のキー */
+export function litigationCheckedAtKey(kind: LitigationStoredKind, key: string): string {
+  return `${kind}|${key}`
+}
+
+/** 行 (`乗務員CD|YYYY-MM`) の保存時刻のうち**いちばん古い**もの (1 つも無ければ null)。
+ * 行の判定はこの時刻より新しい材料では組まれていない、という意味で古い方を出す。 */
+export function litigationRowCheckedAt(checkedAt: ReadonlyMap<string, string>, key: string): string | null {
+  const times = (['alcOps', 'unkoGaps', 'wageReport'] as const)
+    .map(k => checkedAt.get(litigationCheckedAtKey(k, key)))
+    .filter((t): t is string => t !== undefined)
+  return times.length === 0 ? null : times.reduce((a, b) => (b < a ? b : a))
+}
+
+/** 「続きから」で取り直すか — まだ取っていない・取りに行って失敗した結果だけ。
+ * **取れたが判定できない** (材料が欠けていた) ものは取り直しても同じなので回さない。 */
+export function litigationNeedsFetch(entry: { ok: boolean } | undefined): boolean {
+  return entry === undefined || !entry.ok
 }
