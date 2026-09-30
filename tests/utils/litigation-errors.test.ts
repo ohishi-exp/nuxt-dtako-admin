@@ -68,7 +68,7 @@ const OK_INV: WageInvariantCheck = {
 
 function wageRow(driverCd: string, over: Partial<WageReportRow> = {}): WageReportRow {
   return {
-    summary: { driverCd } as WageReportRow['summary'],
+    summary: { driverCd, workDays: 20, days: [{ date: '2025-01-10' }] } as unknown as WageReportRow['summary'],
     fetched_at: null,
     last_verified_at: null,
     wage: {} as WageReportRow['wage'],
@@ -441,6 +441,9 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
     const full = report([wageRow('1078', { invariants: inv }), wageRow('2000')], { no_data_drivers: ['1078', '3000'] })
     const cut = reduceWageReportForDriver(full, '1078')
     expect(cut.ok && cut.value.rows.length).toBe(1)
+    // 日別だけ落とし、給与比較が読む月の集計・wage は残す
+    expect(cut.ok && cut.value.rows[0]!.summary.days).toEqual([])
+    expect(cut.ok && cut.value.rows[0]!.summary.workDays).toBe(20)
     expect(cut.ok && cut.value.no_data_drivers).toEqual(['1078'])
     expect(invariantsCell('1078', cut)).toEqual(invariantsCell('1078', full))
     // 行の無い乗務員も「データが無い / 行が無い」の言い分けが残る
@@ -491,6 +494,8 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
         { kind: 'wageReport', key: 'e', payload: { ok: true, value: { rows: [] } }, checkedAt: at },
         { kind: 'wageReport', key: 'f', payload: { ok: true, value: null }, checkedAt: at },
         { kind: 'wageReport', key: 'g', payload: { ok: false }, checkedAt: at },
+        // 不変条件だけを残していた頃の保存 (summary が乗務員CD だけ) は捨てて取り直させる
+        { kind: 'wageReport', key: 'g2', payload: { ok: true, value: { rows: [{ summary: { driverCd: '1590' }, invariants: {} }], no_data_drivers: [] } }, checkedAt: at },
         { kind: 'yTime', key: 'h', payload: { ok: true }, checkedAt: at },
       ],
     })

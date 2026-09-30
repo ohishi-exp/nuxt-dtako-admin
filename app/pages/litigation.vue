@@ -25,6 +25,7 @@ import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from 
 import { downloadBlob } from '~/utils/download-blob'
 import {
   buildLitigationOutputChunks,
+  buildLitigationZipSummary,
   countLitigationResults,
   litigationResultFromFailure,
   litigationResultFromHeaders,
@@ -83,7 +84,17 @@ import {
   splitDateRangeByMaxDays,
   type LitigationChangeRow,
 } from '~/utils/litigation-changes'
-import { monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
+import { fmtYen, monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
+import {
+  buildLitigationSalaryRows,
+  LITIGATION_SALARY_STATE_LABELS,
+  litigationPayrollMonths,
+  type LitigationSalaryState,
+} from '~/utils/litigation-salary'
+import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
+import { payrollToParsedSalary, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
+import { buildCdMapEntries, type EmployeeMasterGetResponse } from '~/utils/employee-master'
+import { parseCompMap } from '~/utils/dtako-comps'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import { dtakoCompDisplay, pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
 import {
@@ -321,6 +332,7 @@ const TABS = [
   { key: 'output', label: '出力' },
   { key: 'errors', label: 'エラー' },
   { key: 'changes', label: '変更記録' },
+  { key: 'salary', label: '給与比較' },
 ] as const
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('output')
@@ -366,6 +378,22 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
 const outputDoneCount = computed(() => outputResults.value.filter(r => r !== null).length)
 const outputCounts = computed(() =>
   countLitigationResults(outputResults.value.filter((r): r is LitigationOutputResult => r !== null)))
+
+/** ZIP に入るファイルの一覧と中身の要点 (出力タブに出す)。作る前は Excel を「まだ」、作った後は結果で出す */
+const zipSummary = computed(() => {
+  const counts = { ng: 0, unknown: 0, pending: 0 }
+  for (const k of LITIGATION_CHECK_KEYS) {
+    counts.ng += errorCounts.value[k].ng
+    counts.unknown += errorCounts.value[k].unknown
+    counts.pending += errorCounts.value[k].pending
+  }
+  return buildLitigationZipSummary({
+    chunks: outputChunks.value,
+    results: outputResults.value,
+    errorsCsv: { filename: LITIGATION_ERRORS_CSV_FILENAME, rows: errorRows.value.length, counts },
+    changesCsv: { filename: LITIGATION_CHANGES_CSV_FILENAME, finished: changesFinished.value, rows: changesRows.value.length },
+  })
+})
 
 const OUTPUT_RETRY = '「ZIP を作る」を押してやり直してください'
 
@@ -757,6 +785,120 @@ function errorsCsvText(): string {
     cd => drivers.value.find(d => d.driver_cd === cd)?.driver_name ?? '',
     chunkWarnings.value,
   )
+}
+
+// --- 給与比較タブ: 給与大臣の明細 × エラータブの wage-report (litigation-salary.ts の doc 参照) ---
+/** キー 支給月 `YYYY-MM` → 全会社ぶんの明細。**メモリだけに持つ** (金額・氏名をブラウザに残さない) */
+const salaryPayroll = ref(new Map<string, LitigationFetched<SalaryCsvRow[]>>())
+const salaryConfig = ref<SalaryItemConfig>({ items: {} })
+const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
+const salaryLoading = ref(false)
+const salaryProgress = ref('')
+const salaryError = ref('')
+let salaryEpoch = 0
+const SALARY_RETRY = '「給与大臣から読み込む」を押してやり直してください'
+
+watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
+  salaryEpoch++
+  salaryPayroll.value = new Map()
+  salaryLoading.value = false
+  salaryProgress.value = ''
+  salaryError.value = ''
+})
+
+const salaryRows = computed(() => buildLitigationSalaryRows({
+  driverCds: openCase.value?.driverCds ?? [],
+  months: caseMonths.value,
+  wageReports: errWageReports.value,
+  payroll: salaryPayroll.value,
+  config: salaryConfig.value,
+  cdMap: salaryCdMap.value,
+}))
+const salaryCounts = computed(() => {
+  const c: Record<LitigationSalaryState, number> = { ok: 0, pending: 0, unknown: 0, noPayroll: 0 }
+  for (const r of salaryRows.value) c[r.state]++
+  return c
+})
+
+/**
+ * 給与大臣から、案件の月ぶんの明細を読む。`GET /api/kyuyo/payroll` は**読み通し** — 保存済みの月は
+ * 給与大臣を開かずに返り、保存が無い月だけ給与大臣 (OHKEN) から読んで保存する (1 社 10〜20 秒)。
+ * 会社は閲覧中の dtako 会社に対応する給与大臣の会社 (`comp-map`)、乗務員への引き当ては社員マスタ、
+ * 支給項目の区分は拘束×賃金で保存した設定をそのまま使う。**会社 × 月を 1 本ずつ直列に**呼ぶ。
+ */
+async function loadSalaryPayroll() {
+  if (!openCase.value || salaryLoading.value) return
+  const epoch = ++salaryEpoch
+  salaryLoading.value = true
+  salaryError.value = ''
+  salaryProgress.value = '会社対応表・社員マスタ・支給項目の区分を読んでいます…'
+  try {
+    const [compMapRaw, employees, config] = await Promise.all([
+      $fetch<unknown>('/restraint-api/comp-map', { headers: authHeaders() }),
+      $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', { headers: authHeaders() }),
+      $fetch<{ data: SalaryItemConfig | null }>('/restraint-api/salary-item-config', { headers: authHeaders() }),
+    ])
+    if (epoch !== salaryEpoch) return
+    salaryCdMap.value = buildCdMapEntries(employees.employees ?? [])
+    salaryConfig.value = config.data ?? { items: {} }
+    const companies = (parseCompMap(compMapRaw).find(c => c.compId === viewerComp.value)?.payrollCompanies ?? [])
+      .map(c => c.payrollCompany)
+    if (companies.length === 0) {
+      salaryError.value = 'この会社に対応する給与大臣の会社がありません (会社対応表)'
+      return
+    }
+    const targets = litigationPayrollMonths(caseMonths.value)
+    for (const [i, { workMonth, payMonth }] of targets.entries()) {
+      const rows: SalaryCsvRow[] = []
+      let failure: string | null = null
+      for (const company of companies) {
+        salaryProgress.value = `${i + 1} / ${targets.length} — ${payMonth} 支給 (会社 ${company}) を読んでいます (保存が無い月は給与大臣から読むので 10〜20 秒)`
+        try {
+          // 認証は cookie 任せ (拘束×賃金と同じ。server route が cookie から Bearer を組む)
+          const stored = toStoredPayroll(await $fetch('/api/kyuyo/payroll', { query: { company, month: workMonth } }))
+          if (!stored) {
+            failure = `会社 ${company} の応答の形が想定外`
+            continue
+          }
+          rows.push(...payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], company).rows)
+        }
+        catch (e) {
+          if (caughtErrorStatus(e) === 403) {
+            salaryError.value = `給与を見る権限がありません: ${describeCaughtError(e, SALARY_RETRY)}`
+            return
+          }
+          // 404 は上流が「その年度の給与DB が給与大臣に無い」ときに返す (rust-ichibanboshi routes/kyuyo.rs)。
+          // 汎用の 404 文言 (画面の情報が古い) は当てはまらないので言い換える
+          failure = caughtErrorStatus(e) === 404
+            ? `会社 ${company}: 給与大臣にこの月の給与DB が無い`
+            : `会社 ${company}: ${describeCaughtError(e, SALARY_RETRY)}`
+        }
+      }
+      if (epoch !== salaryEpoch) return
+      // 1 社でも読めなかったら、その月は「読めない」にする (半分だけで比べると明細に居ないと誤読する)
+      salaryPayroll.value.set(payMonth, failure ? { ok: false, reason: failure } : { ok: true, value: rows })
+    }
+    salaryProgress.value = ''
+  }
+  catch (e) {
+    if (epoch === salaryEpoch) salaryError.value = describeCaughtError(e, SALARY_RETRY)
+  }
+  finally {
+    if (epoch === salaryEpoch) salaryLoading.value = false
+  }
+}
+
+const SALARY_STATE_CLASS: Record<LitigationSalaryState, string> = {
+  ok: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
+  pending: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300',
+  unknown: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  noPayroll: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
+}
+
+/** 差の表示 (+ は明細の方が多い)。計算できない (単価なし・固定残業) は「-」 */
+function fmtDiff(v: number | null): string {
+  if (v === null) return '-'
+  return `${v > 0 ? '+' : ''}${fmtYen(v)}`
 }
 
 // --- 変更記録タブ: 打刻 (relay) + 運行 (alc-proxy) を 1 つの表にまとめる ---
@@ -1152,6 +1294,18 @@ function fmtDateTime(iso: string): string {
           <UAlert v-if="outputZipMessage" color="success" :title="outputZipMessage" />
           <UAlert v-if="outputZipError" color="error" :title="outputZipError" />
 
+          <div v-if="outputChunks.length > 0" class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-3 space-y-1" data-testid="litigation-zip-summary">
+            <div class="text-sm font-medium">ZIP に入るもの</div>
+            <div v-for="item in zipSummary" :key="item.filename" class="text-xs flex gap-2" :data-zip-file="item.filename">
+              <span
+                class="rounded px-1.5 whitespace-nowrap"
+                :class="item.state === 'included' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : item.state === 'pending' ? 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'"
+              >{{ item.state === 'included' ? '入る' : item.state === 'pending' ? 'まだ' : '入らない' }}</span>
+              <span class="font-mono whitespace-nowrap">{{ item.filename }}</span>
+              <span class="text-gray-600 dark:text-gray-400">{{ item.detail }}</span>
+            </div>
+          </div>
+
           <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
             <table class="w-full text-sm" data-testid="litigation-output-table">
               <thead>
@@ -1202,7 +1356,7 @@ function fmtDateTime(iso: string): string {
         <!-- エラー: 乗務員 × 月ごとに 4 つの検知 (litigation-errors.ts) -->
         <div v-if="activeTab === 'errors'" data-testid="litigation-errors" class="space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
-            乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・alc にあるのに勤怠 (オンプレから運んだ運行) に無い運行があるか・
+            乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・alc にあるのにオンプレのデジタコに無い運行があるか・
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
             「alc にあってオンプレのデジタコに無い運行」は、alc の運行とオンプレのデジタコ運行 (dtako_rows) を、運行を始めた月・運行NO の先頭 22 桁で突き合わせます (タイムカードの有無に関係なく照合できます)。
@@ -1321,6 +1475,72 @@ function fmtDateTime(iso: string): string {
             <div v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">
               {{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>
             </div>
+          </div>
+        </div>
+
+        <!-- 給与比較: 給与大臣の明細 × エラータブの wage-report (litigation-salary.ts) -->
+        <div v-if="activeTab === 'salary'" data-testid="litigation-salary" class="space-y-3">
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            拘束×賃金の給与比較と同じ比べ方で、案件の乗務員 × 月を並べます。明細の実支給 (基本給・残業代・総支給) と、明細の【補助】単価 × 勤務日数・時間外 (拘束は GCP) で出した額の差です (+ は明細の方が多い)。
+            明細は支給月 = 勤務月の翌月で合わせます。拘束の材料はエラータブの「検知を実行」で取ったものを使います (未取得の月は比べられません)。
+            明細は「給与大臣から読み込む」で読みます — 保存済みの月はすぐ返り、保存が無い月だけ給与大臣から読んで保存します (1 社 10〜20 秒)。金額と氏名は画面を閉じると消えます。
+          </p>
+
+          <div class="flex items-center gap-3 flex-wrap">
+            <UButton
+              icon="i-lucide-banknote"
+              label="給与大臣から読み込む"
+              :loading="salaryLoading"
+              :disabled="salaryLoading || caseMonths.length === 0"
+              data-testid="litigation-salary-load"
+              @click="loadSalaryPayroll"
+            />
+            <span v-if="salaryProgress" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-salary-progress">{{ salaryProgress }}</span>
+          </div>
+          <div v-if="salaryError" class="text-sm text-red-600 dark:text-red-400" data-testid="litigation-salary-error">{{ salaryError }}</div>
+          <div class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-summary">
+            <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
+          </div>
+
+          <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
+            <table class="w-full text-sm" data-testid="litigation-salary-table">
+              <thead>
+                <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 text-left">
+                  <th class="px-3 py-2 font-medium">乗務員</th>
+                  <th class="px-3 py-2 font-medium">勤務月 (支給月)</th>
+                  <th class="px-3 py-2 font-medium">状態</th>
+                  <th class="px-3 py-2 font-medium text-right">基本給 明細 / 計算 / 差</th>
+                  <th class="px-3 py-2 font-medium text-right">残業 明細 / 計算 / 差</th>
+                  <th class="px-3 py-2 font-medium text-right">総支給 明細 / 計算 / 差</th>
+                  <th class="px-3 py-2 font-medium text-right">勤務日 / 時間外</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in salaryRows"
+                  :key="`${row.driverCd}|${row.month}`"
+                  class="border-b border-gray-100 dark:border-gray-800 align-top"
+                  :data-salary-row="`${row.driverCd}|${row.month}`"
+                >
+                  <td class="px-3 py-2 whitespace-nowrap">{{ driverLabel(row.driverCd) }} ({{ row.driverCd }})</td>
+                  <td class="px-3 py-2 whitespace-nowrap">{{ row.month }} <span class="text-xs text-gray-500">({{ row.payMonth }})</span></td>
+                  <td class="px-3 py-2 min-w-40">
+                    <span class="text-xs rounded px-2 py-0.5 whitespace-nowrap" :class="SALARY_STATE_CLASS[row.state]">{{ LITIGATION_SALARY_STATE_LABELS[row.state] }}</span>
+                    <div v-if="row.message" class="text-xs text-gray-600 dark:text-gray-400 mt-1">{{ row.message }}</div>
+                  </td>
+                  <template v-if="row.compared">
+                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ fmtYen(row.compared.csvBase) }} / {{ fmtYen(row.compared.sysBase) }} / {{ fmtDiff(row.compared.diffBase) }}</td>
+                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">
+                      {{ fmtYen(row.compared.csvOvertime) }} / {{ fmtYen(row.compared.sysOvertime) }} / {{ fmtDiff(row.compared.diffOvertime) }}
+                      <div v-if="row.compared.overtimeFixed" class="text-xs text-gray-500">月給 (固定残業) — 差は出さない</div>
+                    </td>
+                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ fmtYen(row.compared.csvTotal) }} / {{ fmtYen(row.compared.sysTotal) }} / {{ fmtDiff(row.compared.diffTotal) }}</td>
+                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ row.compared.sysWorkDays }} 日 / {{ Math.round(row.compared.sysOvertimeMinutes / 6) / 10 }} h</td>
+                  </template>
+                  <td v-else colspan="4" class="px-3 py-2 text-xs text-gray-400">-</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
