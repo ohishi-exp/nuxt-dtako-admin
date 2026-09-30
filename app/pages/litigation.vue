@@ -87,11 +87,13 @@ import {
   buildLitigationSalaryRows,
   LITIGATION_SALARY_STATE_LABELS,
   litigationPayrollMonths,
+  litigationRegisterCandidates,
+  type LitigationRegisterCandidate,
   type LitigationSalaryState,
 } from '~/utils/litigation-salary'
 import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
 import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
-import { buildCdMapEntries, type EmployeeMasterGetResponse } from '~/utils/employee-master'
+import { buildCdMapEntries, type EmployeeMasterEntry, type EmployeeMasterGetResponse } from '~/utils/employee-master'
 import { parseCompMap } from '~/utils/dtako-comps'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import { dtakoCompDisplay, pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
@@ -772,10 +774,14 @@ const salaryPayroll = ref(new Map<string, LitigationFetched<SalaryCsvRow[]>>())
 const salaryPayrollSync = ref(new Map<string, ReturnType<typeof foldPayrollSync>>())
 const salaryConfig = ref<SalaryItemConfig>({ items: {} })
 const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
+/** 社員マスタの全件 (登録候補から既に在る (会社, 給与コード) を外すため) */
+const salaryEmployees = ref<EmployeeMasterEntry[]>([])
 const salaryLoading = ref(false)
 const salaryProgress = ref('')
 const salaryLoadingPayMonth = ref<string | null>(null)
 const salaryError = ref('')
+const salaryRegistering = ref(false)
+const salaryRegisterMessage = ref('')
 let salaryEpoch = 0
 const SALARY_RETRY = '「給与大臣から読み直す」を押してやり直してください'
 
@@ -787,6 +793,7 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value
   salaryLoadingPayMonth.value = null
   salaryProgress.value = ''
   salaryError.value = ''
+  salaryRegisterMessage.value = ''
 })
 
 // 給与比較タブを開いたら明細を自動で読む。案件切替の watch (上) が salaryPayroll を空にした後に走らせる
@@ -846,7 +853,8 @@ async function loadSalaryPayroll() {
       $fetch<{ data: SalaryItemConfig | null }>('/restraint-api/salary-item-config', { headers: authHeaders() }),
     ])
     if (epoch !== salaryEpoch) return
-    salaryCdMap.value = buildCdMapEntries(employees.employees ?? [])
+    salaryEmployees.value = employees.employees ?? []
+    salaryCdMap.value = buildCdMapEntries(salaryEmployees.value)
     salaryConfig.value = config.data ?? { items: {} }
     const companies = (parseCompMap(compMapRaw).find(c => c.compId === viewerComp.value)?.payrollCompanies ?? [])
       .map(c => c.payrollCompany)
@@ -899,6 +907,53 @@ async function loadSalaryPayroll() {
       salaryLoading.value = false
       salaryLoadingPayMonth.value = null
     }
+  }
+}
+
+// --- 給与比較タブ: 「明細なし」の乗務員を、その場で社員マスタに 1 人ずつ登録する ---
+// 拘束×賃金へ移って 給与DB 取り込み → 突合 → 保存 をしなくて済むように、読んだ明細の氏名から一意に引き当てる
+const salaryRegisterCandidates = computed(() => litigationRegisterCandidates({
+  payrollRows: [...salaryPayroll.value.values()].flatMap(p => (p.ok ? p.value : [])),
+  drivers: drivers.value.map(d => ({ summary: { driverCd: d.driver_cd, driverName: d.driver_name } })),
+  cdMap: salaryCdMap.value,
+  registered: salaryEmployees.value,
+  caseDriverCds: openCase.value?.driverCds ?? [],
+}))
+
+/** 1 人だけ PUT する (金額は送らない)。成功したら社員マスタを読み直して引き当てを作り直す — 明細は読み直さない */
+async function registerSalaryEmployee(c: LitigationRegisterCandidate) {
+  if (salaryRegistering.value) return
+  const epoch = salaryEpoch
+  salaryRegistering.value = true
+  salaryRegisterMessage.value = ''
+  const label = `${c.payrollCd} ${c.name} (会社 ${c.company}) → 乗務員 ${c.driverCd}`
+  let saved = false
+  try {
+    await $fetch('/restraint-api/employee-master', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: {
+        employees: [{ company: c.company, payrollCd: c.payrollCd, name: c.name, driverCd: c.driverCd, hireDate: null, retireDate: null }],
+        attrs: [],
+        deleteAttrs: [],
+        deleteEmployees: [],
+      },
+    })
+    saved = true
+    const employees = await $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', { headers: authHeaders() })
+    if (epoch !== salaryEpoch) return
+    salaryEmployees.value = employees.employees ?? []
+    salaryCdMap.value = buildCdMapEntries(salaryEmployees.value)
+    salaryRegisterMessage.value = `社員マスタに登録しました: ${label}`
+  }
+  catch (e) {
+    if (epoch !== salaryEpoch) return
+    salaryRegisterMessage.value = saved
+      ? `社員マスタに登録しましたが、読み直せませんでした: ${describeCaughtError(e, SALARY_RETRY)}`
+      : `社員マスタに登録できませんでした (${label}): ${describeCaughtError(e, 'もう一度押してください')}`
+  }
+  finally {
+    salaryRegistering.value = false
   }
 }
 
@@ -1532,6 +1587,26 @@ function fmtDateTime(iso: string): string {
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
             / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
           </div>
+          <div v-if="salaryCounts.noPayroll > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-register">
+            <template v-if="salaryRegisterCandidates.length > 0">
+              <span class="text-xs text-gray-600 dark:text-gray-400">明細の氏名から乗務員に一意に引き当たりました (社員マスタに未登録):</span>
+              <UButton
+                v-for="c in salaryRegisterCandidates"
+                :key="`${c.company}|${c.payrollCd}`"
+                size="xs"
+                icon="i-lucide-user-plus"
+                :label="`社員マスタに登録: ${c.payrollCd} ${c.name} (会社 ${c.company}) → 乗務員 ${c.driverCd}`"
+                :loading="salaryRegistering"
+                :disabled="salaryRegistering || salaryLoading"
+                data-testid="litigation-salary-register-button"
+                @click="registerSalaryEmployee(c)"
+              />
+            </template>
+            <span v-else class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-register-hint">
+              「明細なし」の乗務員を明細の氏名から一意に引き当てられません (同姓同名・氏名の違い・既に登録済みの給与コード)。拘束×賃金の社員マスタタブで給与コードと乗務員CD を登録してください
+            </span>
+          </div>
+          <div v-if="salaryRegisterMessage" class="text-xs text-gray-700 dark:text-gray-300" data-testid="litigation-salary-register-message">{{ salaryRegisterMessage }}</div>
 
           <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
             <table class="w-full text-sm" data-testid="litigation-salary-table">

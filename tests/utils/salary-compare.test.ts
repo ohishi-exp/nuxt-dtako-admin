@@ -641,6 +641,12 @@ describe('suggestCdMapEntries', () => {
     const out = suggestCdMapEntries(rows, reports, { entries: {} })
     expect(out).toEqual({ '有限会社|1412|柳井亮祐': '1587' })
   })
+
+  it('reportRows は summary の乗務員CD・氏名だけで足りる (訴訟準備は乗務員一覧から渡す)', () => {
+    const rows = [csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村　一由' })]
+    const summaries = reports.map(r => ({ summary: { driverCd: r.summary.driverCd, driverName: r.summary.driverName } }))
+    expect(suggestCdMapEntries(rows, summaries, { entries: {} })).toEqual(suggestCdMapEntries(rows, reports, { entries: {} }))
+  })
 })
 
 describe('compareSalaryMonth', () => {

@@ -387,7 +387,8 @@ export function resolveCdKey(row: SalaryCsvRow, cdMap: SalaryCdMap): string {
  */
 export function suggestCdMapEntries(
   csvRows: SalaryCsvRow[],
-  reportRows: WageReportRow[],
+  // 読むのは summary の乗務員CD・氏名だけ — 訴訟準備は wage-report でなく乗務員一覧から渡す
+  reportRows: readonly { summary: { driverCd: string, driverName: string } }[],
   cdMap: SalaryCdMap,
 ): Record<string, string> {
   // 乗務員CD (前ゼロ除去) → 氏名の正規化キー。コードがそのまま一致していても
