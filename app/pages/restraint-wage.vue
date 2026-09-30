@@ -39,6 +39,7 @@ import {
   groupMinWageRows,
   invariantRowStatus,
   isMonthlyOvertimeOver60h,
+  fmtRatePerHour,
   isTimecardSynced,
   MIN_WAGE_DEFAULT_KEY,
   MIN_WAGE_JOB_GROUP_LABEL,
@@ -2167,7 +2168,7 @@ function salaryOvertimeMapFor(ym: string, rows: WageReportRow[]): Map<string, Sa
   const map = new Map<string, SalaryOvertime>()
   const csvRows = (salaryParsed.value?.rows ?? []).filter(r => r.month === nextYm(ym))
   if (!csvRows.length) return map
-  const compared = compareSalaryMonth(csvRows, rows, salaryItemConfig.value, salaryCdMap.value)
+  const compared = compareSalaryMonth(csvRows, rows, salaryItemConfig.value, ym, salaryCdMap.value)
   for (const r of compared.rows) {
     map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), { amount: r.csvOvertime, hours: r.csvOvertimeHours })
   }
@@ -3709,7 +3710,7 @@ const salaryMonthRows = computed(() =>
 const salaryComparison = computed<SalaryComparison | null>(() => {
   const src = displayReport.value
   if (!salaryParsed.value || !src || src.month !== month.value) return null
-  return compareSalaryMonth(salaryMonthRows.value, src.rows, salaryItemConfig.value, salaryCdMap.value)
+  return compareSalaryMonth(salaryMonthRows.value, src.rows, salaryItemConfig.value, month.value, salaryCdMap.value)
 })
 
 // ---- 給与比較タブの表示状態 (Refs #554) ----
@@ -4089,11 +4090,6 @@ const paidAttendanceByDriver = computed(() => {
   }
   return map
 })
-
-/** 基礎単価(実績) の表示 (円/h、整数丸め。null は "-")。 */
-function fmtRatePerHour(v: number | null): string {
-  return v == null ? '-' : Math.round(v).toLocaleString('ja-JP')
-}
 
 /**
  * 差額表示 (0 は "±0"、正負は符号つき)。
@@ -6219,8 +6215,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
                            `row.wage.overtimeMinutes` (時間外+週40超過) だけを見ていた頃は
                            時間外深夜が丸ごと落ち、60h 超なのに橙が点かない行が
                            毎月 4〜9 名いた (2026-01〜07 の本番データで実測、Refs #670) -->
-                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage) ? 'text-amber-600 font-medium' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.overtime) }}</div>
-                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage) ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.weekly40Excess) }}</div>
+                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage, month) ? 'text-amber-600 font-medium' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.overtime) }}</div>
+                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage, month) ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.weekly40Excess) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualOvertimePay, row.wage.overtimeMinutes) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.actualOvertimePay) }}</div>
                     </td>
@@ -6228,7 +6224,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <!-- 時間外深夜も月60時間の判定に入るので、橙の条件は残業代列と同じ。
                            ここだけ灰色のままにすると「60h 超の原因はこの列なのに、
                            この列は 60h に関係ない」と読める (Refs #670) -->
-                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage) ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.nightOvertimeMinutes) }}</div>
+                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage, month) ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.nightOvertimeMinutes) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualNightOvertimePay, row.wage.nightOvertimeMinutes) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.actualNightOvertimePay) }}</div>
                     </td>

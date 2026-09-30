@@ -6,6 +6,7 @@ import {
   computeMinWageOvertimePay,
   computeWageAmounts,
   computeWageRow,
+  OVERTIME_OVER60H_EFFECTIVE_FROM,
   dayOfWeek,
   DEFAULT_WAGE_CONFIG,
   emptyCategoryMinutes,
@@ -715,6 +716,55 @@ describe('computeWageAmounts', () => {
       1000, DEFAULT_WAGE_CONFIG,
     )
     expect(a.total).toBe(b.total)
+  })
+})
+
+// 60h 超の 1.5 倍は 2023-04 勤務月から。猶予期間 (〜2023-03) は 60h 超も 1.25 倍。
+// 境界は computeWageRow が決める — 効くのは 単価マスタ換算 (computeWageAmounts) と
+// 最低賃金換算 (splitMinWageOvertimePay) の 2 か所
+describe('computeWageRow: 60h 超の割増の境界 (OVERTIME_OVER60H_EFFECTIVE_FROM)', () => {
+  const wageMaster: WageMaster = {
+    drivers: { 9901: { name: '試験　太郎', rates: [{ effectiveFrom: '2022-01-01', hourlyRate: 1000 }] } },
+  }
+  const minWageMaster: MinWageMaster = {
+    prefectures: { 佐賀: [{ effectiveFrom: '2022-10-01', rate: 900 }] },
+    branchToPrefecture: { 'テスト運輸　第一営業所': '佐賀' },
+    defaultPrefecture: '佐賀',
+  }
+  // 20 日 × 時間外 5h = 100h (60h 枠 + 超過 40h)
+  const overSummary = summary({
+    workingMinutes: 20 * 780,
+    restraintMinutes: 20 * 900,
+    days: Array.from({ length: 20 }, (_, i) => day(i + 1, { workingMinutes: 780, overtimeMinutes: 300 })),
+  })
+  const run = (year: number, month: number) => computeWageRow(overSummary, year, month, wageMaster, minWageMaster, DEFAULT_WAGE_CONFIG)
+
+  it('境界の定数は 2023-04', () => {
+    expect(OVERTIME_OVER60H_EFFECTIVE_FROM).toBe('2023-04')
+  })
+
+  it('単価マスタ換算 (computeWageAmounts): 2023-03 は 60h 超も 1.25、2023-04 は超過分だけ 1.5', () => {
+    const before = run(2023, 3)
+    const after = run(2023, 4)
+    // 時間外 + 週40超過 (週40超過の分がこの入力では数分出るので、時間は行から読む)
+    const h = before.overtimeMinutes / 60
+    expect(h).toBeGreaterThan(60)
+    const pay = (r: typeof before) => r.amounts!.overtime + r.amounts!.weekly40Excess
+    expect(Math.abs(pay(before) - h * 1000 * 1.25)).toBeLessThanOrEqual(1)
+    expect(Math.abs(pay(after) - (60 * 1000 * 1.25 + (h - 60) * 1000 * 1.5))).toBeLessThanOrEqual(1)
+  })
+
+  it('最低賃金換算 (splitMinWageOvertimePay): 2023-03 は 60h 超も 1.25、2023-04 は超過分だけ 1.5', () => {
+    const before = run(2023, 3)
+    const after = run(2023, 4)
+    const h = before.overtimeMinutes / 60
+    expect(before.minWageOvertimePay).toBe(Math.round(h * 900 * 1.25))
+    expect(after.minWageOvertimePay).toBe(Math.round(60 * 900 * 1.25 + (h - 60) * 900 * 1.5))
+  })
+
+  it('設定の係数 (overtimeOver60h) 自体は書き換えない', () => {
+    run(2023, 3)
+    expect(DEFAULT_WAGE_CONFIG.rates.overtimeOver60h).toBe(1.5)
   })
 })
 

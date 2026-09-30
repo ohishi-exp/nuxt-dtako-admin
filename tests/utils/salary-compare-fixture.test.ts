@@ -56,7 +56,7 @@ describe('parseSalaryCsv (共有 fixture)', () => {
 
 describe('compareSalaryMonth (共有 fixture)', () => {
   const parsed = parseSalaryCsv(csvText)
-  const result = compareSalaryMonth(parsed.rows, reportRows, NO_CONFIG)
+  const result = compareSalaryMonth(parsed.rows, reportRows, NO_CONFIG, '2023-04')
   const byCd = Object.fromEntries(result.rows.map(r => [r.driverCd, r]))
   const goldenByCd = Object.fromEntries(golden.map(g => [g.driverCd, g.wage]))
 
@@ -123,7 +123,7 @@ describe('compareSalaryMonth (共有 fixture)', () => {
 
   it('区分設定で 深夜手当 を基本給扱いに変えると集計が移る', () => {
     const config: SalaryItemConfig = { items: { 深夜手当: 'base' } }
-    const row = compareSalaryMonth(parsed.rows, reportRows, config).rows
+    const row = compareSalaryMonth(parsed.rows, reportRows, config, '2023-04').rows
       .find(r => r.driverCd === '9901')!
     expect(row.csvBase).toBe(221200 + 1750)
     expect(row.csvOvertime).toBe(39200)
@@ -190,7 +190,7 @@ describe('compareSalaryMonth (共有 fixture)', () => {
 
   it('区分設定で 住宅手当 を両方除外に変えると最低賃金算入分から抜ける', () => {
     const config: SalaryItemConfig = { items: { 住宅手当: 'excluded' } }
-    const row = compareSalaryMonth(parsed.rows, reportRows, config).rows
+    const row = compareSalaryMonth(parsed.rows, reportRows, config, '2023-04').rows
       .find(r => r.driverCd === '9901')!
     expect(row.csvMinWageEligible).toBe(221200)
     expect(row.csvPremiumBase).toBe(221200)

@@ -600,6 +600,19 @@ export function isTimecardSynced(ym: string, timecardSyncedMonths: readonly stri
 export const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
 
 /**
+ * 月60時間超の時間外割増 (1.5 倍、労基法37条1項但書) が中小企業に適用される最初の勤務月。
+ * 猶予期間 (〜2023-03) の月は 60 時間超も 1.25 倍のまま。
+ * **relay の同名定数 (`workers/dtako-scraper-relay/src/restraint-wage.ts`) と同値**にすること
+ * (worker から app を import できないので 2 か所に置く)。
+ */
+export const OVERTIME_OVER60H_EFFECTIVE_FROM = '2023-04'
+
+/** 勤務月 (`YYYY-MM`) が 60 時間超の 1.5 倍割増の対象か。 */
+export function isOver60hPremiumMonth(month: string): boolean {
+  return month >= OVERTIME_OVER60H_EFFECTIVE_FROM
+}
+
+/**
  * その乗務員のその月が **月60時間超の時間外労働** (労基法37条1項但書) に当たるか。
  *
  * **判定の対象は 時間外 + 週40超過 + 時間外深夜 の合算** — worker の
@@ -611,6 +624,9 @@ export const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
  * 法定休日の実働は労基法上その日に時間外の概念が無く休日割増に一本化されるので、
  * ここにも算入しない (`classifyMonth` が別区分に落としているのと同じ扱い)。
  *
+ * **`month` (勤務月 `YYYY-MM`) が 2023-03 以前なら常に false** — 中小企業の猶予期間で
+ * 60h 超も 1.25 倍のまま (`OVERTIME_OVER60H_EFFECTIVE_FROM`)。
+ *
  * **これは「時間が 60h を超えたか」の真偽だけを返す関数で、金額はここでは出さない。**
  * 単価マスタ換算の金額側 (`computeWageAmounts`) も月60h 超の割増を反映するように
  * なったが (Refs #670)、**割増が付くのは 60h を超えたぶんだけ**なので、
@@ -619,7 +635,10 @@ export const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
  */
 export function isMonthlyOvertimeOver60h(
   wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>,
+  month: string,
 ): boolean {
+  // 猶予期間の月は 60h を超えても割増が変わらないので警告色を点けない
+  if (!isOver60hPremiumMonth(month)) return false
   return wage.overtimeMinutes + wage.nightOvertimeMinutes > MONTHLY_OVERTIME_THRESHOLD_MINUTES
 }
 
@@ -817,4 +836,9 @@ export const EMPTY_WAGE_REPORT_NOTICE: Record<EmptyWageReportCause, string> = {
   // 拾い読みで**逆の意味に読まれる**うえ、文言を機械的に押さえられなくなる。
   'archive-present':
     'この月の summary はアーカイブに在るのに、集計が 0 行で返りました (取り込み漏れではありません — 読み先の不具合が疑われます。ichiban の写しが空のまま同期済みになっている等。再取得しても直らないので開発へ報告してください)',
+}
+
+/** 基礎単価(実績) の表示 (円/h、整数丸め。null は "-")。 */
+export function fmtRatePerHour(v: number | null): string {
+  return v == null ? '-' : Math.round(v).toLocaleString('ja-JP')
 }

@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs, TimecardKosokuState, WageInvariantCheck, WageReportResponse } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, fmtRatePerHour, groupMinWageRows, isMonthlyOvertimeOver60h, isOver60hPremiumMonth, OVERTIME_OVER60H_EFFECTIVE_FROM, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -520,27 +520,52 @@ describe('fmtYen が `-0` を出さない (Refs #843)', () => {
 
 describe('isMonthlyOvertimeOver60h (月60時間超の時間外労働、Refs #670)', () => {
   it('時間外+週40超過 だけで 60 時間を超えたら true', () => {
-    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3601, nightOvertimeMinutes: 0 })).toBe(true)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3601, nightOvertimeMinutes: 0 }, '2023-04')).toBe(true)
   })
 
   it('ちょうど 60 時間は false (「超」なので等号は含まない)', () => {
-    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: MONTHLY_OVERTIME_THRESHOLD_MINUTES, nightOvertimeMinutes: 0 })).toBe(false)
-    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3000, nightOvertimeMinutes: 600 })).toBe(false)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: MONTHLY_OVERTIME_THRESHOLD_MINUTES, nightOvertimeMinutes: 0 }, '2023-04')).toBe(false)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3000, nightOvertimeMinutes: 600 }, '2023-04')).toBe(false)
   })
 
   it('60 時間に届かなければ false', () => {
-    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 1200, nightOvertimeMinutes: 300 })).toBe(false)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 1200, nightOvertimeMinutes: 300 }, '2023-04')).toBe(false)
   })
 
   // ★ この形が壊れていた: 時間外深夜を足さないと 60h 超が見逃される
   // (2026-01〜07 の本番データで毎月 4〜9 名。例 1523/2026-06 は
   //  時間外+週40超過 が 60h 未満なのに 時間外深夜 を足すと超える)
   it('時間外深夜を足して初めて 60 時間を超える行も true', () => {
-    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3540, nightOvertimeMinutes: 120 })).toBe(true)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3540, nightOvertimeMinutes: 120 }, '2023-04')).toBe(true)
   })
 
   it('時間外深夜だけで 60 時間を超えた行も true', () => {
-    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 0, nightOvertimeMinutes: 4000 })).toBe(true)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 0, nightOvertimeMinutes: 4000 }, '2023-04')).toBe(true)
+  })
+
+  // 猶予期間 (〜2023-03) は 60h を超えても割増が変わらないので橙を点けない
+  it('2023-03 以前の月は 60 時間を超えていても false', () => {
+    const over = { overtimeMinutes: 4000, nightOvertimeMinutes: 100 }
+    expect(isMonthlyOvertimeOver60h(over, '2023-03')).toBe(false)
+    expect(isMonthlyOvertimeOver60h(over, '2023-04')).toBe(true)
+  })
+})
+
+describe('isOver60hPremiumMonth (60h 超 1.5 倍の適用開始月)', () => {
+  it('境界は 2023-04 (relay の同名定数と同値)', () => {
+    expect(OVERTIME_OVER60H_EFFECTIVE_FROM).toBe('2023-04')
+    expect(isOver60hPremiumMonth('2023-03')).toBe(false)
+    expect(isOver60hPremiumMonth('2023-04')).toBe(true)
+    expect(isOver60hPremiumMonth('2022-12')).toBe(false)
+    expect(isOver60hPremiumMonth('2026-09')).toBe(true)
+  })
+})
+
+describe('fmtRatePerHour (基礎単価の表示)', () => {
+  it('円/h を整数丸めして桁区切りにし、null は「-」', () => {
+    expect(fmtRatePerHour(1234.6)).toBe('1,235')
+    expect(fmtRatePerHour(500)).toBe('500')
+    expect(fmtRatePerHour(null)).toBe('-')
   })
 })
 

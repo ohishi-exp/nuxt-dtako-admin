@@ -80,9 +80,9 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
       continue
     }
     // 明細の月ラベルは支給日から採る (payrollToParsedSalary) ので、支給月の行だけを使う
-    // (拘束×賃金の salaryMonthRows と同じ絞り方。compareSalaryMonth 自身は月を見ない)
+    // (拘束×賃金の salaryMonthRows と同じ絞り方。compareSalaryMonth の month は 60h 超の割増率用の勤務月)
     const payMonth = nextYm(month)
-    const compared = compareSalaryMonth(pay.value.filter(r => r.month === payMonth), reportRows, input.config, input.cdMap)
+    const compared = compareSalaryMonth(pay.value.filter(r => r.month === payMonth), reportRows, input.config, month, input.cdMap)
     byMonth.set(month, { rows: compared.rows, conflictCds: compared.conflicts.map(c => c.driverCd) })
   }
 
@@ -219,4 +219,14 @@ export function litigationAttrsCandidates(input: {
 export function narrowKyuyoEmployees(res: KyuyoEmployeesResponse, payrollCd: string): KyuyoEmployeesResponse {
   const key = (v: string) => String(Number(v.trim()))
   return { ...res, employees: res.employees.filter(r => key(r.employee_code_key) === key(payrollCd)) }
+}
+
+/**
+ * 差の符号で決める文字色 (給与比較の「差」の行)。正 (> 0) は青、負 (< 0) は赤、
+ * 0 と null (計算できない) は色を付けない。
+ * 拘束×賃金の給与比較 (`restraint-wage.vue`) の色はこれと独立 (そちらは変えない)。
+ */
+export function diffSignClass(v: number | null): string {
+  if (v === null || v === 0) return ''
+  return v > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'
 }

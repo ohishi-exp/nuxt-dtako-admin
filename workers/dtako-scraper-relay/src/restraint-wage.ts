@@ -890,7 +890,29 @@ export interface WageRow {
 const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60;
 
 /**
+ * 月60時間超の時間外割増 (1.5 倍) が中小企業に適用される最初の勤務月 (`YYYY-MM`)。
+ * 猶予期間 (〜2023-03) の月は 60 時間超も `rates.overtime` (1.25) のまま。
+ * **front の同名定数 (`app/utils/restraint-wage-view.ts`) と同値**にすること
+ * (worker から app を import できないので 2 か所に置く)。
+ */
+export const OVERTIME_OVER60H_EFFECTIVE_FROM = "2023-04";
+
+/**
+ * 対象月で実効の設定を返す。猶予期間の月は `overtimeOver60h` を `overtime` に揃える
+ * (`splitMinWageOvertimePay` / `computeWageAmounts` の 60h 超係数がこれ 1 か所で決まる)。
+ * 係数の出どころ (`WageConfig.rates.overtimeOver60h`) 自体は変えない。
+ */
+function effectiveConfigForMonth(config: WageConfig, year: number, month: number): WageConfig {
+  const ym = `${year}-${String(month).padStart(2, "0")}`;
+  if (ym >= OVERTIME_OVER60H_EFFECTIVE_FROM) return config;
+  return { ...config, rates: { ...config.rates, overtimeOver60h: config.rates.overtime } };
+}
+
+/**
  * 最低賃金を基礎額とみなした場合の割増残業代。
+ *
+ * **本番 (src) からは呼ばれない** (テスト専用)。月ごとの 60h 超係数の境界は
+ * `computeWageRow` が決める (`effectiveConfigForMonth`)。
  *
  * 労基法37条の割増は時間外軸 (月60hまで1.25倍・超過分1.5倍) と深夜軸 (常時+0.25倍)
  * が独立して加算される。時間外深夜の時間は月60h判定の対象 (時間外労働) に含めつつ、
@@ -983,6 +1005,8 @@ function over60hRate(key: OvertimeKey, rates: WageConfig["rates"]): number {
  * 「時間 × 単価 × 係数」の単純積。
  *
  * **代替休暇 (労基法37条3項) は運用していないため、60h 超は全額 1.5 倍で計上する**
+ * (ただし猶予期間 〜2023-03 の月は 1.25 倍 — `computeWageRow` が `effectiveConfigForMonth` で
+ * `overtimeOver60h` を差し替えて渡す)
  * (オーナー確認 2026-08-26)。運用していないものを分岐で用意すると死に分岐になり、
  * 「運用しているのかもしれない」と次の人に読ませるので、置かない。
  *
@@ -1038,6 +1062,8 @@ export function computeWageRow(
   missing = false,
 ): WageRow {
   const hourlyRate = rateForMonth(wageMaster.drivers[summary.driverCd]?.rates ?? [], year, month);
+  // 60h 超の係数だけが月で変わる (2023-03 以前は 1.25)。金額を出す 2 か所はこれを使う
+  const monthConfig = effectiveConfigForMonth(config, year, month);
   const minutes = classifyMonth(summary.days, year, month, config, prevMonthDays);
   const minWage = minWageForBranch(minWageMaster, summary.branchName, year, month, employeeBranch);
 
@@ -1048,7 +1074,7 @@ export function computeWageRow(
   let totalAmount: number | null = null;
   let hourlyEquivalent: number | null = null;
   if (hourlyRate !== null && !missing) {
-    const computed = computeWageAmounts(minutes, hourlyRate, config);
+    const computed = computeWageAmounts(minutes, hourlyRate, monthConfig);
     amounts = computed.amounts;
     totalAmount = computed.total;
     if (basisMinutes !== null && basisMinutes > 0) {
@@ -1070,7 +1096,7 @@ export function computeWageRow(
   let minWageOvertimePay: number | null = null;
   let minWageNightOvertimePay: number | null = null;
   if (minWage.rate !== null && !missing) {
-    const split = splitMinWageOvertimePay(overtimeMinutes, nightOvertimeMinutes, minWage.rate, config);
+    const split = splitMinWageOvertimePay(overtimeMinutes, nightOvertimeMinutes, minWage.rate, monthConfig);
     minWageOvertimePay = split.normalPay;
     minWageNightOvertimePay = split.nightPay;
   }
