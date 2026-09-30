@@ -91,6 +91,7 @@ import {
   litigationPayrollMonths,
   litigationRegisterCandidates,
   narrowKyuyoEmployees,
+  salaryRowCells,
   splitPayrollTargets,
   type LitigationRegisterCandidate,
   type PayrollTarget,
@@ -1234,7 +1235,7 @@ const IMPORT_KIND_CLASS: Record<LitigationImportOutcome['kind'], string> = {
   error: 'text-red-700 dark:text-red-400',
 }
 
-// --- 印刷: 案件の概要 + 出力の結果 + エラーの表を 1 つの紙面に ---
+// --- 印刷: 案件の概要 + いま開いているタブの中身を 1 つの紙面に ---
 const printedAt = ref('')
 function printCase() {
   printedAt.value = fmtDateTime(new Date().toISOString())
@@ -1439,7 +1440,7 @@ function fmtDateTime(iso: string): string {
             </span>
           </h3>
           <div class="flex items-center gap-1">
-            <UButton icon="i-lucide-printer" label="印刷" variant="soft" size="sm" data-testid="litigation-print" @click="printCase" />
+            <UButton icon="i-lucide-printer" label="このタブを印刷" variant="soft" size="sm" data-testid="litigation-print" @click="printCase" />
             <UButton icon="i-lucide-x" label="閉じる" variant="ghost" size="sm" @click="closeCaseDetail" />
           </div>
         </div>
@@ -1784,11 +1785,7 @@ function fmtDateTime(iso: string): string {
                   </td>
                   <template v-if="row.compared">
                     <td
-                      v-for="cell in [
-                        { key: 'base', csv: row.compared.csvBase, sys: row.compared.sysBase, diff: row.compared.diffBase },
-                        { key: 'overtime', csv: row.compared.csvOvertime, sys: row.compared.sysOvertime, diff: row.compared.diffOvertime },
-                        { key: 'total', csv: row.compared.csvTotal, sys: row.compared.sysTotal, diff: row.compared.diffTotal },
-                      ]"
+                      v-for="cell in salaryRowCells(row.compared).amounts"
                       :key="cell.key"
                       class="px-3 py-2 whitespace-nowrap tabular-nums"
                       :data-salary-cell="cell.key"
@@ -1796,19 +1793,19 @@ function fmtDateTime(iso: string): string {
                       <div class="flex justify-between gap-3" data-salary-line="csv"><span class="text-xs text-gray-500">明細</span><span>{{ fmtYen(cell.csv) }}</span></div>
                       <div class="flex justify-between gap-3" data-salary-line="sys"><span class="text-xs text-gray-500">計算</span><span>{{ fmtYen(cell.sys) }}</span></div>
                       <div class="flex justify-between gap-3" data-salary-line="diff" :class="diffSignClass(cell.diff)"><span class="text-xs text-gray-500">差</span><span>{{ fmtDiff(cell.diff) }}</span></div>
-                      <div v-if="cell.key === 'overtime' && row.compared.overtimeFixed" class="text-xs text-gray-500 text-right">月給 (固定残業) — 差は出さない</div>
+                      <div v-if="cell.key === 'overtime' && salaryRowCells(row.compared).overtimeFixed" class="text-xs text-gray-500 text-right">月給 (固定残業) — 差は出さない</div>
                     </td>
                     <td class="px-3 py-2 whitespace-nowrap tabular-nums" data-salary-cell="over37">
-                      <template v-if="row.compared.baseRateOvertimePay !== null">
-                        <div class="flex justify-between gap-3" data-salary-line="rate"><span class="text-xs text-gray-500">基礎単価</span><span>{{ fmtRatePerHour(row.compared.baseRateActual) }} 円/h</span></div>
-                        <div class="flex justify-between gap-3" data-salary-line="minutes"><span class="text-xs text-gray-500">残業時間</span><span>{{ fmtMinutes(row.compared.minWageOvertimeMinutes) }}</span></div>
-                        <div class="flex justify-between gap-3" data-salary-line="theory"><span class="text-xs text-gray-500">理論値</span><span>{{ fmtYen(row.compared.baseRateOvertimePay) }}</span></div>
-                        <div class="flex justify-between gap-3" data-salary-line="paid"><span class="text-xs text-gray-500">支給</span><span>{{ fmtYen(row.compared.csvOvertime) }}</span></div>
-                        <div class="flex justify-between gap-3" data-salary-line="diff37" :class="[diffSignClass(row.compared.diffCsvVsBaseRateOvertime), (row.compared.diffCsvVsBaseRateOvertime ?? 0) < 0 ? 'font-bold' : '']"><span class="text-xs text-gray-500">差</span><span>{{ fmtDiff(row.compared.diffCsvVsBaseRateOvertime) }}</span></div>
+                      <template v-if="salaryRowCells(row.compared).over37">
+                        <div class="flex justify-between gap-3" data-salary-line="rate"><span class="text-xs text-gray-500">基礎単価</span><span>{{ fmtRatePerHour(salaryRowCells(row.compared).over37!.rate) }} 円/h</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="minutes"><span class="text-xs text-gray-500">残業時間</span><span>{{ fmtMinutes(salaryRowCells(row.compared).over37!.minutes) }}</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="theory"><span class="text-xs text-gray-500">理論値</span><span>{{ fmtYen(salaryRowCells(row.compared).over37!.theory) }}</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="paid"><span class="text-xs text-gray-500">支給</span><span>{{ fmtYen(salaryRowCells(row.compared).over37!.paid) }}</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="diff37" :class="[diffSignClass(salaryRowCells(row.compared).over37!.diff), salaryRowCells(row.compared).over37!.shortfall ? 'font-bold' : '']"><span class="text-xs text-gray-500">差</span><span>{{ fmtDiff(salaryRowCells(row.compared).over37!.diff) }}</span></div>
                       </template>
-                      <div v-else class="text-xs text-gray-500 text-right" data-salary-line="none">- {{ row.compared.statutoryMinutes > 0 ? '(割増の基礎に入る支給が 0)' : '(法定内時間が 0)' }}</div>
+                      <div v-else class="text-xs text-gray-500 text-right" data-salary-line="none">- {{ salaryRowCells(row.compared).over37NoneReason }}</div>
                     </td>
-                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ row.compared.sysWorkDays }} 日 / {{ Math.round(row.compared.sysOvertimeMinutes / 6) / 10 }} h</td>
+                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ salaryRowCells(row.compared).workDays }} 日 / {{ salaryRowCells(row.compared).overtimeHours }} h</td>
                   </template>
                   <td v-else colspan="5" class="px-3 py-2 text-xs text-gray-400">-</td>
                 </tr>
@@ -1889,7 +1886,7 @@ function fmtDateTime(iso: string): string {
         </div>
       </div>
 
-      <!-- 印刷用の紙面 (画面には出さない)。案件の概要 + 出力の結果 + エラーの表 -->
+      <!-- 印刷用の紙面 (画面には出さない)。案件の概要 + いま開いているタブの中身だけ -->
       <div v-if="openCase" class="hidden print:block litigation-print" data-testid="litigation-print-sheet">
         <h1 class="text-base font-bold">訴訟準備: {{ openCase.name }}</h1>
         <div class="litigation-print-meta">
@@ -1898,6 +1895,7 @@ function fmtDateTime(iso: string): string {
         </div>
         <div v-if="openCase.memo" class="litigation-print-meta">メモ: {{ openCase.memo }}</div>
 
+        <div v-if="activeTab === 'output'" data-testid="litigation-print-output">
         <h2 class="font-bold mt-2">出力 (Y時間 Excel)</h2>
         <table class="litigation-print-table">
           <thead>
@@ -1918,6 +1916,13 @@ function fmtDateTime(iso: string): string {
           </tbody>
         </table>
 
+        <div v-if="chunkWarnings.length > 0" class="litigation-print-meta">
+          Y時間の警告 (冊単位):
+          <template v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
+        </div>
+        </div>
+
+        <div v-if="activeTab === 'errors'" data-testid="litigation-print-errors">
         <h2 class="font-bold mt-2">エラー</h2>
         <div class="litigation-print-meta">
           <template v-for="(k, i) in LITIGATION_CHECK_KEYS" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }}・異常なし {{ errorCounts[k].ok }}・判定できない {{ errorCounts[k].unknown }}・未実行 {{ errorCounts[k].pending }}</template>
@@ -1939,11 +1944,67 @@ function fmtDateTime(iso: string): string {
             </tr>
           </tbody>
         </table>
-        <div v-if="chunkWarnings.length > 0" class="litigation-print-meta">
-          Y時間の警告 (冊単位):
-          <template v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
+
         </div>
 
+        <div v-if="activeTab === 'salary'" class="litigation-print-salary" data-testid="litigation-print-salary">
+          <h2 class="font-bold mt-2">給与比較</h2>
+          <div v-if="salaryPayrollLoaded === 0" class="litigation-print-meta" data-testid="litigation-print-salary-empty">
+            給与比較は給与比較タブで明細を読み込むと印刷に入ります。
+          </div>
+          <template v-else>
+            <div class="litigation-print-meta">
+              <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
+              / 37条で不足 {{ salaryShortfall37Count }} 件
+              / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
+            </div>
+            <table class="litigation-print-table">
+              <thead>
+                <tr>
+                  <th rowspan="2">乗務員</th><th rowspan="2">勤務月 (支給月)</th><th rowspan="2">状態</th>
+                  <th colspan="3">基本給</th><th colspan="3">残業</th><th colspan="3">総支給</th>
+                  <th colspan="5">残業代 (37条)</th><th rowspan="2">勤務日 / 時間外</th>
+                </tr>
+                <tr>
+                  <template v-for="g in 3" :key="g"><th>明細</th><th>計算</th><th>差</th></template>
+                  <th>基礎単価</th><th>残業時間</th><th>理論値</th><th>支給</th><th>差</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in salaryRows" :key="`${row.driverCd}|${row.month}`" :data-print-salary-row="`${row.driverCd}|${row.month}`">
+                  <td>{{ driverLabel(row.driverCd) }} ({{ row.driverCd }})</td>
+                  <td>{{ row.month }} ({{ row.payMonth }})
+                    <div v-if="salaryPayrollSync.get(row.payMonth)" class="text-[7px]">{{ fmtPayrollSync(salaryPayrollSync.get(row.payMonth)!) }}</div>
+                  </td>
+                  <td>
+                    {{ LITIGATION_SALARY_STATE_LABELS[row.state] }}
+                    <div v-if="row.message">{{ row.message }}</div>
+                    <div v-if="row.payrollNote">{{ row.payrollNote }}</div>
+                  </td>
+                  <template v-if="row.compared">
+                    <template v-for="cell in salaryRowCells(row.compared).amounts" :key="cell.key">
+                      <td class="text-right">{{ fmtYen(cell.csv) }}</td>
+                      <td class="text-right">{{ fmtYen(cell.sys) }}</td>
+                      <td class="text-right" :class="diffSignClass(cell.diff)">{{ fmtDiff(cell.diff) }}<template v-if="cell.key === 'overtime' && salaryRowCells(row.compared).overtimeFixed"><br>固定残業</template></td>
+                    </template>
+                    <template v-if="salaryRowCells(row.compared).over37">
+                      <td class="text-right">{{ fmtRatePerHour(salaryRowCells(row.compared).over37!.rate) }} 円/h</td>
+                      <td class="text-right">{{ fmtMinutes(salaryRowCells(row.compared).over37!.minutes) }}</td>
+                      <td class="text-right">{{ fmtYen(salaryRowCells(row.compared).over37!.theory) }}</td>
+                      <td class="text-right">{{ fmtYen(salaryRowCells(row.compared).over37!.paid) }}</td>
+                      <td class="text-right" :class="[diffSignClass(salaryRowCells(row.compared).over37!.diff), salaryRowCells(row.compared).over37!.shortfall ? 'font-bold' : '']">{{ fmtDiff(salaryRowCells(row.compared).over37!.diff) }}</td>
+                    </template>
+                    <td v-else colspan="5">- {{ salaryRowCells(row.compared).over37NoneReason }}</td>
+                    <td class="text-right">{{ salaryRowCells(row.compared).workDays }} 日 / {{ salaryRowCells(row.compared).overtimeHours }} h</td>
+                  </template>
+                  <td v-else colspan="15">-</td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </div>
+
+        <div v-if="activeTab === 'changes'" data-testid="litigation-print-changes">
         <h2 class="font-bold mt-2">変更記録</h2>
         <div class="litigation-print-meta">
           <template v-if="changesFinished">{{ kintaiChangesNotice }} / {{ alcChangesNotice }}</template>
@@ -1963,6 +2024,7 @@ function fmtDateTime(iso: string): string {
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
     </template>
   </div>
@@ -1982,5 +2044,6 @@ function fmtDateTime(iso: string): string {
   .litigation-print-table th, .litigation-print-table td { border: 1px solid #999; padding: 1px 3px; text-align: left; vertical-align: top; }
   .litigation-print-table th { background: #eee; }
   .litigation-print-table tr { break-inside: avoid; }
+  .litigation-print-salary { font-size: 7.5px; }
 }
 </style>

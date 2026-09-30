@@ -1169,3 +1169,81 @@ describe('給与比較タブ: 明細を保存済みはまとめて、保存が�
     w.unmount()
   })
 })
+
+describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #1133)', () => {
+  const SECTIONS = ['output', 'errors', 'salary', 'changes'] as const
+  const sheet = (w: VueWrapper) => w.find('[data-testid="litigation-print-sheet"]')
+  const has = (w: VueWrapper, key: string) => sheet(w).find(`[data-testid="litigation-print-${key}"]`).exists()
+  const shown = (w: VueWrapper) => SECTIONS.filter(k => has(w, k))
+  const TAB_LABEL = { output: '出力', errors: 'エラー', salary: '給与比較', changes: '変更記録' } as const
+
+  it('★ タブごとに自分の節だけが出る (ほかの 3 つは DOM に無い)。紙面の頭は共通', async () => {
+    const w = await openErrorsTabAndRun()
+    for (const key of SECTIONS) {
+      await buttonByText(w, TAB_LABEL[key]).trigger('click')
+      await settle()
+      expect(shown(w)).toEqual([key])
+      expect(sheet(w).text()).toContain('訴訟準備: テスト事件')
+      expect(sheet(w).text()).toContain('期間 2025-01〜2025-02')
+    }
+    w.unmount()
+  })
+
+  it('ボタンのラベルは「このタブを印刷」', async () => {
+    const w = await openErrorsTabAndRun()
+    expect(w.find('[data-testid="litigation-print"]').text()).toContain('このタブを印刷')
+    w.unmount()
+  })
+
+  it('★ 給与比較: 明細を読み込んだ後は 1 か月 1 行で、比較済みの行は金額・37条の差、比べられない行は理由だけ。集計も入る', async () => {
+    const w = await openErrorsTabAndRun()
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    const salary = sheet(w).find('[data-testid="litigation-print-salary"]')
+    expect(salary.find('[data-testid="litigation-print-salary-empty"]').exists()).toBe(false)
+    expect(salary.text()).toContain('37条で不足 0 件')
+    expect(salary.text()).toContain('明細 読込済み 2 / 2 か月')
+    const jan = salary.find('[data-print-salary-row="1078|2025-01"]').text()
+    // 基本給 (明細 200,000 / 計算 200,000 / 差 0)・残業の差 +15,000・37条の理論値と差 +13,333・勤務日 / 時間外
+    expect(jan).toContain('200,000')
+    expect(jan).toContain('+15,000')
+    expect(jan).toContain('16,667')
+    expect(jan).toContain('+13,333')
+    expect(jan).toContain('(2025-02)')
+    // 比べられない行は状態と理由だけ (金額の列は空)
+    const feb = salary.find('[data-print-salary-row="1078|2025-02"]')
+    expect(feb.text()).toContain('拘束の材料が取れていない')
+    expect(feb.findAll('td').at(-1)!.text()).toBe('-')
+    // 差の色は画面と同じ。正は青で、太字は 37条の負だけ
+    const diff37 = salary.find('[data-print-salary-row="1078|2025-01"] td:nth-last-child(2)')
+    expect(diff37.classes()).toContain('text-blue-600')
+    expect(diff37.classes()).not.toContain('font-bold')
+    w.unmount()
+  })
+
+  it('★ 給与比較: 37条の差が負の行だけ太字 + 赤になる', async () => {
+    payrollOvertimePay = 10000 // 理論値 16,667 より少ない
+    const w = await openErrorsTabAndRun()
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    const diff37 = sheet(w).find('[data-print-salary-row="1078|2025-01"] td:nth-last-child(2)')
+    expect(diff37.text()).toBe('-6,667')
+    expect(diff37.classes()).toContain('font-bold')
+    expect(diff37.classes()).toContain('text-red-600')
+    expect(sheet(w).find('[data-testid="litigation-print-salary"]').text()).toContain('37条で不足 1 件')
+    w.unmount()
+  })
+
+  it('給与比較: 明細を読んでいなければ表の代わりに案内の 1 行 (給与比較タブを開く前)', async () => {
+    const w = await openErrorsTabAndRun()
+    // 給与比較タブを開かず、節だけを見る: 紙面は activeTab で出し分けるので、タブを開かないと節が無い。
+    // 明細が 403 で読めない案件を作って、読めないときの案内を見る
+    payrollForbidden = true
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    const salary = sheet(w).find('[data-testid="litigation-print-salary"]')
+    expect(salary.find('[data-testid="litigation-print-salary-empty"]').text()).toContain('給与比較タブで明細を読み込むと印刷に入ります')
+    expect(salary.find('table').exists()).toBe(false)
+    w.unmount()
+  })
+})
