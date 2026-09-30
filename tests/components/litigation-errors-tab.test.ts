@@ -94,6 +94,19 @@ let kyuyoEmployeeRows: Record<string, unknown>[] = []
 let kyuyoEmployeesFails = false
 /** 社員マスタの PUT を 500 にする */
 let employeePutFails = false
+/** `GET /api/kyuyo/synced-months` の応答の entries。null なら失敗 (unexpected) にする */
+let syncedEntries: { company: string, month: string }[] | null = null
+/** comp-map が返す給与大臣の会社 / 案件の終了月 (並列の検査で会社 × 月を増やす) */
+let payrollCompanies = ['0200']
+let caseToMonth = CASE.toMonth
+/** > 0 なら payroll は非同期にこの ms 待つ (同期スタブだと同時に飛ぶ本数が測れない)。in-flight を数える */
+let payrollDelayMs = 0
+let payrollInflight = 0
+let payrollPeak = 0
+/** payroll の開始順 (`会社|勤務月`) と、開始した時点の in-flight 本数 */
+let payrollStarts: { key: string, inflight: number }[] = []
+/** `会社|勤務月` の payroll を 500 にする */
+let payrollFailKey: string | null = null
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -109,7 +122,7 @@ function stubDollarFetch() {
       return { items: storedItems }
     }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
-    if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, updatedAt: caseUpdatedAt }] }
+    if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, toMonth: caseToMonth, updatedAt: caseUpdatedAt }] }
     if (url === '/restraint-api/kintai/onprem-month-operations') {
       if (q.month === '2025-01') throw Object.assign(new Error('reading-dates が 502'), { statusCode: 502 })
       return { month: q.month, driver_cd: q.driver_cd, ope_nos: febOnpremOpeNos, truncated: false }
@@ -132,7 +145,7 @@ function stubDollarFetch() {
       }
     }
     if (url === '/restraint-api/comp-map') {
-      return { comps: [{ compId: '27324455', compLabel: '大石運輸倉庫', payrollCompanies: [{ payrollCompany: '0200', legacyLabel: null, payrollCompanyName: null }] }] }
+      return { comps: [{ compId: '27324455', compLabel: '大石運輸倉庫', payrollCompanies: payrollCompanies.map(c => ({ payrollCompany: c, legacyLabel: null, payrollCompanyName: null })) }] }
     }
     if (url === '/restraint-api/employee-master') {
       if (opts.method === 'PUT') {
@@ -152,9 +165,20 @@ function stubDollarFetch() {
       return { company: q.company, company_name: 'テスト運輸', month: q.month, database: 'KYDATA0200_125C', employees: kyuyoEmployeeRows, warnings: [] }
     }
     if (url === '/restraint-api/salary-item-config') return { exists: true, data: { items: { 基本給: 'base', 残業手当: 'overtime' } } }
+    if (url === '/api/kyuyo/synced-months') {
+      if (!syncedEntries) throw Object.assign(new Error('synced-months down'), { statusCode: 500 })
+      return { entries: syncedEntries.map(e => ({ ...e, row_count: 1, synced_at: '2026-09-20T01:00:00Z' })) }
+    }
     if (url === '/api/kyuyo/payroll') {
       if (payrollForbidden) throw Object.assign(new Error('forbidden'), { statusCode: 403 })
       if (payrollGate && q.month === '2025-02') await payrollGate
+      if (payrollDelayMs > 0) {
+        payrollStarts.push({ key: `${q.company}|${q.month}`, inflight: ++payrollInflight })
+        payrollPeak = Math.max(payrollPeak, payrollInflight)
+        await new Promise(r => setTimeout(r, payrollDelayMs))
+        payrollInflight--
+      }
+      if (payrollFailKey === `${q.company}|${q.month}`) throw Object.assign(new Error('boom'), { statusCode: 500 })
       // 勤務月 q.month の翌月に支給 (pay_date が支給月)
       const [y, m] = (q.month as string).split('-').map(Number) as [number, number]
       const pay = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`
@@ -238,6 +262,14 @@ beforeEach(() => {
   storeGetGate = null
   febWageFails = true
   payrollGate = null
+  syncedEntries = null
+  payrollCompanies = ['0200']
+  caseToMonth = CASE.toMonth
+  payrollDelayMs = 0
+  payrollInflight = 0
+  payrollPeak = 0
+  payrollStarts = []
+  payrollFailKey = null
   employeeMaster = [{ company: '0200', payrollCd: '747', name: '甲野 太郎', driverCd: '1078' }]
   employeePutFails = false
   kyuyoEmployeesFails = false
@@ -565,13 +597,15 @@ describe('給与比較タブ', () => {
     const jan = w.find('[data-salary-row="1078|2025-01"]').text()
     expect(jan).toContain('比較済み')
     expect(jan).toContain('(2025-02)')
-    expect(jan).toContain('200,000 / 200,000 / 0')
+    const cell = (key: string) => w.findAll(`[data-salary-row="1078|2025-01"] [data-salary-cell="${key}"] [data-salary-line]`).map(l => l.text())
+    expect(cell('base')).toEqual(['明細200,000', '計算200,000', '差0'])
     // 残業は 1,500 円 × 10 h = 15,000 に対して明細 30,000 → +15,000
-    expect(jan).toContain('30,000 / 15,000 / +15,000')
+    expect(cell('overtime')).toEqual(['明細30,000', '計算15,000', '差+15,000'])
+    expect(cell('total')).toHaveLength(3)
     // 2 月は wage-report が 504 だったので比べない (0 と言わない)
     expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('拘束の材料が取れていない')
     // 給与の書き込み口 (sync) は叩かない
-    expect(calls.filter(c => c.url.includes('/api/kyuyo/sync'))).toHaveLength(0)
+    expect(calls.filter(c => c.url.split('?')[0] === '/api/kyuyo/sync')).toHaveLength(0)
     w.unmount()
   })
 
@@ -977,5 +1011,122 @@ describe('給与比較タブ', () => {
       expect(message(w)).toContain('属性を入れられませんでした')
       w.unmount()
     })
+  })
+})
+
+describe('給与比較タブ: 明細を保存済みはまとめて、保存が無い月は 1 本ずつ (Refs #1133)', () => {
+  async function openSalary(): Promise<VueWrapper> {
+    const w = await openErrorsTabAndRun()
+    calls = []
+    await buttonByText(w, '給与比較').trigger('click')
+    return w
+  }
+  const payrollCalls = () => calls.filter(c => c.url.startsWith('/api/kyuyo/payroll')).map(c => c.url)
+  const loaded = (w: VueWrapper) => w.find('[data-testid="litigation-salary-summary"]').text()
+  /** 読み終える (進捗が消え、飛んでいる本が 0) まで待つ */
+  const done = (w: VueWrapper) => vi.waitFor(() => {
+    expect(w.find('[data-testid="litigation-salary-progress"]').exists()).toBe(false)
+    expect(payrollInflight).toBe(0)
+  }, { timeout: 5000 })
+  /** 2025-01〜06 の 6 か月 × 2 社 = 12 本 */
+  function sixMonthsTwoCompanies() {
+    caseToMonth = '2025-06'
+    payrollCompanies = ['0200', '0300']
+    payrollDelayMs = 15
+  }
+  const allKeys = () => ['01', '02', '03', '04', '05', '06'].flatMap(m => payrollCompanies.map(c => `${c}|2025-${m}`))
+  const synced = (keys: string[]) => keys.map((k) => { const [company, month] = k.split('|'); return { company: company!, month: month! } })
+
+  it('★ 全部保存済みなら同時に 2〜6 本が飛ぶ (遅延スタブで in-flight を数える)。synced-months は 1 回だけ', async () => {
+    sixMonthsTwoCompanies()
+    syncedEntries = synced(allKeys())
+    const w = await openSalary()
+    await done(w)
+    expect(payrollCalls()).toHaveLength(12)
+    expect(payrollPeak).toBeGreaterThanOrEqual(2)
+    expect(payrollPeak).toBeLessThanOrEqual(6)
+    expect(calls.filter(c => c.url.startsWith('/api/kyuyo/synced-months'))).toHaveLength(1)
+    expect(loaded(w)).toContain('明細 読込済み 6 / 6 か月')
+    w.unmount()
+  })
+
+  it('★ 進捗は 読込 N / M (保存済み X 本をまとめて…)、読んでいる間の行は 読込中', async () => {
+    sixMonthsTwoCompanies()
+    syncedEntries = synced(allKeys())
+    payrollDelayMs = 60
+    const w = await openSalary()
+    await vi.waitFor(() => expect(w.find('[data-testid="litigation-salary-progress"]').text()).toContain('読込 0 / 12 (保存済み 12 本をまとめて読んでいます)'))
+    expect(w.find('[data-salary-row="1078|2025-02"] [data-salary-payroll]').text()).toBe('明細: 読込中')
+    await done(w)
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中')
+    w.unmount()
+  })
+
+  it('★ 保存が無い月は保存済みを読み終えた後に 1 本ずつ (開始時の in-flight が常に 1)', async () => {
+    sixMonthsTwoCompanies()
+    const live = ['0200|2025-04', '0300|2025-04']
+    syncedEntries = synced(allKeys().filter(k => !live.includes(k)))
+    const w = await openSalary()
+    await done(w)
+    const keys = payrollStarts.map(s => s.key)
+    expect(keys.slice(-2)).toEqual(live)
+    // live 2 本は、直前の本が返ってから始まる = 開始時の in-flight は自分だけ
+    expect(payrollStarts.slice(-2).map(s => s.inflight)).toEqual([1, 1])
+    expect(keys).toHaveLength(12)
+    expect(loaded(w)).toContain('明細 読込済み 6 / 6 か月')
+    w.unmount()
+  })
+
+  it('★ synced-months が失敗したら全部直列 (in-flight は最大 1)。月の並びは従来どおり', async () => {
+    sixMonthsTwoCompanies()
+    syncedEntries = null
+    const w = await openSalary()
+    await done(w)
+    expect(payrollPeak).toBe(1)
+    expect(payrollStarts.map(s => s.key)).toEqual(allKeys())
+    expect(loaded(w)).toContain('明細 読込済み 6 / 6 か月')
+    w.unmount()
+  })
+
+  it('★ 403 は全体を止める: 次の塊を呼ばない', async () => {
+    sixMonthsTwoCompanies()
+    syncedEntries = synced(allKeys())
+    payrollForbidden = true
+    const w = await openSalary()
+    await vi.waitFor(() => expect(w.find('[data-testid="litigation-salary-error"]').exists()).toBe(true))
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-error"]').text()).toContain('給与を見る権限がありません')
+    expect(payrollCalls()).toHaveLength(6)
+    w.unmount()
+  })
+
+  it('★ 1 社が読めなければ、その月 (支給月) は読めない。ほかの月は読める (並列でも)', async () => {
+    sixMonthsTwoCompanies()
+    syncedEntries = synced(allKeys())
+    payrollFailKey = '0300|2025-02'
+    const w = await openSalary()
+    await done(w)
+    expect(w.find('[data-salary-row="1078|2025-02"] [data-salary-payroll]').text()).toContain('明細: 読めない — 会社 0300')
+    expect(loaded(w)).toContain('明細 読込済み 5 / 6 か月')
+    w.unmount()
+  })
+
+  it('★ 並列で読んでいる最中に案件を閉じて開き直したら、古い結果は入らない', async () => {
+    sixMonthsTwoCompanies()
+    syncedEntries = synced(allKeys())
+    payrollDelayMs = 60
+    const w = await openSalary()
+    await vi.waitFor(() => expect(payrollInflight).toBeGreaterThan(0))
+    await buttonByText(w, '閉じる').trigger('click')
+    await buttonByText(w, '開く').trigger('click')
+    await buttonByText(w, '給与比較').trigger('click')
+    // 開き直した側は、読み終えるまで古い読み込みの結果を見ない
+    await new Promise(r => setTimeout(r, 200))
+    await done(w)
+    await settle()
+    expect(loaded(w)).toContain('明細 読込済み 6 / 6 か月')
+    // 古い側 (最初の 6 本以降を呼ばない) + 開き直した側 12 本
+    expect(payrollCalls().length).toBeLessThanOrEqual(6 + 12)
+    w.unmount()
   })
 })

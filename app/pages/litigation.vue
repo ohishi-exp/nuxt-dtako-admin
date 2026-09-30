@@ -90,11 +90,13 @@ import {
   litigationPayrollMonths,
   litigationRegisterCandidates,
   narrowKyuyoEmployees,
+  splitPayrollTargets,
   type LitigationRegisterCandidate,
+  type PayrollTarget,
   type LitigationSalaryState,
 } from '~/utils/litigation-salary'
 import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
-import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
+import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, summarizeSyncedMonths, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
 import { buildCdMapEntries, planPayrollDbImport, type EmployeeMasterEntry, type EmployeeMasterGetResponse, type KyuyoEmployeesResponse } from '~/utils/employee-master'
 import { parseCompMap } from '~/utils/dtako-comps'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
@@ -785,7 +787,7 @@ const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
 const salaryEmployees = ref<EmployeeMasterEntry[]>([])
 const salaryLoading = ref(false)
 const salaryProgress = ref('')
-const salaryLoadingPayMonth = ref<string | null>(null)
+const salaryLoadingPayMonth = ref<string | ReadonlySet<string> | null>(null)
 const salaryError = ref('')
 const salaryRegistering = ref(false)
 const salaryRegisterMessage = ref('')
@@ -793,6 +795,9 @@ const salaryRegisterMessage = ref('')
 const salaryAttrsWritten = ref(false)
 let salaryEpoch = 0
 const SALARY_RETRY = '「給与大臣から読み直す」を押してやり直してください'
+/** 保存済みの明細を同時に読む本数。保存済みは通常、上流が給与大臣を開かず保存から返すので軽い。
+ * 保存が無い月は給与大臣 (OHKEN) を開く (接続は 2 本しかない) ので直列 — 理由は ichiban-health.vue の同じ注記。 */
+const SALARY_PAYROLL_CONCURRENCY = 6
 
 watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
   salaryEpoch++
@@ -848,7 +853,7 @@ const salaryCounts = computed(() => {
  * 給与大臣から、案件の月ぶんの明細を読む。`GET /api/kyuyo/payroll` は**読み通し** — 保存済みの月は
  * 給与大臣を開かずに返り、保存が無い月だけ給与大臣 (OHKEN) から読んで保存する (1 社 10〜20 秒)。
  * 会社は閲覧中の dtako 会社に対応する給与大臣の会社 (`comp-map`)、乗務員への引き当ては社員マスタ、
- * 支給項目の区分は拘束×賃金で保存した設定をそのまま使う。**会社 × 月を 1 本ずつ直列に**呼ぶ。
+ * 支給項目の区分は拘束×賃金で保存した設定をそのまま使う。保存済みの (会社, 月) は同時 6 本まで並列、保存が無い月は最後に 1 本ずつ直列に呼ぶ。
  */
 async function loadSalaryPayroll() {
   if (!openCase.value || salaryLoading.value) return
@@ -872,40 +877,88 @@ async function loadSalaryPayroll() {
       salaryError.value = 'この会社に対応する給与大臣の会社がありません (会社対応表)'
       return
     }
-    const targets = litigationPayrollMonths(caseMonths.value)
-    for (const [i, { workMonth, payMonth }] of targets.entries()) {
-      salaryLoadingPayMonth.value = payMonth
+    const months = litigationPayrollMonths(caseMonths.value)
+    const tasks: PayrollTarget[] = months.flatMap(m => companies.map(company => ({ company, ...m })))
+    // 保存済みの (会社, 勤務月)。読めなければ空 = 全部 live = 従来どおりの直列 (保存済みかどうかが判らないだけ)
+    let synced: ReadonlySet<string> = new Set()
+    try {
+      const res = await $fetch<{ entries?: unknown }>('/api/kyuyo/synced-months')
+      synced = new Set(summarizeSyncedMonths(res?.entries).map(r => `${r.company}|${r.month}`))
+    }
+    catch { /* 直列に読む */ }
+    if (epoch !== salaryEpoch) return
+    const { cached, live } = splitPayrollTargets(tasks, synced)
+
+    // 支給月 → 会社 → 結果。全会社ぶん揃ったら salaryPayroll に入れる (会社の順は結果に影響しない)
+    type Outcome = { rows: SalaryCsvRow[], sync: { source?: 'cache' | 'live', syncedAt?: string | null } } | { failure: string }
+    const outcomes = new Map<string, Map<string, Outcome>>()
+    const pendingCached = new Set(cached.map(t => t.payMonth))
+    const showLoading = (current?: string) => {
+      salaryLoadingPayMonth.value = new Set(current ? [...pendingCached, current] : pendingCached)
+    }
+    const finalize = (payMonth: string) => {
       const rows: SalaryCsvRow[] = []
       const syncs: { source?: 'cache' | 'live', syncedAt?: string | null }[] = []
       let failure: string | null = null
       for (const company of companies) {
-        salaryProgress.value = `${i + 1} / ${targets.length} — ${payMonth} 支給 (会社 ${company}) を読んでいます (保存が無い月は給与大臣から読むので 10〜20 秒)`
-        try {
-          // 認証は cookie 任せ (拘束×賃金と同じ。server route が cookie から Bearer を組む)
-          const stored = toStoredPayroll(await $fetch('/api/kyuyo/payroll', { query: { company, month: workMonth } }))
-          if (!stored) {
-            failure = `会社 ${company} の応答の形が想定外`
-            continue
-          }
-          rows.push(...payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], company).rows)
-          syncs.push({ source: stored.source, syncedAt: stored.syncedAt })
-        }
-        catch (e) {
-          if (caughtErrorStatus(e) === 403) {
-            salaryError.value = `給与を見る権限がありません: ${describeCaughtError(e, SALARY_RETRY)}`
-            return
-          }
-          // 404 は上流が「その年度の給与DB が給与大臣に無い」ときに返す (rust-ichibanboshi routes/kyuyo.rs)。
-          // 汎用の 404 文言 (画面の情報が古い) は当てはまらないので言い換える
-          failure = caughtErrorStatus(e) === 404
-            ? `会社 ${company}: 給与大臣にこの月の給与DB が無い`
-            : `会社 ${company}: ${describeCaughtError(e, SALARY_RETRY)}`
+        const o = outcomes.get(payMonth)!.get(company)!
+        if ('failure' in o) failure = o.failure
+        else {
+          rows.push(...o.rows)
+          syncs.push(o.sync)
         }
       }
-      if (epoch !== salaryEpoch) return
       // 1 社でも読めなかったら、その月は「読めない」にする (半分だけで比べると明細に居ないと誤読する)
       salaryPayroll.value.set(payMonth, failure ? { ok: false, reason: failure } : { ok: true, value: rows })
       if (!failure) salaryPayrollSync.value.set(payMonth, foldPayrollSync(syncs))
+    }
+    /** 1 本読んで結果を記録する。false = ここで止める (案件切替で古くなった / 403) */
+    const readOne = async ({ company, workMonth, payMonth }: PayrollTarget): Promise<boolean> => {
+      let outcome: Outcome
+      try {
+        // 認証は cookie 任せ (拘束×賃金と同じ。server route が cookie から Bearer を組む)
+        const stored = toStoredPayroll(await $fetch('/api/kyuyo/payroll', { query: { company, month: workMonth } }))
+        outcome = stored
+          ? { rows: payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], company).rows, sync: { source: stored.source, syncedAt: stored.syncedAt } }
+          : { failure: `会社 ${company} の応答の形が想定外` }
+      }
+      catch (e) {
+        if (epoch !== salaryEpoch) return false
+        if (caughtErrorStatus(e) === 403) {
+          salaryError.value = `給与を見る権限がありません: ${describeCaughtError(e, SALARY_RETRY)}`
+          return false
+        }
+        // 404 は上流が「その年度の給与DB が給与大臣に無い」ときに返す (rust-ichibanboshi routes/kyuyo.rs)。
+        // 汎用の 404 文言 (画面の情報が古い) は当てはまらないので言い換える
+        outcome = { failure: caughtErrorStatus(e) === 404
+          ? `会社 ${company}: 給与大臣にこの月の給与DB が無い`
+          : `会社 ${company}: ${describeCaughtError(e, SALARY_RETRY)}` }
+      }
+      if (epoch !== salaryEpoch) return false
+      const byCompany = outcomes.get(payMonth) ?? new Map<string, Outcome>()
+      outcomes.set(payMonth, byCompany.set(company, outcome))
+      if (byCompany.size === companies.length) {
+        finalize(payMonth)
+        pendingCached.delete(payMonth)
+        showLoading()
+      }
+      return true
+    }
+
+    // 保存済み: 同時 SALARY_PAYROLL_CONCURRENCY 本ずつ
+    let done = 0
+    showLoading()
+    for (let i = 0; i < cached.length; i += SALARY_PAYROLL_CONCURRENCY) {
+      salaryProgress.value = `読込 ${done} / ${cached.length} (保存済み ${cached.length} 本をまとめて読んでいます)`
+      const oks = await Promise.all(cached.slice(i, i + SALARY_PAYROLL_CONCURRENCY).map(readOne))
+      if (oks.includes(false)) return
+      done += oks.length
+    }
+    // 保存が無い月: 給与大臣を開くので 1 本ずつ
+    for (const [i, t] of live.entries()) {
+      showLoading(t.payMonth)
+      salaryProgress.value = `${i + 1} / ${live.length} — ${t.payMonth} 支給 (会社 ${t.company}) を読んでいます (保存が無い月は給与大臣から読むので 10〜20 秒)`
+      if (!await readOne(t)) return
     }
     salaryProgress.value = ''
   }
@@ -1701,9 +1754,9 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium">乗務員</th>
                   <th class="px-3 py-2 font-medium">勤務月 (支給月)</th>
                   <th class="px-3 py-2 font-medium">状態</th>
-                  <th class="px-3 py-2 font-medium text-right">基本給 明細 / 計算 / 差</th>
-                  <th class="px-3 py-2 font-medium text-right">残業 明細 / 計算 / 差</th>
-                  <th class="px-3 py-2 font-medium text-right">総支給 明細 / 計算 / 差</th>
+                  <th class="px-3 py-2 font-medium text-right">基本給</th>
+                  <th class="px-3 py-2 font-medium text-right">残業</th>
+                  <th class="px-3 py-2 font-medium text-right">総支給</th>
                   <th class="px-3 py-2 font-medium text-right">勤務日 / 時間外</th>
                 </tr>
               </thead>
@@ -1724,12 +1777,21 @@ function fmtDateTime(iso: string): string {
                     <div v-if="row.payrollNote" class="text-xs text-gray-600 dark:text-gray-400 mt-1" data-salary-payroll>{{ row.payrollNote }}</div>
                   </td>
                   <template v-if="row.compared">
-                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ fmtYen(row.compared.csvBase) }} / {{ fmtYen(row.compared.sysBase) }} / {{ fmtDiff(row.compared.diffBase) }}</td>
-                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">
-                      {{ fmtYen(row.compared.csvOvertime) }} / {{ fmtYen(row.compared.sysOvertime) }} / {{ fmtDiff(row.compared.diffOvertime) }}
-                      <div v-if="row.compared.overtimeFixed" class="text-xs text-gray-500">月給 (固定残業) — 差は出さない</div>
+                    <td
+                      v-for="cell in [
+                        { key: 'base', csv: row.compared.csvBase, sys: row.compared.sysBase, diff: row.compared.diffBase },
+                        { key: 'overtime', csv: row.compared.csvOvertime, sys: row.compared.sysOvertime, diff: row.compared.diffOvertime },
+                        { key: 'total', csv: row.compared.csvTotal, sys: row.compared.sysTotal, diff: row.compared.diffTotal },
+                      ]"
+                      :key="cell.key"
+                      class="px-3 py-2 whitespace-nowrap tabular-nums"
+                      :data-salary-cell="cell.key"
+                    >
+                      <div class="flex justify-between gap-3" data-salary-line="csv"><span class="text-xs text-gray-500">明細</span><span>{{ fmtYen(cell.csv) }}</span></div>
+                      <div class="flex justify-between gap-3" data-salary-line="sys"><span class="text-xs text-gray-500">計算</span><span>{{ fmtYen(cell.sys) }}</span></div>
+                      <div class="flex justify-between gap-3" data-salary-line="diff"><span class="text-xs text-gray-500">差</span><span>{{ fmtDiff(cell.diff) }}</span></div>
+                      <div v-if="cell.key === 'overtime' && row.compared.overtimeFixed" class="text-xs text-gray-500 text-right">月給 (固定残業) — 差は出さない</div>
                     </td>
-                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ fmtYen(row.compared.csvTotal) }} / {{ fmtYen(row.compared.sysTotal) }} / {{ fmtDiff(row.compared.diffTotal) }}</td>
                     <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ row.compared.sysWorkDays }} 日 / {{ Math.round(row.compared.sysOvertimeMinutes / 6) / 10 }} h</td>
                   </template>
                   <td v-else colspan="4" class="px-3 py-2 text-xs text-gray-400">-</td>

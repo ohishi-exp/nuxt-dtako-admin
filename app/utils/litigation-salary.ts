@@ -56,8 +56,12 @@ export interface LitigationSalaryInput {
   payroll: ReadonlyMap<string, LitigationFetched<SalaryCsvRow[]>>
   config: SalaryItemConfig
   cdMap: SalaryCdMap
-  /** いま読んでいる支給月 (読んでいなければ null) */
-  loadingPayMonth: string | null
+  /** いま読んでいる支給月 (読んでいなければ null)。保存済みをまとめて読む間は複数なので集合も取る */
+  loadingPayMonth: string | ReadonlySet<string> | null
+}
+
+function isLoadingPayMonth(payMonth: string, loading: string | ReadonlySet<string> | null): boolean {
+  return typeof loading === 'string' ? payMonth === loading : loading?.has(payMonth) === true
 }
 
 const sameCd = (a: string, b: string) => String(Number(a)) === String(Number(b))
@@ -90,7 +94,7 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
       const wage = input.wageReports.get(litigationDriverMonthKey(driverCd, month))
       const pay = input.payroll.get(payMonth)
       const payrollNote = !pay
-        ? (payMonth === input.loadingPayMonth ? '明細: 読込中' : '明細: 未読込')
+        ? (isLoadingPayMonth(payMonth, input.loadingPayMonth) ? '明細: 読込中' : '明細: 未読込')
         : pay.ok ? '明細: 読込済み' : `明細: 読めない — ${pay.reason}`
       if (!wage) {
         out.push({ ...base, payrollNote, state: 'pending', message: '拘束の材料が未取得 (9/29 以前の古い形の保存も含む) — 「拘束の材料を取る」' })
@@ -130,6 +134,30 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
  * `/api/kyuyo/payroll` の `month` は**勤務月**で、返る明細の月ラベルは支給月。 */
 export function litigationPayrollMonths(months: readonly string[]): { workMonth: string, payMonth: string }[] {
   return months.map(m => ({ workMonth: m, payMonth: nextYm(m) }))
+}
+
+/** 明細を 1 本読む単位 (会社 × 勤務月)。 */
+export interface PayrollTarget {
+  company: string
+  workMonth: string
+  payMonth: string
+}
+
+/**
+ * 読む対象を「保存済み (cached)」と「保存が無い (live)」に分ける。`synced` は
+ * `GET /api/kyuyo/synced-months` の (会社, 勤務月) を `${company}|${workMonth}` にした集合。
+ * 保存済みは通常、上流が給与大臣を開かずに返す (並列で読める)。保存が無い月は給与大臣を開くので
+ * 直列に読む。synced-months が読めなければ空集合を渡す = 全部 live = 従来どおりの直列。
+ * 並びは入力の順を保つ。
+ */
+export function splitPayrollTargets(
+  targets: readonly PayrollTarget[],
+  synced: ReadonlySet<string>,
+): { cached: PayrollTarget[], live: PayrollTarget[] } {
+  const cached: PayrollTarget[] = []
+  const live: PayrollTarget[] = []
+  for (const t of targets) (synced.has(`${t.company}|${t.workMonth}`) ? cached : live).push(t)
+  return { cached, live }
 }
 
 /** 給与比較タブから社員マスタへ 1 人ずつ登録する候補 (給与大臣の社員 → 乗務員CD)。 */

@@ -196,3 +196,24 @@ describe('litigationAttrsCandidates / narrowKyuyoEmployees (属性を入れる)'
     expect(narrowKyuyoEmployees(res, '9999').employees).toEqual([])
   })
 })
+
+import { splitPayrollTargets } from '~/utils/litigation-salary'
+
+describe('splitPayrollTargets (保存済みと保存が無い月に分ける)', () => {
+  const t = (company: string, workMonth: string) => ({ company, workMonth, payMonth: `${workMonth}-pay` })
+  const targets = [t('A', '2025-01'), t('B', '2025-01'), t('A', '2025-02')]
+
+  it('全部保存済みなら live は空、入力の順を保つ', () => {
+    expect(splitPayrollTargets(targets, new Set(['A|2025-01', 'B|2025-01', 'A|2025-02']))).toEqual({ cached: targets, live: [] })
+  })
+
+  it('一部だけ保存済み: 会社込みで判る (同じ月でも会社 B は live)', () => {
+    const r = splitPayrollTargets(targets, new Set(['A|2025-01', 'A|2025-02']))
+    expect(r.cached).toEqual([targets[0], targets[2]])
+    expect(r.live).toEqual([targets[1]])
+  })
+
+  it('synced が空 (synced-months が読めない) なら全部 live = 直列', () => {
+    expect(splitPayrollTargets(targets, new Set())).toEqual({ cached: [], live: targets })
+  })
+})
