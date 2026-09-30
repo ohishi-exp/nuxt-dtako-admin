@@ -219,13 +219,6 @@ export interface LitigationZipSummaryInput {
   chunks: readonly LitigationOutputChunk[]
   /** 出力の結果 (添字を `chunks` に揃える。未実行は null) */
   results: readonly (LitigationOutputResult | null)[]
-  errorsCsv: {
-    filename: string
-    /** 乗務員 × 月の行数 */
-    rows: number
-    /** 全列の判定ごとの件数の合計 */
-    counts: { ng: number, unknown: number, pending: number }
-  }
   changesCsv: {
     filename: string
     /** 変更記録タブで取りに行ったか */
@@ -234,7 +227,7 @@ export interface LitigationZipSummaryInput {
   }
 }
 
-/** ZIP に入るファイルの一覧と、それぞれの中身の要点。並びは ZIP に入れる順 (Excel → CSV 2 本)。 */
+/** ZIP に入るファイルの一覧と、それぞれの中身の要点。並びは ZIP に入れる順 (Excel → 変更記録.csv)。 */
 export function buildLitigationZipSummary(input: LitigationZipSummaryInput): LitigationZipSummaryItem[] {
   const excel = input.chunks.map((c, i): LitigationZipSummaryItem => {
     const r = input.results[i]
@@ -246,17 +239,11 @@ export function buildLitigationZipSummary(input: LitigationZipSummaryInput): Lit
     const warnings = r.warningsCount > 0 ? ` / 警告 ${r.warningsCount} 件` : ''
     return { filename: c.filename, state: 'included', detail: `${period} —${rows}${missing}${warnings}`.replace('— /', '—') }
   })
-  const e = input.errorsCsv
-  const errors: LitigationZipSummaryItem = {
-    filename: e.filename,
-    state: 'included',
-    detail: `乗務員 × 月 ${e.rows} 行 / 異常あり ${e.counts.ng}・判定できない ${e.counts.unknown}・未実行 ${e.counts.pending} (4 列の合計)`,
-  }
   const ch = input.changesCsv
   const changes: LitigationZipSummaryItem = {
     filename: ch.filename,
     state: 'included',
     detail: ch.finished ? `変更 ${ch.rows} 件` : '変更記録タブで「検知を実行」していない — 空の表 (その旨を備考に書く)',
   }
-  return [...excel, errors, changes]
+  return [...excel, changes]
 }

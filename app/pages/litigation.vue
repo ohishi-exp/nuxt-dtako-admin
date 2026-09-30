@@ -45,7 +45,6 @@ import {
   litigationChunkMonths,
   litigationChunkWarnings,
   litigationDriverMonthKey,
-  litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
   litigationAlcReadingRange,
@@ -59,7 +58,6 @@ import {
   LITIGATION_CHECK_KEYS,
   LITIGATION_CHECK_LABELS,
   LITIGATION_CHECK_STATE_LABELS,
-  LITIGATION_ERRORS_CSV_FILENAME,
   type LitigationAlcOpsEntry,
   type LitigationCheckState,
   type LitigationErrorRow,
@@ -381,16 +379,9 @@ const outputCounts = computed(() =>
 
 /** ZIP に入るファイルの一覧と中身の要点 (出力タブに出す)。作る前は Excel を「まだ」、作った後は結果で出す */
 const zipSummary = computed(() => {
-  const counts = { ng: 0, unknown: 0, pending: 0 }
-  for (const k of LITIGATION_CHECK_KEYS) {
-    counts.ng += errorCounts.value[k].ng
-    counts.unknown += errorCounts.value[k].unknown
-    counts.pending += errorCounts.value[k].pending
-  }
   return buildLitigationZipSummary({
     chunks: outputChunks.value,
     results: outputResults.value,
-    errorsCsv: { filename: LITIGATION_ERRORS_CSV_FILENAME, rows: errorRows.value.length, counts },
     changesCsv: { filename: LITIGATION_CHANGES_CSV_FILENAME, finished: changesFinished.value, rows: changesRows.value.length },
   })
 })
@@ -452,21 +443,17 @@ async function buildOutputZip() {
     outputCurrent.value = -1
     const zip = new JSZip()
     for (const f of files) zip.file(f.filename, f.bytes)
-    // エラー一覧 (エラータブの今の表) も入れる。Y時間の欠けはいま作った結果で埋まり、
-    // エラータブで検知を実行していない列は「未実行」のまま出る (0 件とは書かない)
-    zip.file(LITIGATION_ERRORS_CSV_FILENAME, errorsCsvText())
     // 変更記録 (変更記録タブで「検知を実行」していなければ、その旨を備考に書いた空表になる)
     zip.file(LITIGATION_CHANGES_CSV_FILENAME, changesCsvText())
     const blob = await zip.generateAsync({ type: 'blob' })
     const zipName = litigationZipFilename(target.name, new Date())
     downloadBlob(blob, zipName)
-    const csvNames = `${LITIGATION_ERRORS_CSV_FILENAME} / ${LITIGATION_CHANGES_CSV_FILENAME}`
     if (files.length === 0) {
-      // Excel が無くても CSV 2 本は成果物なので保存はする。ただし成功の見た目にしない
-      outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${csvNames} だけを入れて保存しました`
+      // Excel が無くても CSV は成果物なので保存はする。ただし成功の見た目にしない
+      outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${LITIGATION_CHANGES_CSV_FILENAME} だけを入れて保存しました`
       return
     }
-    outputZipMessage.value = `${zipName} を保存しました (Excel ${files.length} / ${chunks.length} 冊 + ${csvNames})`
+    outputZipMessage.value = `${zipName} を保存しました (Excel ${files.length} / ${chunks.length} 冊 + ${LITIGATION_CHANGES_CSV_FILENAME})`
   }
   catch (e) {
     outputZipError.value = `ZIP を組めませんでした: ${describeCaughtError(e, OUTPUT_RETRY)}`
@@ -776,15 +763,6 @@ async function importMonth(row: LitigationErrorRow) {
   finally {
     importingKey.value = null
   }
-}
-
-/** エラー一覧 CSV (ZIP に入れる)。氏名は乗務員一覧に居る人だけ、居なければ空欄 */
-function errorsCsvText(): string {
-  return litigationErrorsCsv(
-    errorRows.value,
-    cd => drivers.value.find(d => d.driver_cd === cd)?.driver_name ?? '',
-    chunkWarnings.value,
-  )
 }
 
 // --- 給与比較タブ: 給与大臣の明細 × エラータブの wage-report (litigation-salary.ts の doc 参照) ---
@@ -1271,7 +1249,7 @@ function fmtDateTime(iso: string): string {
             案件の乗務員 × 期間ぶんの Y時間 Excel (京都ソフト案件のテンプレ) を作り、1 つの ZIP で保存します。
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
-            ZIP には {{ LITIGATION_ERRORS_CSV_FILENAME }} (エラータブの表) と {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — どちらもタブで検知を実行していない場合は、その旨を書いた空の表になります。
+            ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">

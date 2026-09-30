@@ -182,21 +182,20 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
     { driverCd: '1590', from: '2024-12-01', to: '2025-11-30', label: '2024-12〜2025-11', filename: '1590_2024-12-2025-11.xlsx' },
   ]
   const base = {
-    errorsCsv: { filename: 'エラー一覧.csv', rows: 36, counts: { ng: 2, unknown: 1, pending: 0 } },
     changesCsv: { filename: '変更記録.csv', finished: false, rows: 0 },
   }
   const res = (over: Record<string, unknown>) => ({
     driverCd: '1590', from: '', to: '', status: 'ok', rows: 250, missingDates: [], missingCount: 0, warnings: [], warningsCount: 0, message: '', ...over,
   }) as never
 
-  it('★ 作る前は Excel を「まだ」、CSV 2 本は中身の要点つきで並べる', () => {
+  it('★ 作る前は Excel を「まだ」、変更記録.csv は中身の要点つきで並べる', () => {
     const s = buildLitigationZipSummary({ chunks, results: [null, null, null], ...base })
     expect(s.map(i => `${i.state} ${i.filename}`)).toEqual([
       'pending 1590_2022-12-2023-11.xlsx', 'pending 1590_2023-12-2024-11.xlsx', 'pending 1590_2024-12-2025-11.xlsx',
-      'included エラー一覧.csv', 'included 変更記録.csv',
+      'included 変更記録.csv',
     ])
-    expect(s[3]!.detail).toBe('乗務員 × 月 36 行 / 異常あり 2・判定できない 1・未実行 0 (4 列の合計)')
-    expect(s[4]!.detail).toContain('空の表')
+    expect(s).toHaveLength(4)
+    expect(s[3]!.detail).toContain('空の表')
   })
 
   it('★ 作った後は、入った冊の行数・書けなかった日・警告と、入らなかった冊の理由を出す', () => {
@@ -209,6 +208,6 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
     expect(s[0]).toEqual({ filename: '1590_2022-12-2023-11.xlsx', state: 'included', detail: '2022-12〜2023-11 (乗務員 1590) — 250 行' })
     expect(s[1]!.detail).toBe('2023-12〜2024-11 (乗務員 1590) — テンプレに書けなかった日 2 日 / 警告 3 件')
     expect(s[2]).toMatchObject({ state: 'excluded', detail: '2024-12〜2025-11 (乗務員 1590) — 入らない: この期間に運行が 0 件' })
-    expect(s[4]!.detail).toBe('変更 5 件')
+    expect(s[3]!.detail).toBe('変更 5 件')
   })
 })

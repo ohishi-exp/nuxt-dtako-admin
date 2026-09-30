@@ -480,8 +480,7 @@ export function wageRangeCsv(rows: readonly WageRangeRow[], months: readonly str
   return lines.join('\n')
 }
 
-/** カンマ・引用符・改行を含むセルを CSV として安全にする。訴訟準備のエラー一覧
- * (`litigation-errors.ts`) も使う — 複製を増やさずここを読む。 */
+/** カンマ・引用符・改行を含むセルを CSV として安全にする。 */
 export function csvCell(v: string): string {
   return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
 }
