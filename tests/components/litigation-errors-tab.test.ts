@@ -78,6 +78,10 @@ let febOnpremOpeNos: string[] = []
 let storedItems: unknown[] = []
 /** 給与大臣の payroll を 403 にする */
 let payrollForbidden = false
+/** `GET litigation-cases` が返す案件の updatedAt (保存で変わった状況を作る) */
+let caseUpdatedAt = CASE.updatedAt
+/** 立てておくと、給与大臣の payroll は勤務月 2025-02 (= 拘束の材料が取れていない月) だけ、この Promise が解けるまで返らない (読込中の表を見る) */
+let payrollGate: Promise<void> | null = null
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -90,7 +94,7 @@ function stubDollarFetch() {
       return opts.method === 'PUT' ? { saved: 1, checkedAt: '2026-09-29T03:04:00.000Z' } : { items: storedItems }
     }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
-    if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
+    if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, updatedAt: caseUpdatedAt }] }
     if (url === '/restraint-api/kintai/onprem-month-operations') {
       if (q.month === '2025-01') throw Object.assign(new Error('reading-dates が 502'), { statusCode: 502 })
       return { month: q.month, driver_cd: q.driver_cd, ope_nos: febOnpremOpeNos, truncated: false }
@@ -119,6 +123,7 @@ function stubDollarFetch() {
     if (url === '/restraint-api/salary-item-config') return { exists: true, data: { items: { 基本給: 'base', 残業手当: 'overtime' } } }
     if (url === '/api/kyuyo/payroll') {
       if (payrollForbidden) throw Object.assign(new Error('forbidden'), { statusCode: 403 })
+      if (payrollGate && q.month === '2025-02') await payrollGate
       // 勤務月 q.month の翌月に支給 (pay_date が支給月)
       const [y, m] = (q.month as string).split('-').map(Number) as [number, number]
       const pay = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`
@@ -163,7 +168,7 @@ function buttonByText(w: VueWrapper, text: string) {
 
 async function openErrorsTabAndRun(): Promise<VueWrapper> {
   const w = mount(Page, {
-    global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+    global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
   })
   await settle()
   await buttonByText(w, '開く').trigger('click')
@@ -196,6 +201,8 @@ beforeEach(() => {
   })
   storedItems = []
   payrollForbidden = false
+  payrollGate = null
+  caseUpdatedAt = CASE.updatedAt
   saved.length = 0
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -361,7 +368,7 @@ describe('出力タブの ZIP に エラー一覧.csv が入らない', () => {
       })
     })
     const w = mount(Page, {
-      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
     })
     await settle()
     await buttonByText(w, '開く').trigger('click')
@@ -378,7 +385,7 @@ describe('出力タブの ZIP に エラー一覧.csv が入らない', () => {
   it('Excel が 0 冊でも 変更記録.csv だけの ZIP を保存し、成功の見た目にしない', async () => {
     stubFetch(() => new Response('', { status: 200, headers: { 'x-y-time-rows': '0' } }))
     const w = mount(Page, {
-      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
     })
     await settle()
     await buttonByText(w, '開く').trigger('click')
@@ -397,7 +404,7 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
   function mountAndOpen() {
     return (async () => {
       const w = mount(Page, {
-        global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+        global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
       })
       await settle()
       await buttonByText(w, '開く').trigger('click')
@@ -475,7 +482,7 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
 describe('出力タブ: ZIP に入るものの概要', () => {
   it('★ 作る前から、Excel は「まだ」・変更記録.csv は中身の要点つきで並ぶ', async () => {
     const w = mount(Page, {
-      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
     })
     await settle()
     await buttonByText(w, '開く').trigger('click')
@@ -490,21 +497,23 @@ describe('出力タブ: ZIP に入るものの概要', () => {
 })
 
 describe('給与比較タブ', () => {
-  async function openSalaryAfterChecks(): Promise<VueWrapper> {
-    const w = await openErrorsTabAndRun()
+  /** エラータブで検知を回した状態 (まだ給与比較タブは開いていない) */
+  const openAfterChecks = () => openErrorsTabAndRun()
+  async function openSalaryTab(w: VueWrapper) {
     await buttonByText(w, '給与比較').trigger('click')
     await settle()
-    return w
   }
+  const payrollCalls = () => calls.filter(c => c.url.startsWith('/api/kyuyo/payroll')).map(c => c.url)
+  const payrollNote = (w: VueWrapper, row: string) => w.find(`[data-salary-row="${row}"] [data-salary-payroll]`)
+  const summary = (w: VueWrapper) => w.find('[data-testid="litigation-salary-summary"]').text()
 
-  it('★ 給与大臣へは勤務月で問い合わせ、翌月支給の明細と エラータブの拘束で比べる (拘束が取れていない月は比べない)', async () => {
-    const w = await openSalaryAfterChecks()
-    // 読み込む前は明細が未読込
-    expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('給与明細が未読込')
+  it('★ タブを開くだけで (ボタンを押さずに) 明細を読む。給与大臣へは勤務月で問い合わせ、翌月支給の明細と エラータブの拘束で比べる', async () => {
+    const w = await openAfterChecks()
+    // 別のタブに居るあいだは呼ばれない
+    expect(payrollCalls()).toEqual([])
     calls = []
-    await buttonByText(w, '給与大臣から読み込む').trigger('click')
-    await settle()
-    expect(calls.filter(c => c.url.startsWith('/api/kyuyo/payroll')).map(c => c.url)).toEqual([
+    await openSalaryTab(w)
+    expect(payrollCalls()).toEqual([
       '/api/kyuyo/payroll?company=0200&month=2025-01',
       '/api/kyuyo/payroll?company=0200&month=2025-02',
     ])
@@ -522,13 +531,89 @@ describe('給与比較タブ', () => {
     w.unmount()
   })
 
-  it('給与を見る権限が無ければ止めて、そう出す', async () => {
-    payrollForbidden = true
-    const w = await openSalaryAfterChecks()
-    await buttonByText(w, '給与大臣から読み込む').trigger('click')
+  it('★ 二重に読まない: 別タブへ行って戻っても、読み終えていれば呼ばない。ボタンは読み直し', async () => {
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    expect(payrollCalls()).toHaveLength(2)
+    await buttonByText(w, '変更記録').trigger('click')
+    await openSalaryTab(w)
+    expect(payrollCalls()).toHaveLength(2)
+    await buttonByText(w, '給与大臣から読み直す').trigger('click')
     await settle()
+    expect(payrollCalls()).toHaveLength(4)
+    w.unmount()
+  })
+
+  it('★ 明細の状況を行ごとに出す: 材料が取れていない行でも 未読込 → 読込中 → 読込済み と変わり、集計行に 読込済み N / M か月', async () => {
+    const w = await openAfterChecks()
+    let release!: () => void
+    payrollGate = new Promise<void>((r) => { release = r })
+    await openSalaryTab(w)
+    // 2 か月目 (2025-03 支給) を読んでいる最中。1 か月目 (材料が有る行) は message が「読めた」を言う
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 読込中')
+    expect(payrollNote(w, '1078|2025-01').exists()).toBe(false)
+    expect(summary(w)).toContain('明細 読込済み 1 / 2 か月')
+    expect(w.find('[data-testid="litigation-salary-progress"]').text()).toContain('2 / 2')
+    release()
+    await settle()
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 読込済み')
+    // 材料が有って明細まで進んだ行は message 側が言うので、この 1 行は出さない
+    expect(payrollNote(w, '1078|2025-01').exists()).toBe(false)
+    expect(summary(w)).toContain('明細 読込済み 2 / 2 か月')
+    // 読み終えたら 読込中 は残らない
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中')
+    w.unmount()
+  })
+
+  it('★ 読んでいる最中に案件を閉じて開き直しても、読込中は残らず、開き直したタブでもう一度読む (二重に走らない・古い案件の空 Map を見ない)', async () => {
+    const w = await openAfterChecks()
+    let release!: () => void
+    payrollGate = new Promise<void>((r) => { release = r })
+    await openSalaryTab(w)
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 読込中')
+    await buttonByText(w, '閉じる').trigger('click')
+    await buttonByText(w, '開く').trigger('click')
+    await settle()
+    // 開き直した直後は出力タブ。給与比較タブではないので、まだ読まない
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中の')
+    release()
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中')
+    // 古い読み込みは捨てられ、開き直した側が 1 回だけ読み直して 2 / 2
+    expect(summary(w)).toContain('明細 読込済み 2 / 2 か月')
+    expect(payrollCalls().filter(u => u.endsWith('month=2025-01'))).toHaveLength(2)
+    w.unmount()
+  })
+
+  it('★ 給与比較タブに居たまま案件が更新されたら (updatedAt が変わる)、空にした Map を見て 1 回だけ読み直す (watch の宣言順)', async () => {
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    expect(payrollCalls()).toHaveLength(2)
+    caseUpdatedAt = '2026-09-02T00:00:00Z'
+    await buttonByText(w, '編集').trigger('click')
+    await buttonByText(w, '保存').trigger('click')
+    await settle()
+    // 更新で明細は空に戻り、給与比較タブに居るので自動で読み直す。古い Map を見て読まない / 二重に読むことはしない
+    expect(payrollCalls()).toHaveLength(4)
+    expect(summary(w)).toContain('明細 読込済み 2 / 2 か月')
+    w.unmount()
+  })
+
+  it('★ 失敗 (権限なし) の後は自動で再試行しない。ボタンで読み直す', async () => {
+    payrollForbidden = true
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
     expect(w.find('[data-testid="litigation-salary-error"]').text()).toContain('給与を見る権限がありません')
-    expect(calls.filter(c => c.url.startsWith('/api/kyuyo/payroll'))).toHaveLength(1)
+    expect(payrollCalls()).toHaveLength(1)
+    // タブを離れて戻っても、失敗のままなら呼ばない
+    await buttonByText(w, '変更記録').trigger('click')
+    await openSalaryTab(w)
+    expect(payrollCalls()).toHaveLength(1)
+    await buttonByText(w, '給与大臣から読み直す').trigger('click')
+    await settle()
+    expect(payrollCalls()).toHaveLength(2)
     w.unmount()
   })
 })

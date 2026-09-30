@@ -82,7 +82,7 @@ import {
   splitDateRangeByMaxDays,
   type LitigationChangeRow,
 } from '~/utils/litigation-changes'
-import { fmtYen, monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
+import { fmtYen, monthRange, nextYm, type WageReportResponse } from '~/utils/restraint-wage-view'
 import {
   buildLitigationSalaryRows,
   LITIGATION_SALARY_STATE_LABELS,
@@ -772,16 +772,27 @@ const salaryConfig = ref<SalaryItemConfig>({ items: {} })
 const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
 const salaryLoading = ref(false)
 const salaryProgress = ref('')
+const salaryLoadingPayMonth = ref<string | null>(null)
 const salaryError = ref('')
 let salaryEpoch = 0
-const SALARY_RETRY = '「給与大臣から読み込む」を押してやり直してください'
+const SALARY_RETRY = '「給与大臣から読み直す」を押してやり直してください'
 
 watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
   salaryEpoch++
   salaryPayroll.value = new Map()
   salaryLoading.value = false
+  salaryLoadingPayMonth.value = null
   salaryProgress.value = ''
   salaryError.value = ''
+})
+
+// 給与比較タブを開いたら明細を自動で読む。案件切替の watch (上) が salaryPayroll を空にした後に走らせる
+// (宣言順)。失敗 (salaryError) の後は自動で再試行しない — ボタンで読み直す
+watch(() => [activeTab.value, openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
+  if (activeTab.value === 'salary' && openCase.value && salaryPayroll.value.size === 0
+    && !salaryLoading.value && caseMonths.value.length > 0 && !salaryError.value) {
+    loadSalaryPayroll()
+  }
 })
 
 const salaryRows = computed(() => buildLitigationSalaryRows({
@@ -791,7 +802,10 @@ const salaryRows = computed(() => buildLitigationSalaryRows({
   payroll: salaryPayroll.value,
   config: salaryConfig.value,
   cdMap: salaryCdMap.value,
+  loadingPayMonth: salaryLoadingPayMonth.value,
 }))
+const salaryPayrollLoaded = computed(() =>
+  caseMonths.value.filter(m => salaryPayroll.value.get(nextYm(m))?.ok).length)
 const salaryCounts = computed(() => {
   const c: Record<LitigationSalaryState, number> = { ok: 0, pending: 0, unknown: 0, noPayroll: 0 }
   for (const r of salaryRows.value) c[r.state]++
@@ -827,6 +841,7 @@ async function loadSalaryPayroll() {
     }
     const targets = litigationPayrollMonths(caseMonths.value)
     for (const [i, { workMonth, payMonth }] of targets.entries()) {
+      salaryLoadingPayMonth.value = payMonth
       const rows: SalaryCsvRow[] = []
       let failure: string | null = null
       for (const company of companies) {
@@ -862,7 +877,10 @@ async function loadSalaryPayroll() {
     if (epoch === salaryEpoch) salaryError.value = describeCaughtError(e, SALARY_RETRY)
   }
   finally {
-    if (epoch === salaryEpoch) salaryLoading.value = false
+    if (epoch === salaryEpoch) {
+      salaryLoading.value = false
+      salaryLoadingPayMonth.value = null
+    }
   }
 }
 
@@ -1461,13 +1479,13 @@ function fmtDateTime(iso: string): string {
           <p class="text-sm text-gray-600 dark:text-gray-400">
             拘束×賃金の給与比較と同じ比べ方で、案件の乗務員 × 月を並べます。明細の実支給 (基本給・残業代・総支給) と、明細の【補助】単価 × 勤務日数・時間外 (拘束は GCP) で出した額の差です (+ は明細の方が多い)。
             明細は支給月 = 勤務月の翌月で合わせます。拘束の材料はエラータブの「検知を実行」で取ったものを使います (未取得の月は比べられません)。
-            明細は「給与大臣から読み込む」で読みます — 保存済みの月はすぐ返り、保存が無い月だけ給与大臣から読んで保存します (1 社 10〜20 秒)。金額と氏名は画面を閉じると消えます。
+            明細はタブを開くと自動で読みます (読み直すときは「給与大臣から読み直す」)。保存済みの月はすぐ返り、保存が無い月だけ給与大臣から読んで保存します (1 社 10〜20 秒)。金額と氏名は画面を閉じると消えます。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
             <UButton
               icon="i-lucide-banknote"
-              label="給与大臣から読み込む"
+              label="給与大臣から読み直す"
               :loading="salaryLoading"
               :disabled="salaryLoading || caseMonths.length === 0"
               data-testid="litigation-salary-load"
@@ -1478,6 +1496,7 @@ function fmtDateTime(iso: string): string {
           <div v-if="salaryError" class="text-sm text-red-600 dark:text-red-400" data-testid="litigation-salary-error">{{ salaryError }}</div>
           <div class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-summary">
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
+            / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月
           </div>
 
           <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
@@ -1505,6 +1524,7 @@ function fmtDateTime(iso: string): string {
                   <td class="px-3 py-2 min-w-40">
                     <span class="text-xs rounded px-2 py-0.5 whitespace-nowrap" :class="SALARY_STATE_CLASS[row.state]">{{ LITIGATION_SALARY_STATE_LABELS[row.state] }}</span>
                     <div v-if="row.message" class="text-xs text-gray-600 dark:text-gray-400 mt-1">{{ row.message }}</div>
+                    <div v-if="row.payrollNote" class="text-xs text-gray-600 dark:text-gray-400 mt-1" data-salary-payroll>{{ row.payrollNote }}</div>
                   </td>
                   <template v-if="row.compared">
                     <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ fmtYen(row.compared.csvBase) }} / {{ fmtYen(row.compared.sysBase) }} / {{ fmtDiff(row.compared.diffBase) }}</td>
