@@ -233,7 +233,7 @@ describe('unkoGapsCell (alc にあってオンプレのデジタコに無い運�
   })
 
   it('★ 全部揃っていれば異常なし (オンプレにだけある運行は数えない)。タイムカードの有無は関係ない', () => {
-    // 1590 の 2023-06 の形: alc 7 件がオンプレに全部あり、オンプレには 5/29 出発の運行も (月で絞る前の話なのでここでは 8 件)
+    // ある乗務員の 2023-06 の形: alc 7 件がオンプレに全部あり、オンプレには 5/29 出発の運行も (月で絞る前の話なのでここでは 8 件)
     expect(unkoGapsCell(dtako(['a', 'b'], ['a', 'b', 'x']))).toEqual({ state: 'ok', message: 'オンプレのデジタコに無い運行なし (alc 2 件・オンプレ 3 件)' })
     expect(unkoGapsCell(dtako([], []))).toEqual({ state: 'ok', message: 'オンプレのデジタコに無い運行なし (alc 0 件・オンプレ 0 件)' })
   })
@@ -428,25 +428,25 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
   it('保存した 3 種を Map に戻し、行ごとにいちばん古い保存時刻を持つ', () => {
     const r = restoreLitigationChecks({
       items: [
-        { kind: 'alcOps', key: '1590|2023-06', payload: { ok: true, days: 20, dropped: [] }, checkedAt: '2026-09-29T02:00:00Z' },
-        { kind: 'alcOps', key: '1590|2023-07', payload: { ok: false, notFound: true, reason: '404' }, checkedAt: '2026-09-29T02:00:00Z' },
-        { kind: 'unkoGaps', key: '1590|2023-06', payload: { ok: true, value: { alc: ['a'], onprem: ['a', 'b'] } }, checkedAt: '2026-09-29T01:00:00Z' },
-        { kind: 'unkoGaps', key: '1590|2023-07', payload: { ok: false, reason: '502' }, checkedAt: '2026-09-29T03:00:00Z' },
-        { kind: 'wageReport', key: '1590|2023-06', payload: report([wageRow('1590')]), checkedAt: '2026-09-29T04:00:00Z' },
-        { kind: 'wageReport', key: '1590|2023-07', payload: { ok: false, reason: 'x' }, checkedAt: '2026-09-29T04:00:00Z' },
+        { kind: 'alcOps', key: '9101|2023-06', payload: { ok: true, days: 20, dropped: [] }, checkedAt: '2026-09-29T02:00:00Z' },
+        { kind: 'alcOps', key: '9101|2023-07', payload: { ok: false, notFound: true, reason: '404' }, checkedAt: '2026-09-29T02:00:00Z' },
+        { kind: 'unkoGaps', key: '9101|2023-06', payload: { ok: true, value: { alc: ['a'], onprem: ['a', 'b'] } }, checkedAt: '2026-09-29T01:00:00Z' },
+        { kind: 'unkoGaps', key: '9101|2023-07', payload: { ok: false, reason: '502' }, checkedAt: '2026-09-29T03:00:00Z' },
+        { kind: 'wageReport', key: '9101|2023-06', payload: report([wageRow('9101')]), checkedAt: '2026-09-29T04:00:00Z' },
+        { kind: 'wageReport', key: '9101|2023-07', payload: { ok: false, reason: 'x' }, checkedAt: '2026-09-29T04:00:00Z' },
       ],
     })
-    expect(r.alcOps.get('1590|2023-06')).toEqual({ ok: true, days: 20, dropped: [] })
-    expect(r.alcOps.get('1590|2023-07')).toEqual({ ok: false, notFound: true, reason: '404' })
-    expect(r.unkoGaps.get('1590|2023-06')).toEqual({ ok: true, value: { alc: ['a'], onprem: ['a', 'b'], onpremTruncated: false } })
-    expect(r.unkoGaps.get('1590|2023-07')).toEqual({ ok: false, reason: '502' })
-    expect(invariantsCell('1590', r.wageReports.get('1590|2023-06')).state).toBe('ok')
-    expect(r.wageReports.get('1590|2023-07')).toEqual({ ok: false, reason: 'x' })
-    expect(r.checkedAt.get('unkoGaps|1590|2023-06')).toBe('2026-09-29T01:00:00Z')
+    expect(r.alcOps.get('9101|2023-06')).toEqual({ ok: true, days: 20, dropped: [] })
+    expect(r.alcOps.get('9101|2023-07')).toEqual({ ok: false, notFound: true, reason: '404' })
+    expect(r.unkoGaps.get('9101|2023-06')).toEqual({ ok: true, value: { alc: ['a'], onprem: ['a', 'b'], onpremTruncated: false } })
+    expect(r.unkoGaps.get('9101|2023-07')).toEqual({ ok: false, reason: '502' })
+    expect(invariantsCell('9101', r.wageReports.get('9101|2023-06')).state).toBe('ok')
+    expect(r.wageReports.get('9101|2023-07')).toEqual({ ok: false, reason: 'x' })
+    expect(r.checkedAt.get('unkoGaps|9101|2023-06')).toBe('2026-09-29T01:00:00Z')
     // 行の時刻は 3 種のうちいちばん古いもの
-    expect(litigationRowCheckedAt(r.checkedAt, '1590|2023-06')).toBe('2026-09-29T01:00:00Z')
-    expect(litigationRowCheckedAt(r.checkedAt, '1590|2023-07')).toBe('2026-09-29T02:00:00Z')
-    expect(litigationRowCheckedAt(r.checkedAt, '1590|2023-08')).toBeNull()
+    expect(litigationRowCheckedAt(r.checkedAt, '9101|2023-06')).toBe('2026-09-29T01:00:00Z')
+    expect(litigationRowCheckedAt(r.checkedAt, '9101|2023-07')).toBe('2026-09-29T02:00:00Z')
+    expect(litigationRowCheckedAt(r.checkedAt, '9101|2023-08')).toBeNull()
   })
 
   it('★ 形の崩れた 1 件は捨てる (その行は未実行に戻るだけ。時刻も付けない)', () => {
@@ -467,7 +467,7 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
         { kind: 'wageReport', key: 'f', payload: { ok: true, value: null }, checkedAt: at },
         { kind: 'wageReport', key: 'g', payload: { ok: false }, checkedAt: at },
         // 不変条件だけを残していた頃の保存 (summary が乗務員CD だけ) は捨てて取り直させる
-        { kind: 'wageReport', key: 'g2', payload: { ok: true, value: { rows: [{ summary: { driverCd: '1590' }, invariants: {} }], no_data_drivers: [] } }, checkedAt: at },
+        { kind: 'wageReport', key: 'g2', payload: { ok: true, value: { rows: [{ summary: { driverCd: '9101' }, invariants: {} }], no_data_drivers: [] } }, checkedAt: at },
         { kind: 'yTime', key: 'h', payload: { ok: true }, checkedAt: at },
       ],
     })
