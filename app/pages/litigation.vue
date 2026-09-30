@@ -1787,11 +1787,15 @@ function fmtDateTime(iso: string): string {
                 data-testid="litigation-salary-fix-minwage-import"
                 @click="importMinWageHistory"
               />
-              <span>→ 取り込んだら下の ② を押す</span>
+              <span>→ 取り込んだら下の ③ を押す</span>
             </div>
             <div v-if="minWageImportMessage" data-testid="litigation-salary-fix-minwage-message">{{ minWageImportMessage }}</div>
             <div v-if="salaryFixes.prefectureMissing" data-testid="litigation-salary-fix-prefecture">
-              ① 所属から県が引けない月 {{ fmtFixGroup(salaryFixes.prefectureMissing) }}: 拘束×賃金 → 最低賃金チェック → ▸ 最低賃金 で拠点の県を設定してから、下の ② を押す
+              ① 所属から県が引けない月 {{ fmtFixGroup(salaryFixes.prefectureMissing) }}: 拘束×賃金 → 最低賃金チェック → ▸ 最低賃金 で拠点の県を設定してから、下の ③ を押す
+              <NuxtLink to="/restraint-wage" class="underline text-primary-600 dark:text-primary-400">拘束×賃金を開く</NuxtLink>
+            </div>
+            <div v-if="salaryFixes.rateMissing" data-testid="litigation-salary-fix-rate">
+              ② 単価マスタに単価が無い月 {{ fmtFixGroup(salaryFixes.rateMissing) }}: 拘束×賃金 → 単価マスタ で乗務員CD ({{ (openCase?.driverCds ?? []).join('・') }}) を追加し、一括変更 (乗務員を選んで単価と適用開始日) で単価を入れる。この画面からは単価マスタを書き換えない。入れたら下の ③ を押す
               <NuxtLink to="/restraint-wage" class="underline text-primary-600 dark:text-primary-400">拘束×賃金を開く</NuxtLink>
             </div>
             <div class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-fix-retake">
@@ -1804,11 +1808,7 @@ function fmtDateTime(iso: string): string {
                 data-testid="litigation-salary-materials-retake"
                 @click="retakeWageReports"
               />
-              <span>② 1 か月 15〜64 秒 × {{ caseMonths.length }} か月。終わるまでこのタブを閉じない</span>
-            </div>
-            <div v-if="salaryFixes.rateMissing" data-testid="litigation-salary-fix-rate">
-              ③ 単価マスタに単価が無い月 {{ fmtFixGroup(salaryFixes.rateMissing) }}: 拘束×賃金 → 単価マスタ で乗務員CD ({{ (openCase?.driverCds ?? []).join('・') }}) を追加し、一括変更 (乗務員を選んで単価と適用開始日) で単価を入れる。この画面からは単価マスタを書き換えない
-              <NuxtLink to="/restraint-wage" class="underline text-primary-600 dark:text-primary-400">拘束×賃金を開く</NuxtLink>
+              <span>③ 1 か月 15〜64 秒 × {{ caseMonths.length }} か月。終わるまでこのタブを閉じない</span>
             </div>
           </div>
           <div v-if="salaryCounts.noPayroll > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-register">
