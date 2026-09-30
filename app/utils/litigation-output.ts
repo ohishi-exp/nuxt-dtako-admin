@@ -197,3 +197,66 @@ export function countLitigationResults(
   for (const r of results) counts[r.status]++
   return counts
 }
+
+// ---- ZIP の中身の概要 (画面に出す) ----
+
+/**
+ * ZIP に入るファイル 1 つぶんの概要。
+ *
+ * | state | 意味 |
+ * | --- | --- |
+ * | `included` | 入る (作った / 作れる) |
+ * | `pending` | まだ作っていない — 「ZIP を作る」で Y時間 Excel を作る |
+ * | `excluded` | 入らない (0 件・未登録・失敗。理由は `detail`) |
+ */
+export interface LitigationZipSummaryItem {
+  filename: string
+  state: 'included' | 'pending' | 'excluded'
+  detail: string
+}
+
+export interface LitigationZipSummaryInput {
+  chunks: readonly LitigationOutputChunk[]
+  /** 出力の結果 (添字を `chunks` に揃える。未実行は null) */
+  results: readonly (LitigationOutputResult | null)[]
+  errorsCsv: {
+    filename: string
+    /** 乗務員 × 月の行数 */
+    rows: number
+    /** 全列の判定ごとの件数の合計 */
+    counts: { ng: number, unknown: number, pending: number }
+  }
+  changesCsv: {
+    filename: string
+    /** 変更記録タブで取りに行ったか */
+    finished: boolean
+    rows: number
+  }
+}
+
+/** ZIP に入るファイルの一覧と、それぞれの中身の要点。並びは ZIP に入れる順 (Excel → CSV 2 本)。 */
+export function buildLitigationZipSummary(input: LitigationZipSummaryInput): LitigationZipSummaryItem[] {
+  const excel = input.chunks.map((c, i): LitigationZipSummaryItem => {
+    const r = input.results[i]
+    const period = `${c.label} (乗務員 ${c.driverCd})`
+    if (!r) return { filename: c.filename, state: 'pending', detail: `${period} — 「ZIP を作る」で Y時間 Excel を作る` }
+    if (r.status !== 'ok') return { filename: c.filename, state: 'excluded', detail: `${period} — 入らない: ${r.message}` }
+    const rows = r.rows === null ? '' : ` ${r.rows} 行`
+    const missing = r.missingCount > 0 ? ` / テンプレに書けなかった日 ${r.missingCount} 日` : ''
+    const warnings = r.warningsCount > 0 ? ` / 警告 ${r.warningsCount} 件` : ''
+    return { filename: c.filename, state: 'included', detail: `${period} —${rows}${missing}${warnings}`.replace('— /', '—') }
+  })
+  const e = input.errorsCsv
+  const errors: LitigationZipSummaryItem = {
+    filename: e.filename,
+    state: 'included',
+    detail: `乗務員 × 月 ${e.rows} 行 / 異常あり ${e.counts.ng}・判定できない ${e.counts.unknown}・未実行 ${e.counts.pending} (4 列の合計)`,
+  }
+  const ch = input.changesCsv
+  const changes: LitigationZipSummaryItem = {
+    filename: ch.filename,
+    state: 'included',
+    detail: ch.finished ? `変更 ${ch.rows} 件` : '変更記録タブで「検知を実行」していない — 空の表 (その旨を備考に書く)',
+  }
+  return [...excel, errors, changes]
+}

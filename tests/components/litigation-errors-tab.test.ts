@@ -76,6 +76,8 @@ interface Call { via: '$fetch' | 'fetch', method: string, url: string, body?: un
 let febOnpremOpeNos: string[] = []
 /** `GET /restraint-api/litigation-checks` が返す保存済みの結果 */
 let storedItems: unknown[] = []
+/** 給与大臣の payroll を 403 にする */
+let payrollForbidden = false
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -100,7 +102,35 @@ function stubDollarFetch() {
         restraint_source: 'gcp',
         no_data_drivers: [],
         warnings: [],
-        rows: [{ summary: { driverCd: '1078' }, fetched_at: null, last_verified_at: null, wage: {}, invariants: OK_INV }],
+        rows: [{
+          summary: { driverCd: '1078', driverName: '甲野 太郎', workDays: 20, workingMinutes: 9600, overtimeMinutes: 600, overtimeNightMinutes: 0, days: [{ date: '2025-01-10' }] },
+          fetched_at: null,
+          last_verified_at: null,
+          pay_kubun: 2,
+          wage: { minutes: { statutory: 9000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: null, minWageNightOvertimePay: null },
+          invariants: OK_INV,
+        }],
+      }
+    }
+    if (url === '/restraint-api/comp-map') {
+      return { comps: [{ compId: '27324455', compLabel: '大石運輸倉庫', payrollCompanies: [{ payrollCompany: '0200', legacyLabel: null, payrollCompanyName: null }] }] }
+    }
+    if (url === '/restraint-api/employee-master') return { employees: [{ company: '0200', payrollCd: '747', name: '甲野 太郎', driverCd: '1078' }] }
+    if (url === '/restraint-api/salary-item-config') return { exists: true, data: { items: { 基本給: 'base', 残業手当: 'overtime' } } }
+    if (url === '/api/kyuyo/payroll') {
+      if (payrollForbidden) throw Object.assign(new Error('forbidden'), { statusCode: 403 })
+      // 勤務月 q.month の翌月に支給 (pay_date が支給月)
+      const [y, m] = (q.month as string).split('-').map(Number) as [number, number]
+      const pay = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`
+      return {
+        database: 'KYDATA0200_125C',
+        rows: [{
+          employee_code: '0747', employee_code_key: '747', employee_name: '甲野 太郎', pay_date: `${pay}-25`,
+          payments: { 基本給: 200000, 残業手当: 30000 },
+          base_rate: 10000, overtime_rate: 1500, totals: { soshikyu: 230000 },
+        }],
+        warnings: [],
+        source: 'cache',
       }
     }
     throw new Error(`unexpected $fetch ${url}`)
@@ -165,6 +195,7 @@ beforeEach(() => {
     per_page: 200,
   })
   storedItems = []
+  payrollForbidden = false
   saved.length = 0
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -403,7 +434,7 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
 
   it('★ 開き直すと前回の結果を出し、「続きから」は取れていない分だけ回す', async () => {
     const at = '2026-09-28T01:00:00.000Z'
-    const rep = { ok: true, value: { month: '2025-01', restraint_source: 'gcp', no_data_drivers: [], warnings: [], rows: [{ summary: { driverCd: '1078' }, invariants: OK_INV }] } }
+    const rep = { ok: true, value: { month: '2025-01', restraint_source: 'gcp', no_data_drivers: [], warnings: [], rows: [{ summary: { driverCd: '1078', workDays: 20 }, wage: {}, invariants: OK_INV }] } }
     storedItems = [
       { kind: 'alcOps', key: '1078|2025-01', payload: { ok: true, days: 2, dropped: [] }, checkedAt: at },
       { kind: 'alcOps', key: '1078|2025-02', payload: { ok: true, days: 0, dropped: [] }, checkedAt: at },
@@ -443,6 +474,67 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
     const w = await mountAndOpen()
     expect(w.find('[data-testid="litigation-errors-store-error"]').text()).toContain('保存済みの検知結果を読めませんでした')
     expect(buttonByText(w, '検知を実行').attributes('disabled')).toBeUndefined()
+    w.unmount()
+  })
+})
+
+describe('出力タブ: ZIP に入るものの概要', () => {
+  it('★ 作る前から、Excel は「まだ」・CSV 2 本は中身の要点つきで並ぶ', async () => {
+    const w = mount(Page, {
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
+    })
+    await settle()
+    await buttonByText(w, '開く').trigger('click')
+    await settle()
+    const summary = w.find('[data-testid="litigation-zip-summary"]')
+    expect(summary.text()).toContain('ZIP に入るもの')
+    expect(summary.find('[data-zip-file="1078_2025-01-2025-02.xlsx"]').text()).toContain('まだ')
+    expect(summary.find('[data-zip-file="エラー一覧.csv"]').text()).toContain('乗務員 × 月 2 行')
+    expect(summary.find('[data-zip-file="変更記録.csv"]').text()).toContain('空の表')
+    w.unmount()
+  })
+})
+
+describe('給与比較タブ', () => {
+  async function openSalaryAfterChecks(): Promise<VueWrapper> {
+    const w = await openErrorsTabAndRun()
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    return w
+  }
+
+  it('★ 給与大臣へは勤務月で問い合わせ、翌月支給の明細と エラータブの拘束で比べる (拘束が取れていない月は比べない)', async () => {
+    const w = await openSalaryAfterChecks()
+    // 読み込む前は明細が未読込
+    expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('給与明細が未読込')
+    calls = []
+    await buttonByText(w, '給与大臣から読み込む').trigger('click')
+    await settle()
+    expect(calls.filter(c => c.url.startsWith('/api/kyuyo/payroll')).map(c => c.url)).toEqual([
+      '/api/kyuyo/payroll?company=0200&month=2025-01',
+      '/api/kyuyo/payroll?company=0200&month=2025-02',
+    ])
+    // 給与コード 747 は社員マスタで 1078 に引き当たる。日額 10,000 × 20 日 = 200,000 で差 0
+    const jan = w.find('[data-salary-row="1078|2025-01"]').text()
+    expect(jan).toContain('比較済み')
+    expect(jan).toContain('(2025-02)')
+    expect(jan).toContain('200,000 / 200,000 / 0')
+    // 残業は 1,500 円 × 10 h = 15,000 に対して明細 30,000 → +15,000
+    expect(jan).toContain('30,000 / 15,000 / +15,000')
+    // 2 月は wage-report が 504 だったので比べない (0 と言わない)
+    expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('拘束の材料が取れていない')
+    // 給与の書き込み口 (sync) は叩かない
+    expect(calls.filter(c => c.url.includes('/api/kyuyo/sync'))).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('給与を見る権限が無ければ止めて、そう出す', async () => {
+    payrollForbidden = true
+    const w = await openSalaryAfterChecks()
+    await buttonByText(w, '給与大臣から読み込む').trigger('click')
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-error"]').text()).toContain('給与を見る権限がありません')
+    expect(calls.filter(c => c.url.startsWith('/api/kyuyo/payroll'))).toHaveLength(1)
     w.unmount()
   })
 })

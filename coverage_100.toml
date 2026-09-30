@@ -1323,3 +1323,10 @@ branches = true
 [[files]]
 path = "app/utils/litigation-changes.ts"
 branches = true
+
+# 訴訟準備の「給与比較」タブの pure ロジック — 案件の乗務員 × 月を、給与大臣の明細
+# (支給月 = 勤務月の翌月) と エラータブで取った wage-report で compareSalaryMonth に掛ける・
+# 材料が無い/明細に居ない/引き当ての衝突 の言い分け。.vue 側は登録しない。
+[[files]]
+path = "app/utils/litigation-salary.ts"
+branches = true

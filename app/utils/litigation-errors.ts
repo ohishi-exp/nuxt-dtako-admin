@@ -27,7 +27,7 @@
  * wage-report を読むだけで、`restraint-wage.vue` の computed やタブは流用しない。
  */
 import type { LitigationOutputChunk, LitigationOutputResult } from './litigation-output'
-import type { WageInvariantCheck, WageReportResponse, WageReportRow } from './restraint-wage-view'
+import type { WageInvariantCheck, WageReportResponse } from './restraint-wage-view'
 import { fmtShiftOverlap, invariantRowStatus, nextYm } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
 import { csvCell } from './wage-range-view'
@@ -490,8 +490,8 @@ export interface LitigationStoredItem {
 
 /**
  * 会社全体の wage-report から 1 乗務員ぶんを切り出す (保存する大きさを抑える)。
- * 残すのは [`invariantsCell`] が読む項目だけ — 行は `summary.driverCd` / `restraint_missing` /
- * `invariants` しか持たないので、**他の画面の表示には使わないこと**。
+ * 行は日別 (`summary.days`) だけを落として残す — [`invariantsCell`] と給与比較
+ * (`compareSalaryMonth`、`litigation-salary.ts`) が読むのは月の集計・`wage`・`pay_kubun` だけ。
  */
 export function reduceWageReportForDriver(
   entry: LitigationFetched<WageReportResponse>,
@@ -501,7 +501,7 @@ export function reduceWageReportForDriver(
   const v = entry.value
   const rows = v.rows
     .filter(r => r.summary.driverCd === driverCd)
-    .map(r => ({ summary: { driverCd }, restraint_missing: r.restraint_missing, invariants: r.invariants }) as unknown as WageReportRow)
+    .map(r => ({ ...r, summary: { ...r.summary, days: [] } }))
   return {
     ok: true,
     value: {
@@ -549,10 +549,16 @@ function restoreUnkoGaps(p: Record<string, unknown>): LitigationFetched<Litigati
   return typeof p.reason === 'string' ? { ok: false, reason: p.reason } : null
 }
 
+/** 給与比較が読む月の集計と `wage` を持った行か。不変条件だけを残していた頃の保存
+ * (`summary` が乗務員CD だけ) は捨てて取り直させる。 */
+function isFullWageRow(r: unknown): boolean {
+  return isRecord(r) && isRecord(r.summary) && typeof r.summary.workDays === 'number' && isRecord(r.wage)
+}
+
 function restoreWageReport(p: Record<string, unknown>): LitigationFetched<WageReportResponse> | null {
   if (p.ok === true) {
     const v = p.value
-    return isRecord(v) && Array.isArray(v.rows) && Array.isArray(v.no_data_drivers)
+    return isRecord(v) && Array.isArray(v.rows) && Array.isArray(v.no_data_drivers) && v.rows.every(isFullWageRow)
       ? { ok: true, value: v as unknown as WageReportResponse }
       : null
   }
