@@ -16,7 +16,7 @@
 import { nextYm } from './restraint-wage-view'
 import type { WageReportResponse, WageReportRow } from './restraint-wage-view'
 import { compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
-import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig } from './salary-compare'
+import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
 import { splitCdMapKey } from './employee-master'
 import type { EmployeeMasterEntry, KyuyoEmployeesResponse } from './employee-master'
 import type { LitigationFetched } from './litigation-errors'
@@ -287,4 +287,93 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
     workDays: c.sysWorkDays,
     overtimeHours: Math.round(c.sysOvertimeMinutes / 6) / 10,
   }
+}
+
+// --- 計算に使った単価 (単価マスタ) と最低賃金 (Refs #1133) ---
+
+export type RateBasisStatus = 'ok' | 'mismatch' | 'unknown'
+
+const yen = (v: number) => v.toLocaleString('ja-JP')
+/** "YYYY-MM-DD" → "YYYY-MM" */
+const ym = (d: string) => d.slice(0, 7)
+
+/** 単価の表示 (`1,000円/h (2024-10 適用、架空県)`)。適用開始日が無い (古い保存物) ときはそう書く。 */
+export function rateBasisLabel(b: SalaryRateBasis): string {
+  if (b.hourlyRate === null) return '単価なし (単価マスタに無い)'
+  const pref = b.prefecture ? `、${b.prefecture}` : ''
+  return b.effectiveFrom
+    ? `${yen(b.hourlyRate)}円/h (${ym(b.effectiveFrom)} 適用${pref})`
+    : `${yen(b.hourlyRate)}円/h (適用開始 不明 — 拘束の材料を取り直すと出る${pref})`
+}
+
+/** 最低賃金の表示 (`架空県 1,000円/h (2024-10 発効)`)。 */
+export function minWageBasisLabel(b: { minWageRate: number, minWagePrefecture: string | null, minWageEffectiveFrom: string | null }): string {
+  const pref = b.minWagePrefecture ? `${b.minWagePrefecture} ` : ''
+  const from = b.minWageEffectiveFrom ? `${ym(b.minWageEffectiveFrom)} 発効` : '発効 不明'
+  return `${pref}${yen(b.minWageRate)}円/h (${from})`
+}
+
+/**
+ * 単価 (単価マスタ) がその月の最低賃金と一致するか。この会社は単価マスタに最低賃金を入れて
+ * 運用しているので、**違う月 (上下どちらも) はエラー**。どちらかが無い月は `unknown` で理由を返す —
+ * 黙って一致扱いにしない。
+ */
+export function rateBasisStatus(b: SalaryRateBasis): { status: RateBasisStatus, message: string } {
+  if (b.hourlyRate === null) return { status: 'unknown', message: '判定できない: 単価マスタに単価が無い' }
+  if (b.minWageRate === null) return { status: 'unknown', message: '判定できない: この月の最低賃金が引けない' }
+  if (b.hourlyRate === b.minWageRate) return { status: 'ok', message: '最低賃金と一致' }
+  return { status: 'mismatch', message: `最低賃金 ${minWageBasisLabel({ ...b, minWageRate: b.minWageRate })} と違う` }
+}
+
+/** 紙面の「計算に使った単価」一覧の 1 行。 */
+export interface RateBasisPeriod {
+  driverCd: string
+  /** 勤務月 `YYYY-MM` (両端を含む) */
+  from: string
+  to: string
+  hourlyRate: number | null
+  effectiveFrom: string | null
+  prefecture: string | null
+  /** 期間の月数 / そのうち最低賃金と違う月 / 判定できない月 */
+  months: number
+  mismatchMonths: number
+  unknownMonths: number
+  /** 違う月の最低賃金 (額・県・発効の組で重複を除く、出現順) */
+  mismatchMinWages: string[]
+}
+
+/**
+ * 乗務員ごと・月順に、同じ単価 (額・適用開始日・県) が続く月を 1 期間にまとめる。
+ * 比較できていない月 (`compared` が無い) で期間を切る — 間の月の単価は分からないため。
+ * 入力は `buildLitigationSalaryRows` の並び (乗務員ごと・月の古い順) のまま渡す。
+ */
+export function rateBasisPeriods(rows: readonly LitigationSalaryRow[]): RateBasisPeriod[] {
+  const out: RateBasisPeriod[] = []
+  let cur: RateBasisPeriod | null = null
+  for (const row of rows) {
+    const b = row.compared?.rateBasis
+    if (!b) {
+      cur = null
+      continue
+    }
+    if (!cur || cur.driverCd !== row.driverCd || cur.hourlyRate !== b.hourlyRate
+      || cur.effectiveFrom !== b.effectiveFrom || cur.prefecture !== b.prefecture) {
+      cur = {
+        driverCd: row.driverCd, from: row.month, to: row.month,
+        hourlyRate: b.hourlyRate, effectiveFrom: b.effectiveFrom, prefecture: b.prefecture,
+        months: 0, mismatchMonths: 0, unknownMonths: 0, mismatchMinWages: [],
+      }
+      out.push(cur)
+    }
+    cur.to = row.month
+    cur.months++
+    const { status } = rateBasisStatus(b)
+    if (status === 'unknown') cur.unknownMonths++
+    if (status === 'mismatch') {
+      cur.mismatchMonths++
+      const label = minWageBasisLabel({ ...b, minWageRate: b.minWageRate! })
+      if (!cur.mismatchMinWages.includes(label)) cur.mismatchMinWages.push(label)
+    }
+  }
+  return out
 }

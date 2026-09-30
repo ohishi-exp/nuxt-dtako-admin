@@ -104,6 +104,10 @@ export interface WageRow {
   driverName: string
   branchName: string
   hourlyRate: number | null
+  /** `hourlyRate` を採った単価履歴の適用開始日 ("YYYY-MM-DD")。古い応答・保存物には無い (Refs #1133)。 */
+  hourlyRateEffectiveFrom?: string
+  /** `hourlyRate` を採った単価履歴の県 (最低賃金の一括設定で入れた単価だけ)。 */
+  hourlyRatePrefecture?: string
   minutes: Record<WageCategoryKey, number>
   amounts: Record<WageCategoryKey, number> | null
   totalAmount: number | null
@@ -111,7 +115,8 @@ export interface WageRow {
    * 含んだ合計**なので、**この値は法的な最低賃金判定ではない**。画面 / CSV では
    * **「総支給時給」**と表示する (Refs #938。文言は {@link GROSS_HOURLY_CAVEAT})。 */
   hourlyEquivalent: number | null
-  minWage: { rate: number | null, prefecture: string | null, mapped: boolean }
+  /** `rateEffectiveFrom` は採用した最低賃金の発効日 ("YYYY-MM-DD"、額が引けなければ無い)。 */
+  minWage: { rate: number | null, prefecture: string | null, mapped: boolean, rateEffectiveFrom?: string }
   /** `hourlyEquivalent` − 最低賃金 (どちらか欠けたら null)。分子が割増込みなので
    * **最低賃金法4条3項の判定ではなく参考値**。画面 / CSV では
    * **「総支給時給−最低賃金」**と表示する (Refs #938)。 */

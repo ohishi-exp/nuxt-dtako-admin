@@ -430,6 +430,22 @@ export function suggestCdMapEntries(
 /** 支給項目 1 件の内訳表示用 (項目名 + 金額)。 */
 export interface SalaryItemAmount { label: string, amount: number }
 
+/**
+ * 計算に使った単価 (単価マスタ) と、その月の最低賃金 (Refs #1133)。wage-report の行
+ * (`hourlyRate` / `minWage`) の写しで、計算はしない — 訴訟準備の画面と紙面は
+ * `SalaryComparisonRow` だけを回していて wage-report の行を持たないため、ここで束ね直す。
+ * この会社は単価マスタに最低賃金を入れて運用しているので、2 つが違う月はエラーとして出す。
+ * 古い保存物には適用開始日・県・最低賃金の発効日が無いので null になる。
+ */
+export interface SalaryRateBasis {
+  hourlyRate: number | null
+  effectiveFrom: string | null
+  prefecture: string | null
+  minWageRate: number | null
+  minWagePrefecture: string | null
+  minWageEffectiveFrom: string | null
+}
+
 export interface SalaryComparisonRow {
   driverCd: string
   /** 突合マスタで引き当てた乗務員CD (マスタ経由の時だけ非 null)。 */
@@ -531,6 +547,8 @@ export interface SalaryComparisonRow {
     sys: { work: number, publicHoliday: number, paidLeave: number, absence: number, punchError: number }
     csv: { work?: number, publicHoliday?: number, paidLeave?: number, absence?: number }
   }
+  /** 計算に使った単価と最低賃金 (表示用の写し、Refs #1133)。 */
+  rateBasis: SalaryRateBasis
 }
 
 /** 給与明細の【 勤怠 】項目名 → 突合する軸 (Refs #433)。給与大臣の様式に合わせた
@@ -975,6 +993,15 @@ export function compareSalaryMonth(
       minWageOvertimePay,
       diffCsvVsMinWageOvertime: minWageOvertimePay === null ? null : overtime - minWageOvertimePay,
       attendanceDays: buildAttendanceDays(report, csv),
+      rateBasis: {
+        // 欄が無い (古い保存物・応答) はどれも null — 判定は unknown になり、一致扱いにしない
+        hourlyRate: report.wage.hourlyRate ?? null,
+        effectiveFrom: report.wage.hourlyRateEffectiveFrom ?? null,
+        prefecture: report.wage.hourlyRatePrefecture ?? null,
+        minWageRate: report.wage.minWage?.rate ?? null,
+        minWagePrefecture: report.wage.minWage?.prefecture ?? null,
+        minWageEffectiveFrom: report.wage.minWage?.rateEffectiveFrom ?? null,
+      },
     })
   }
 

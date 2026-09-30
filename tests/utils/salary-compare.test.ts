@@ -690,6 +690,33 @@ describe('compareSalaryMonth', () => {
     expect(out.warnings).toEqual([])
   })
 
+  // Refs #1133: 計算に使った単価 (単価マスタ) と最低賃金を行に写す (表示用。計算はしない)
+  it('rateBasis: wage-report の単価・適用開始・県と最低賃金を写す。欄が無ければ null (判定は unknown になる)', () => {
+    const withBasis = reportRow('1239', '城田 秀幸')
+    withBasis.wage = {
+      ...withBasis.wage,
+      hourlyRate: 1100,
+      hourlyRateEffectiveFrom: '2024-10-05',
+      hourlyRatePrefecture: '架空県',
+      minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' },
+    }
+    expect(compareSalaryMonth([csvRow()], [withBasis], config, '2025-01').rows[0]!.rateBasis).toEqual({
+      hourlyRate: 1100,
+      effectiveFrom: '2024-10-05',
+      prefecture: '架空県',
+      minWageRate: 1000,
+      minWagePrefecture: '架空県',
+      minWageEffectiveFrom: '2024-10-01',
+    })
+    // 古い保存物: 単価だけ (適用開始・県・最低賃金の発効日なし)、最低賃金の欄ごと無い
+    const old = reportRow('1239', '城田 秀幸')
+    old.wage = { ...old.wage, hourlyRate: 1000 }
+    expect(compareSalaryMonth([csvRow()], [old], config, '2025-01').rows[0]!.rateBasis).toEqual({
+      hourlyRate: 1000, effectiveFrom: null, prefecture: null, minWageRate: null, minWagePrefecture: null, minWageEffectiveFrom: null,
+    })
+    expect(compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸')], config, '2025-01').rows[0]!.rateBasis.hourlyRate).toBeNull()
+  })
+
   it('分単位の残業は時給を按分して円未満を四捨五入する', () => {
     const out = compareSalaryMonth(
       [csvRow({ rates: { base: null, overtime: 1430 } })],

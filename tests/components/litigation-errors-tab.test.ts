@@ -79,6 +79,8 @@ let storedItems: unknown[] = []
 /** 給与大臣の payroll を 403 にする */
 let payrollForbidden = false
 let payrollOvertimePay = 30000
+/** wage-report の行 `wage` に足す欄 (月ごと。単価・最低賃金、Refs #1133) */
+let wageExtra: Record<string, Record<string, unknown>> = {}
 /** 保存済みの結果の読み込み (GET litigation-checks) を失敗させる / 解けるまで待たせる */
 let storeGetFails = false
 let storeGetGate: Promise<void> | null = null
@@ -140,7 +142,7 @@ function stubDollarFetch() {
           fetched_at: null,
           last_verified_at: null,
           pay_kubun: 2,
-          wage: { minutes: { statutory: 9000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: null, minWageNightOvertimePay: null },
+          wage: { minutes: { statutory: 9000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: null, minWageNightOvertimePay: null, ...wageExtra[String(q.month)] },
           invariants: OK_INV,
         }],
       }
@@ -260,6 +262,7 @@ beforeEach(() => {
   storedItems = []
   payrollForbidden = false
   payrollOvertimePay = 30000
+  wageExtra = {}
   storeGetFails = false
   storeGetGate = null
   febWageFails = true
@@ -645,6 +648,46 @@ describe('給与比較タブ', () => {
     // 明細の残業 10,000 は計算 15,000 を下回る → 残業の差 (-5,000) も赤
     expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="overtime"] [data-salary-line="diff"]').classes()).toContain('text-red-600')
     expect(w.find('[data-testid="litigation-salary-shortfall37"]').text()).toBe('37条で不足 1 件')
+    w.unmount()
+  })
+
+  // --- 計算に使った単価と最低賃金 (Refs #1133) ---
+  const RATE_1100 = { hourlyRate: 1100, hourlyRateEffectiveFrom: '2024-10-05', hourlyRatePrefecture: '架空県', minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' } }
+  const RATE_1000 = { hourlyRate: 1000, hourlyRateEffectiveFrom: '2024-10-05', hourlyRatePrefecture: '架空県', minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' } }
+  const rateCell = (w: VueWrapper, row: string) => w.find(`[data-salary-row="${row}"] [data-salary-cell="rate-basis"]`)
+
+  it('★ 単価: 各月の行に「単価 N円/h (YYYY-MM 適用、県)」。最低賃金と違う月は (上回る側も) 赤太字で最低賃金の額と発効年月を併記、一致は色なし。集計行が数える', async () => {
+    febWageFails = false
+    wageExtra = { '2025-01': RATE_1100, '2025-02': RATE_1000 }
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    const jan = rateCell(w, '1078|2025-01')
+    expect(jan.text()).toContain('単価 1,100円/h (2024-10 適用、架空県)')
+    expect(jan.text()).toContain('最低賃金 架空県 1,000円/h (2024-10 発効) と違う')
+    expect(jan.attributes('data-rate-status')).toBe('mismatch')
+    const janStatus = jan.find('[data-salary-line="rate-basis-status"]').classes()
+    expect(janStatus).toContain('font-bold')
+    expect(janStatus).toContain('text-red-600')
+    const feb = rateCell(w, '1078|2025-02')
+    expect(feb.text()).toContain('単価 1,000円/h (2024-10 適用、架空県)')
+    expect(feb.attributes('data-rate-status')).toBe('ok')
+    expect(feb.find('[data-salary-line="rate-basis-status"]').classes()).not.toContain('font-bold')
+    expect(w.find('[data-testid="litigation-salary-rate-mismatch"]').text()).toBe('単価が最低賃金と違う 1 件')
+    expect(w.find('[data-testid="litigation-salary-rate-unknown"]').text()).toBe('単価 判定できない 0 件')
+    w.unmount()
+  })
+
+  it('★ 単価: 古い保存物 (適用開始・最低賃金なし) は「適用開始 不明」で判定できない (一致扱いにしない)。0 件でも集計行に出る', async () => {
+    wageExtra = { '2025-01': { hourlyRate: 1000 } }
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    const jan = rateCell(w, '1078|2025-01')
+    expect(jan.text()).toContain('単価 1,000円/h (適用開始 不明')
+    expect(jan.text()).toContain('判定できない: この月の最低賃金が引けない')
+    expect(jan.attributes('data-rate-status')).toBe('unknown')
+    expect(jan.find('[data-salary-line="rate-basis-status"]').classes()).toContain('text-gray-500')
+    expect(w.find('[data-testid="litigation-salary-rate-mismatch"]').text()).toBe('単価が最低賃金と違う 0 件')
+    expect(w.find('[data-testid="litigation-salary-rate-unknown"]').text()).toBe('単価 判定できない 1 件')
     w.unmount()
   })
 
@@ -1171,6 +1214,8 @@ describe('給与比較タブ: 明細を保存済みはまとめて、保存が�
 })
 
 describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #1133)', () => {
+  const RATE_1100_PRINT = { hourlyRate: 1100, hourlyRateEffectiveFrom: '2024-10-05', hourlyRatePrefecture: '架空県', minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' } }
+  const RATE_1000_PRINT = { ...RATE_1100_PRINT, hourlyRate: 1000 }
   const SECTIONS = ['output', 'errors', 'salary', 'changes'] as const
   const sheet = (w: VueWrapper) => w.find('[data-testid="litigation-print-sheet"]')
   const has = (w: VueWrapper, key: string) => sheet(w).find(`[data-testid="litigation-print-${key}"]`).exists()
@@ -1231,6 +1276,35 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     expect(diff37.classes()).toContain('font-bold')
     expect(diff37.classes()).toContain('text-red-600')
     expect(sheet(w).find('[data-testid="litigation-print-salary"]').text()).toContain('37条で不足 1 件')
+    w.unmount()
+  })
+
+  it('★ 給与比較: 表の上に「計算に使った単価」の期間一覧 (単価・適用年月・県・違う月数と最低賃金)。表の各行に列は足さない', async () => {
+    febWageFails = false
+    wageExtra = { '2025-01': RATE_1100_PRINT, '2025-02': RATE_1000_PRINT }
+    const w = await openErrorsTabAndRun()
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    const salary = sheet(w).find('[data-testid="litigation-print-salary"]')
+    const periods = salary.find('[data-testid="litigation-print-rate-periods"]')
+    const html = salary.html()
+    // 一覧は表 (37条などの明細表) より前に出る
+    expect(html.indexOf('litigation-print-rate-periods')).toBeLessThan(html.indexOf('data-print-salary-row'))
+    const jan = periods.find('[data-print-rate-period="1078|2025-01"]')
+    expect(jan.text()).toContain('2025-01 (1 か月)')
+    expect(jan.text()).not.toContain('〜')
+    expect(jan.text()).toContain('1,100 円/h')
+    expect(jan.text()).toContain('2024-10')
+    expect(jan.text()).toContain('架空県')
+    expect(jan.text()).toContain('1 か月 — 最低賃金 架空県 1,000円/h (2024-10 発効)')
+    expect(jan.classes()).toContain('font-bold')
+    expect(jan.classes()).toContain('text-red-600')
+    const feb = periods.find('[data-print-rate-period="1078|2025-02"]')
+    expect(feb.text()).toContain('0 か月')
+    expect(feb.classes()).not.toContain('font-bold')
+    expect(salary.text()).toContain('単価が最低賃金と違う 1 件')
+    // 明細表の各行は従来の列数のまま (列を足さない): 比較済みの行は 3 + 9 + 5 + 1 = 18 セル
+    expect(salary.find('[data-print-salary-row="1078|2025-01"]').findAll('td')).toHaveLength(18)
     w.unmount()
   })
 
