@@ -161,10 +161,18 @@ export interface KintaiRelayDeps {
   kyuyoUpstream?: KyuyoUpstream;
 }
 
-/** `checkKyuyoAccess` の上流切替。`mode === "worker"` のときだけ `binding` (給与大臣 Worker) を叩く。 */
+/**
+ * auth-worker の `KyuyoAuthEntrypoint` (RPC) の最小形。`authorize(token)` は JWT 文字列そのもの
+ * (`Bearer ` を付けない) を受け、`{status, body}` を返す。binding 型ではなくこの最小 interface に依存する。
+ */
+export interface KyuyoAuthorizer {
+  authorize(token: string): Promise<{ status: number; body: string; contentType: string | null }>;
+}
+
+/** `checkKyuyoAccess` の上流切替。`mode === "worker"` のときだけ `binding` (auth-worker RPC) に聞く。 */
 export interface KyuyoUpstream {
   mode?: string | null;
-  binding?: FetcherLike | null;
+  binding?: KyuyoAuthorizer | null;
 }
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -893,13 +901,12 @@ export async function relayKintaiChangeLog(
 const KYUYO_ACCESS_PATH = "/api/kyuyo/access";
 
 /**
- * worker モード (`NUXT_KYUYO_UPSTREAM=worker`) の宛先。**path は定数** (外部入力から組まない)。
- * Worker の認可なし POST /probe には届かない。host は service binding が無視する。
- * 語彙 (`worker` だけが Worker、他はすべてオンプレ) は app 側 `server/utils/kyuyo-upstream.ts` と揃える。
+ * worker モード (`NUXT_KYUYO_UPSTREAM=worker`) の語彙は app 側 `server/utils/kyuyo-upstream.ts` と揃える
+ * (`worker` だけがオンプレに聞かない、他はすべてオンプレ)。聞く先は auth-worker の
+ * `KyuyoAuthEntrypoint.authorize` で、給与大臣 Worker の `/kyuyo/access` と同じ判定
+ * (SQL Server にも Tunnel にも依存しない)。
  */
-const KYUYO_WORKER_ACCESS_URL = "https://ichibanboshi-kyuyo/kyuyo/access";
-
-const KYUYO_WORKER_UNREACHABLE_MESSAGE = "給与大臣の Worker に届きません";
+const KYUYO_WORKER_UNREACHABLE_MESSAGE = "給与の認可 (auth-worker) に届きません";
 
 /** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
 const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
@@ -950,30 +957,25 @@ function kyuyoAccessMessage(body: string, status: number): string {
   return body.trim() ? body.trim().slice(0, 200) : `上流が status ${status} を返しました`;
 }
 
-/** worker モード。fail-closed は onprem と同じ (binding 無し・reject・401・404 は 503)。理由文は日本語に写す。 */
+/** worker モード。fail-closed は onprem と同じ (binding 無し・reject・許可以外は 503 か 403)。理由文は日本語に写す。 */
 async function checkKyuyoAccessViaWorker(
-  binding: FetcherLike | null | undefined,
-  bearer: string,
+  binding: KyuyoAuthorizer | null | undefined,
+  token: string,
 ): Promise<KyuyoAccessDenial | null> {
   const unreachable = { status: 503, message: KYUYO_WORKER_UNREACHABLE_MESSAGE };
   if (!binding) return unreachable;
-  let res: Response;
+  let res: { status: number; body: string };
   try {
-    res = await binding.fetch(KYUYO_WORKER_ACCESS_URL, {
-      headers: { Authorization: `Bearer ${bearer}` },
-    });
+    res = await binding.authorize(token);
   } catch {
     return unreachable;
   }
-  if (res.ok) return null;
+  if (res.status === 200) return null;
   if (res.status === 401) {
     return { status: KYUYO_ACCESS_UNIDENTIFIED_STATUS, message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE };
   }
   if (res.status === 403) return { status: 403, message: "給与の閲覧許可リストに無いアカウントです" };
-  if (res.status === 404) {
-    return { status: 503, message: "給与大臣の Worker に /kyuyo/access がありません" };
-  }
-  if (kyuyoAccessMessage(await res.text(), res.status) === "kyuyo_allowlist_unset") {
+  if (kyuyoAccessMessage(res.body, res.status) === "kyuyo_allowlist_unset") {
     return { status: 503, message: "給与の閲覧許可リストが未設定です" };
   }
   return unreachable;

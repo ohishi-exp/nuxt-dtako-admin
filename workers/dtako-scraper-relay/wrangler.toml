@@ -61,11 +61,12 @@ binding = "AUTH_WORKER_RPC"
 service = "auth-worker"
 entrypoint = "InternalEntrypoint"
 
-# 給与大臣 Worker (Refs ohishi-exp/rust-ichibanboshi#322)。切替 env var が worker のときだけ
-# 使われる (未設定 = オンプレ)。切替は vars に書かない。
+# 給与閲覧の認可確認 (Refs ohishi-exp/rust-ichibanboshi#322)。auth-worker の給与認可 RPC (authorize)
+# を RPC で直接呼ぶ。切替 env var が worker のときだけ使われる (未設定 = オンプレ)。切替は vars に書かない。
 [[services]]
-binding = "ICHIBAN_KYUYO"
-service = "ichibanboshi-kyuyo"
+binding = "AUTH_KYUYO"
+service = "auth-worker"
+entrypoint = "KyuyoAuthEntrypoint"
 
 # Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS
 # 127.0.0.1:8081) に到達する VPC Service `dtako-scraper-relay`。
@@ -287,8 +288,9 @@ service = "auth-worker-staging"
 entrypoint = "InternalEntrypoint"
 
 [[env.staging.services]]
-binding = "ICHIBAN_KYUYO"
-service = "ichibanboshi-kyuyo"
+binding = "AUTH_KYUYO"
+service = "auth-worker-staging"
+entrypoint = "KyuyoAuthEntrypoint"
 
 [[env.staging.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"
@@ -430,8 +432,9 @@ service = "auth-worker-staging"
 entrypoint = "InternalEntrypoint"
 
 [[env.preview.services]]
-binding = "ICHIBAN_KYUYO"
-service = "ichibanboshi-kyuyo"
+binding = "AUTH_KYUYO"
+service = "auth-worker-staging"
+entrypoint = "KyuyoAuthEntrypoint"
 
 [[env.preview.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"

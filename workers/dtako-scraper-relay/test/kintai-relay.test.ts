@@ -1227,31 +1227,36 @@ describe("checkKyuyoAccess — 給与 allowlist の関門 (Refs #951)", () => {
 });
 
 describe("checkKyuyoAccess — 上流切替 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
-  const URL_ = "https://ichibanboshi-kyuyo/kyuyo/access";
   const { deps: base, calls } = deps({ onprem: { "/api/kyuyo/access": { allowed: true } } });
-  const worker = (fn: (input: string, init?: RequestInit) => Promise<Response>) => ({
-    ...base,
-    kyuyoUpstream: { mode: "worker", binding: { fetch: fn } },
+  type Res = { status: number; body: string; contentType: string | null };
+  const res = (status: number, body: unknown = {}): Res => ({
+    status,
+    body: JSON.stringify(body),
+    contentType: "application/json",
   });
-  const reply = (body: unknown, status: number) => async () => json(body, status);
+  const worker = (fn: (token: string) => Promise<Res>) => ({
+    ...base,
+    kyuyoUpstream: { mode: "worker", binding: { authorize: fn } },
+  });
+  const reply = (r: Res) => async () => r;
+  const unreachable = { status: 503, message: "給与の認可 (auth-worker) に届きません" };
 
-  it("worker: 200 は通る。URL は定数、Bearer だけ付き CF Access ヘッダは付かない", async () => {
-    let seen: { input?: string; init?: RequestInit } = {};
-    const d = worker(async (input, init) => {
-      seen = { input, init };
-      return json({ allowed: true }, 200);
+  it("worker: 200 は通る。Bearer を付けず token だけ渡し、オンプレには聞かない", async () => {
+    let seen: string | undefined;
+    const d = worker(async (token) => {
+      seen = token;
+      return res(200, { allowed: true });
     });
     expect(await checkKyuyoAccess(d, "jwt")).toBeNull();
-    expect(seen.input).toBe(URL_);
-    expect(seen.init?.headers).toEqual({ Authorization: "Bearer jwt" });
-    expect(calls).toEqual([]); // オンプレには聞かない
+    expect(seen).toBe("jwt");
+    expect(calls).toEqual([]);
   });
 
-  it("worker: bearer 無しは Worker に聞かず 503", async () => {
+  it("worker: bearer 無しは auth-worker に聞かず 503", async () => {
     let called = false;
     const d = worker(async () => {
       called = true;
-      return json({}, 200);
+      return res(200);
     });
     expect(await checkKyuyoAccess(d, null)).toEqual({
       status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
@@ -1261,56 +1266,51 @@ describe("checkKyuyoAccess — 上流切替 (Refs ohishi-exp/rust-ichibanboshi#3
   });
 
   it("worker: 401 は onprem と同じ 503 の文", async () => {
-    expect(await checkKyuyoAccess(worker(reply({ error: "unauthorized" }, 401)), "jwt")).toEqual({
+    expect(await checkKyuyoAccess(worker(reply(res(401, { error: "unauthorized" }))), "jwt")).toEqual({
       status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
       message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
     });
   });
 
   it("worker: 403 は日本語の理由 (英語コードを出さない)", async () => {
-    expect(await checkKyuyoAccess(worker(reply({ error: "forbidden" }, 403)), "jwt")).toEqual({
+    expect(await checkKyuyoAccess(worker(reply(res(403, { error: "forbidden" }))), "jwt")).toEqual({
       status: 403,
       message: "給与の閲覧許可リストに無いアカウントです",
     });
   });
 
   it("worker: 503 kyuyo_allowlist_unset は未設定の文", async () => {
-    const d = worker(reply({ error: "kyuyo_allowlist_unset" }, 503));
+    const d = worker(reply(res(503, { error: "kyuyo_allowlist_unset" })));
     expect(await checkKyuyoAccess(d, "jwt")).toEqual({
       status: 503,
       message: "給与の閲覧許可リストが未設定です",
     });
   });
 
-  it("worker: 503 その他 / 非 JSON / 500 は届かない文 (fail-closed)", async () => {
-    const want = { status: 503, message: "給与大臣の Worker に届きません" };
-    expect(await checkKyuyoAccess(worker(reply({ error: "boom" }, 503)), "jwt")).toEqual(want);
-    expect(await checkKyuyoAccess(worker(async () => new Response("x", { status: 500 })), "jwt")).toEqual(want);
-  });
-
-  it("worker: 404 は Worker の文 (オンプレのデプロイ順序の文を出さない)", async () => {
-    const denial = await checkKyuyoAccess(worker(reply({}, 404)), "jwt");
-    expect(denial).toEqual({ status: 503, message: "給与大臣の Worker に /kyuyo/access がありません" });
-    expect(denial!.message).not.toContain("デプロイ");
+  it("worker: 503 その他 / 非 JSON / 404 / 500 は届かない文 (fail-closed)", async () => {
+    expect(await checkKyuyoAccess(worker(reply(res(503, { error: "boom" }))), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(worker(reply({ status: 500, body: "x", contentType: null })), "jwt")).toEqual(
+      unreachable,
+    );
+    expect(await checkKyuyoAccess(worker(reply(res(404))), "jwt")).toEqual(unreachable);
   });
 
   it("worker: binding 未設定 / reject は 503", async () => {
-    const want = { status: 503, message: "給与大臣の Worker に届きません" };
     expect(
       await checkKyuyoAccess({ ...base, kyuyoUpstream: { mode: "worker", binding: undefined } }, "jwt"),
-    ).toEqual(want);
-    const rejecting = worker(() => Promise.reject(new TypeError("fetch failed")));
-    expect(await checkKyuyoAccess(rejecting, "jwt")).toEqual(want);
+    ).toEqual(unreachable);
+    const rejecting = worker(() => Promise.reject(new TypeError("rpc failed")));
+    expect(await checkKyuyoAccess(rejecting, "jwt")).toEqual(unreachable);
   });
 
   it.each([undefined, null, "", "onprem", "shadow", "Worker", "unknown"])(
-    "mode=%j は onprem (Worker を叩かない)",
+    "mode=%j は onprem (auth-worker に聞かない)",
     async (mode) => {
       let called = false;
       const binding = {
-        fetch: async () => {
+        authorize: async () => {
           called = true;
-          return json({}, 403);
+          return res(403);
         },
       };
       const { deps: d, calls: c } = deps({ onprem: { "/api/kyuyo/access": { allowed: true } } });

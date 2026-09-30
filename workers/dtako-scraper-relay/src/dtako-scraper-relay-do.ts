@@ -155,6 +155,7 @@ import {
   relayKintaiWindow,
   type FoldTriggerDecision,
   type KintaiRelayDeps,
+  type KyuyoAuthorizer,
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
@@ -813,8 +814,8 @@ export interface RelayEnv {
   /** auth-worker の RPC entrypoint (`InternalEntrypoint`)。履歴の読み書きはこちら
    * (Refs #950 / ippoan/auth-worker#483)。**binding が無ければ黙らず鳴らす。** */
   AUTH_WORKER_RPC?: AlcTenantDataForwarder;
-  /** 給与大臣 Worker (`ichibanboshi-kyuyo`) への service binding。`NUXT_KYUYO_UPSTREAM=worker` のときだけ使う。 */
-  ICHIBAN_KYUYO?: Fetcher;
+  /** auth-worker の RPC entrypoint (`KyuyoAuthEntrypoint`)。`NUXT_KYUYO_UPSTREAM=worker` のときだけ使う。 */
+  AUTH_KYUYO?: KyuyoAuthorizer;
   /** 給与閲覧の認可確認の上流。`worker` のときだけ Worker、それ以外 (未設定含む) はオンプレ。 */
   NUXT_KYUYO_UPSTREAM?: string;
   /**
@@ -9529,7 +9530,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<Response | null> {
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) return null;
     // `gcp()` には混ぜない (GCP 側は allowlist 未設定で全員 503)。未設定 = オンプレ
-    const kyuyoUpstream = { mode: this.env.NUXT_KYUYO_UPSTREAM, binding: this.env.ICHIBAN_KYUYO };
+    const kyuyoUpstream = { mode: this.env.NUXT_KYUYO_UPSTREAM, binding: this.env.AUTH_KYUYO };
     const denial = await checkKyuyoAccess({ ...deps, kyuyoUpstream }, extractBearerToken(request.headers));
     return denial ? dvrJsonError(denial.status, denial.message) : null;
   }
