@@ -319,8 +319,10 @@ export function minWageBasisLabel(b: { minWageRate: number, minWagePrefecture: s
  * 黙って一致扱いにしない。
  */
 export function rateBasisStatus(b: SalaryRateBasis): { status: RateBasisStatus, message: string } {
-  if (b.hourlyRate === null) return { status: 'unknown', message: '判定できない: 単価マスタに単価が無い' }
-  if (b.minWageRate === null) return { status: 'unknown', message: '判定できない: この月の最低賃金が引けない' }
+  if (b.hourlyRate === null) return { status: 'unknown', message: '判定できない: 単価マスタに単価が無い (上の『直し方』の ② → ③)' }
+  // 県が引けない月も古い保存物 (最低賃金の欄が無い) も minWagePrefecture は null で見分けられないので、
+  // どちらにも正しい「パネルの ① → ③」へ誘導する (① が取り込みか県の設定かはパネルが出し分ける)
+  if (b.minWageRate === null) return { status: 'unknown', message: '判定できない: この月の最低賃金が引けない (上の『直し方』の ① → ③)' }
   if (b.hourlyRate === b.minWageRate) return { status: 'ok', message: '最低賃金と一致' }
   return { status: 'mismatch', message: `最低賃金 ${minWageBasisLabel({ ...b, minWageRate: b.minWageRate })} と違う` }
 }
@@ -377,3 +379,4 @@ export function rateBasisPeriods(rows: readonly LitigationSalaryRow[]): RateBasi
   }
   return out
 }
+

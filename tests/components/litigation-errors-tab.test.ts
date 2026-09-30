@@ -86,6 +86,10 @@ let storeGetFails = false
 let storeGetGate: Promise<void> | null = null
 /** wage-report の 2025-02 を 504 にする (既定 true。false なら材料が全部そろう) */
 let febWageFails = true
+/** `POST /restraint-api/min-wage/import-mhlw` の応答 (null なら 500) */
+/** `POST /restraint-api/min-wage/apply-to-wage-master` の応答 (dryRun ごと)。null なら 500 */
+let rateApply: ((body: Record<string, unknown>) => unknown) | null = null
+let mhlwImport: { changed: boolean, prefectures: number, added: number, updated: number, years?: { from: string, to: string } } | null = null
 /** `GET litigation-cases` が返す案件の updatedAt (保存で変わった状況を作る) */
 let caseUpdatedAt = CASE.updatedAt
 /** 立てておくと、給与大臣の payroll は勤務月 2025-02 (= 拘束の材料が取れていない月) だけ、この Promise が解けるまで返らない (読込中の表を見る) */
@@ -123,6 +127,14 @@ function stubDollarFetch() {
       if (storeGetGate) await storeGetGate
       if (storeGetFails) throw Object.assign(new Error('store down'), { statusCode: 500 })
       return { items: storedItems }
+    }
+    if (url === '/restraint-api/min-wage/apply-to-wage-master') {
+      if (!rateApply) throw Object.assign(new Error('relay down'), { statusCode: 500 })
+      return rateApply(opts.body as Record<string, unknown>)
+    }
+    if (url === '/restraint-api/min-wage/import-mhlw') {
+      if (!mhlwImport) throw Object.assign(new Error('relay down'), { statusCode: 500 })
+      return mhlwImport
     }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, toMonth: caseToMonth, updatedAt: caseUpdatedAt }] }
@@ -246,6 +258,8 @@ function cell(w: VueWrapper, row: string, check: string) {
 
 beforeEach(() => {
   calls = []
+  mhlwImport = null
+  rateApply = null
   febOnpremOpeNos = []
   // alc の運行: 2 月に始めた運行が 1 本 (2 名乗務の相方つき) と、前月に始めて 2 月に読み取った運行
   api.getOperations.mockReset()
@@ -954,10 +968,156 @@ describe('給与比較タブ', () => {
     })
   })
 
+  describe('「直し方」パネル (判定できない月の次の一手、Refs #1133)', () => {
+    const panel = (w: VueWrapper) => w.find('[data-testid="min-wage-fixes"]')
+    const importBtn = (w: VueWrapper) => w.find('[data-testid="min-wage-fix-import"]')
+    const retakeBtn = (w: VueWrapper) => w.find('[data-testid="min-wage-fix-retake-button"]')
+    const FULL = { hourlyRate: 1000, hourlyRateEffectiveFrom: '2024-10-05', hourlyRatePrefecture: '架空県', minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' } }
+    const NO_MINWAGE = { ...FULL, minWage: { rate: null, prefecture: '架空県', mapped: false, rateEffectiveFrom: null } }
+    const NO_PREF = { ...FULL, minWage: { rate: null, prefecture: null, mapped: false, rateEffectiveFrom: null } }
+    const NO_RATE = { ...FULL, hourlyRate: null }
+
+    beforeEach(() => {
+      febWageFails = false
+    })
+
+    it('★ 判定できない月が 0 件ならパネルを出さない', async () => {
+      wageExtra = { '2025-01': FULL, '2025-02': FULL }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('比較済み')
+      expect(panel(w).exists()).toBe(false)
+      expect(retakeBtn(w).exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('★ 最低賃金が引けない月 (県は引けている): 件数・月範囲と取り込みボタン。押すと import-mhlw に JSON {source:"history"} を POST し、件数を出す', async () => {
+      wageExtra = { '2025-01': NO_MINWAGE, '2025-02': NO_MINWAGE }
+      mhlwImport = { changed: true, prefectures: 1234, added: 10, updated: 2, years: { from: '2002-10', to: '2025-10' } }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-testid="min-wage-fix-minwage"]').text()).toContain('最低賃金が引けない月 2 件 (2025-01〜2025-02)')
+      expect(w.find('[data-testid="min-wage-fix-prefecture"]').exists()).toBe(false)
+      calls = []
+      await importBtn(w).trigger('click')
+      await settle()
+      const posts = calls.filter(c => c.url.startsWith('/restraint-api/min-wage/import-mhlw'))
+      expect(posts).toHaveLength(1)
+      expect(posts[0]!.method).toBe('POST')
+      expect(posts[0]!.body).toEqual({ source: 'history' })
+      expect(w.find('[data-testid="min-wage-fix-import-message"]').text())
+        .toBe('厚労省から 1234 件を取り込みました (2002-10〜2025-10) (新規 10 / 更新 2) — 続けて ③ を押してください')
+      w.unmount()
+    })
+
+    it('★ 取り込みが改定なしなら「改定なし」、失敗なら理由を出す (黙らない)', async () => {
+      wageExtra = { '2025-01': NO_MINWAGE, '2025-02': FULL }
+      mhlwImport = { changed: false, prefectures: 50, added: 0, updated: 0, years: { from: '2002-10', to: '2025-10' } }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-testid="min-wage-fix-minwage"]').text()).toContain('1 件 (2025-01)')
+      await importBtn(w).trigger('click')
+      await settle()
+      expect(w.find('[data-testid="min-wage-fix-import-message"]').text()).toBe('厚労省から 50 件を確認しました (2002-10〜2025-10) (改定なし) — 続けて ③ を押してください')
+      mhlwImport = null
+      await importBtn(w).trigger('click')
+      await settle()
+      expect(w.find('[data-testid="min-wage-fix-import-message"]').text()).toContain('最低賃金を取り込めませんでした')
+      w.unmount()
+    })
+
+    it('★ 県が引けない月 (prefecture null): 取り込みボタンは出さず、県を設定する手順とリンクを出す。mapped:false でも県が非 null ならこちらに入れない', async () => {
+      wageExtra = { '2025-01': NO_PREF, '2025-02': NO_MINWAGE }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      const pref = w.find('[data-testid="min-wage-fix-prefecture"]')
+      expect(pref.text()).toContain('所属から県が引けない月 1 件 (2025-01)')
+      expect(pref.text()).toContain('拘束×賃金 → 最低賃金チェック → ▸ 最低賃金 で拠点の県を設定')
+      expect(pref.find('a').attributes('href')).toBe('/restraint-wage')
+      // 県が引けている 2025-02 は取り込み対象 (1 件)
+      expect(w.find('[data-testid="min-wage-fix-minwage"]').text()).toContain('1 件 (2025-02)')
+      w.unmount()
+    })
+
+    it('★ 県が引けない月だけなら取り込みボタンは出ない', async () => {
+      wageExtra = { '2025-01': NO_PREF, '2025-02': NO_PREF }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(importBtn(w).exists()).toBe(false)
+      expect(w.find('[data-testid="min-wage-fix-prefecture"]').exists()).toBe(true)
+      w.unmount()
+    })
+
+    it('★ 単価マスタに単価が無い月: 乗務員ごとに「最低賃金で入れる」ボタン。まず dryRun で入る行を見せ、「この内容で登録」で確定 (案件の期間・overwrite なし)', async () => {
+      wageExtra = { '2025-01': NO_RATE, '2025-02': FULL }
+      const item = { driverCd: '1078', branch: '甲営業所', prefecture: '架空県', rate: 1000, rateEffectiveFrom: '2024-10-05', status: 'add' }
+      rateApply = body => ({ added: 1, kept: 0, unresolved: 0, saved: !body.dryRun, items: [item] })
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      const rate = w.find('[data-testid="min-wage-fix-rate"]')
+      expect(rate.text()).toContain('単価マスタに単価が無い月 1 件 (2025-01)')
+      calls = []
+      await w.find('[data-testid="min-wage-rate-master-preview"]').trigger('click')
+      await settle()
+      expect(w.find('[data-testid="min-wage-rate-master-preview"]').text()).toBe('甲野太郎 (1078) の単価を最低賃金で入れる (2025-01〜2025-02)')
+      expect(w.find('[data-testid="min-wage-rate-master-lines"]').text()).toContain('1078: 架空県 1,000円/h (2024-10-05 発効)')
+      let applies = calls.filter(c => c.url.startsWith('/restraint-api/min-wage/apply-to-wage-master'))
+      expect(applies.map(c => [c.method, c.body])).toEqual([['POST', { asOf: '2025-01-01', until: '2025-02-28', driverCds: ['1078'], dryRun: true }]])
+      await w.find('[data-testid="min-wage-rate-master-confirm"]').trigger('click')
+      await settle()
+      applies = calls.filter(c => c.url.startsWith('/restraint-api/min-wage/apply-to-wage-master'))
+      expect(applies[1]!.body).toEqual({ asOf: '2025-01-01', until: '2025-02-28', driverCds: ['1078'] })
+      expect(w.find('[data-testid="min-wage-rate-master-message"]').text()).toBe('単価マスタに 1 行を入れました — 続けて材料を取り直してください')
+      // 単価マスタ全体の PUT はしない
+      expect(calls.filter(c => c.url.startsWith('/restraint-api/wage-master'))).toHaveLength(0)
+      w.unmount()
+    })
+
+    it('★ 単価: 既に単価がある / 県が引けない人は理由を出し、確定は押せない。relay が落ちたら理由を出す', async () => {
+      wageExtra = { '2025-01': NO_RATE, '2025-02': NO_RATE }
+      rateApply = () => ({ added: 0, kept: 1, unresolved: 0, saved: false, items: [{ driverCd: '1078', branch: '甲', prefecture: '架空県', rate: 1000, rateEffectiveFrom: '2024-10-05', status: 'keep' }] })
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      await w.find('[data-testid="min-wage-rate-master-preview"]').trigger('click')
+      await settle()
+      expect(w.find('[data-testid="min-wage-rate-master-lines"]').text()).toContain('既に単価がある — 触りません')
+      expect(w.find('[data-testid="min-wage-rate-master-confirm"]').attributes('disabled')).toBeDefined()
+      rateApply = null
+      await w.find('[data-testid="min-wage-rate-master-preview"]').trigger('click')
+      await settle()
+      expect(w.find('[data-testid="min-wage-rate-master-message"]').text()).toContain('単価マスタの見込みを出せませんでした')
+      w.unmount()
+    })
+
+    it('★ 取り直しボタンは salaryAttrsWritten に関係なく出て、wage-report を月数ぶん直列に取り直す', async () => {
+      wageExtra = { '2025-01': NO_RATE, '2025-02': FULL }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(retakeBtn(w).text()).toBe('拘束の材料を取り直す (2 か月)')
+      calls = []
+      await retakeBtn(w).trigger('click')
+      await settle()
+      expect(calls.filter(c => c.url.startsWith('/restraint-api/wage-report')).map(c => c.url)).toEqual([
+        '/restraint-api/wage-report?month=2025-01&source=gcp',
+        '/restraint-api/wage-report?month=2025-02&source=gcp',
+      ])
+      w.unmount()
+    })
+
+    it('★ 取り直しボタンは 1 か所だけ (同じボタンを 2 か所に置かない)', async () => {
+      employeeMaster = [{ company: '0200', payrollCd: '747', name: '甲野太郎', driverCd: '1078' }]
+      wageExtra = { '2025-01': NO_MINWAGE, '2025-02': NO_RATE }
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.findAll('[data-testid="min-wage-fix-retake-button"]')).toHaveLength(1)
+      w.unmount()
+    })
+  })
+
   describe('社員マスタに属性 (給与区分) も入れ、拘束の材料を取り直す', () => {
     const registerBtns = (w: VueWrapper) => w.findAll('[data-testid="litigation-salary-register-button"]')
     const attrsBtns = (w: VueWrapper) => w.findAll('[data-testid="litigation-salary-attrs-button"]')
-    const retakeBtn = (w: VueWrapper) => w.find('[data-testid="litigation-salary-materials-retake"]')
+    const retakeBtn = (w: VueWrapper) => w.find('[data-testid="min-wage-fix-retake-button"]')
     const message = (w: VueWrapper) => w.find('[data-testid="litigation-salary-register-message"]').text()
     const employeeCalls = () => calls.filter(c => c.url.startsWith('/restraint-api/employee-master'))
     const kyuyoCalls = () => calls.filter(c => c.url.startsWith('/api/kyuyo/employees'))
@@ -967,6 +1127,9 @@ describe('給与比較タブ', () => {
       // 給与コード 747 (明細) と乗務員CD 1078 の対応が社員マスタに無い
       employeeMaster = []
       febWageFails = false
+      // 単価・最低賃金が全月そろっている (= 「直し方」パネルの対象が無い) 保存物。取り直しボタンは属性を入れた後だけ出る
+      const full = { hourlyRate: 1000, hourlyRateEffectiveFrom: '2024-10-05', hourlyRatePrefecture: '架空県', minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' } }
+      wageExtra = { '2025-01': full, '2025-02': full }
     })
 
     it('★ 登録: 給与大臣の社員一覧を 1 回 (会社と案件の最初の月で) 読み、その 1 人の属性を案件の最初の月の 1 日付けで PUT する。旧ラベルの削除は送らない', async () => {

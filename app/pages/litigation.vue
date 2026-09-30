@@ -101,6 +101,7 @@ import {
   type LitigationSalaryState,
   type RateBasisStatus,
 } from '~/utils/litigation-salary'
+import type { MinWageFixInput } from '~/utils/min-wage-fix'
 import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
 import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, summarizeSyncedMonths, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
 import { buildCdMapEntries, planPayrollDbImport, type EmployeeMasterEntry, type EmployeeMasterGetResponse, type KyuyoEmployeesResponse } from '~/utils/employee-master'
@@ -865,6 +866,10 @@ const salaryRateBasisCounts = computed(() => {
   return { mismatch, unknown }
 })
 const salaryRatePeriods = computed(() => rateBasisPeriods(salaryRows.value))
+// 「判定できない」月の直し方パネル (MinWageFixesPanel) の材料。比較できた行の単価・最低賃金だけ
+const salaryFixRows = computed<MinWageFixInput[]>(() => salaryRows.value.flatMap(r => r.compared
+  ? [{ driverCd: r.driverCd, month: r.month, hourlyRate: r.compared.rateBasis.hourlyRate, minWageRate: r.compared.rateBasis.minWageRate, minWagePrefecture: r.compared.rateBasis.minWagePrefecture }]
+  : []))
 const RATE_BASIS_CLASS: Record<RateBasisStatus, string> = {
   ok: '',
   mismatch: 'font-bold text-red-600 dark:text-red-400',
@@ -1734,6 +1739,22 @@ function fmtDateTime(iso: string): string {
             / <span data-testid="litigation-salary-rate-unknown">単価 判定できない {{ salaryRateBasisCounts.unknown }} 件</span>
             / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
           </div>
+          <MinWageFixesPanel
+            v-if="openCase"
+            :rows="salaryFixRows"
+            :from="caseMonths[0] ?? openCase.fromMonth"
+            :to="caseMonths[caseMonths.length - 1] ?? openCase.toMonth"
+            :headers="authHeaders"
+            :retake-label="`拘束の材料を取り直す (${caseMonths.length} か月)`"
+            :retake-note="`1 か月 15〜64 秒 × ${caseMonths.length} か月。終わるまでこのタブを閉じない`"
+            :retaking="errorsRunning"
+            :retake-disabled="errorsStoreLoading || !!errorsStoreError || importingKey !== null || salaryRegistering"
+            :force-show="salaryAttrsWritten"
+            :driver-label="cd => `${driverLabel(cd)} (${cd})`"
+            @retake="retakeWageReports"
+          >
+            <div v-if="salaryAttrsWritten" data-testid="litigation-salary-fix-attrs">属性を入れました。基本給の計算に反映するには下の「拘束の材料を取り直す」を押してください。</div>
+          </MinWageFixesPanel>
           <div v-if="salaryCounts.noPayroll > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-register">
             <template v-if="salaryRegisterCandidates.length > 0">
               <span class="text-xs text-gray-600 dark:text-gray-400">明細の氏名から乗務員に一意に引き当たりました (社員マスタに未登録):</span>
@@ -1754,7 +1775,7 @@ function fmtDateTime(iso: string): string {
             </span>
           </div>
           <div v-if="salaryRegisterMessage" class="text-xs text-gray-700 dark:text-gray-300" data-testid="litigation-salary-register-message">{{ salaryRegisterMessage }}</div>
-          <div v-if="salaryAttrsCandidates.length > 0 || salaryAttrsWritten" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-attrs">
+          <div v-if="salaryAttrsCandidates.length > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-attrs">
             <UButton
               v-for="c in salaryAttrsCandidates"
               :key="`${c.company}|${c.payrollCd}`"
@@ -1765,15 +1786,6 @@ function fmtDateTime(iso: string): string {
               :disabled="salaryRegistering || salaryLoading"
               data-testid="litigation-salary-attrs-button"
               @click="saveSalaryEmployee(c, false)"
-            />
-            <UButton
-              v-if="salaryAttrsWritten"
-              icon="i-lucide-refresh-cw"
-              :label="`拘束の材料を取り直す (${caseMonths.length} か月)`"
-              :loading="errorsRunning"
-              :disabled="errorsRunning || errorsStoreLoading || !!errorsStoreError || importingKey !== null || salaryRegistering"
-              data-testid="litigation-salary-materials-retake"
-              @click="retakeWageReports"
             />
           </div>
 

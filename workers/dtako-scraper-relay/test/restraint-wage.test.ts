@@ -1184,3 +1184,140 @@ describe('checkWageInvariants', () => {
     expect(result.hourlyBasis).toBe('restraint')
   })
 })
+
+describe('applyMinWageToWageMaster: driverCds / until (訴訟準備・拘束×賃金の「直し方」、Refs #1133)', () => {
+  // 架空県に改定 3 件 (期間中)。別県は異動先
+  const M: MinWageMaster = {
+    prefectures: {
+      架空県: [
+        { effectiveFrom: '2023-10-01', rate: 900 },
+        { effectiveFrom: '2024-10-05', rate: 950 },
+        { effectiveFrom: '2025-10-04', rate: 1000 },
+      ],
+      別県: [{ effectiveFrom: '2024-09-01', rate: 970 }],
+      既定県: [{ effectiveFrom: '2023-10-01', rate: 880 }],
+    },
+    branchToPrefecture: { 甲営業所: '架空県', 乙営業所: '別県' },
+  }
+  const br = new Map([['9001', '甲営業所'], ['9002', '甲営業所'], ['9003', '丙営業所']])
+
+  it('driverCds だけ (until なし) は指定の人だけ 1 件版で入れる', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, M, br, '2025-01-01', { driverCds: ['9002'] })
+    expect(r.items).toEqual([{ driverCd: '9002', branch: '甲営業所', prefecture: '架空県', rate: 950, rateEffectiveFrom: '2024-10-05', status: 'add' }])
+    expect(r.master.drivers['9001']).toBeUndefined()
+  })
+
+  it('★ 指定したのに所属が無い人は no-branch の item を返す (黙って落とさない)。unresolved に数える', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, M, br, '2025-01-01', { driverCds: ['9999', '9001'] })
+    expect(r.items.map(i => [i.driverCd, i.status])).toEqual([['9001', 'add'], ['9999', 'no-branch']])
+    expect(r.unresolved).toBe(1)
+  })
+
+  it('★ driverCds 指定時は県が対応付いていない所属でも既定の県で引き、prefectureDefaulted を付ける (従来の一括は unmapped のまま)', () => {
+    const md = { ...M, defaultPrefecture: '既定県' }
+    const r = applyMinWageToWageMaster({ drivers: {} }, md, br, '2025-01-01', { driverCds: ['9003'] })
+    expect(r.items[0]).toMatchObject({ status: 'add', prefecture: '既定県', rate: 880, prefectureDefaulted: true })
+    expect(applyMinWageToWageMaster({ drivers: {} }, md, br, '2025-01-01').items.find(i => i.driverCd === '9003')).toMatchObject({ status: 'unmapped' })
+    // 既定の県も無ければ unmapped。既定の県に額が無ければ no-rate (defaulted つき)
+    expect(applyMinWageToWageMaster({ drivers: {} }, M, br, '2025-01-01', { driverCds: ['9003'] }).items[0]).toMatchObject({ status: 'unmapped' })
+    expect(applyMinWageToWageMaster({ drivers: {} }, md, br, '2023-01-01', { driverCds: ['9003'] }).items[0]).toMatchObject({ status: 'no-rate', prefectureDefaulted: true })
+  })
+
+  it('driverCds 指定で単価がある人は keep (既定の県なら defaulted つき)。overwrite なら上書き', () => {
+    const md = { ...M, defaultPrefecture: '既定県' }
+    const wm: WageMaster = { drivers: { 9003: { rates: [{ effectiveFrom: '2020-01-01', hourlyRate: 1500 }] } } }
+    expect(applyMinWageToWageMaster(wm, md, br, '2025-01-01', { driverCds: ['9003'] }).items[0]).toMatchObject({ status: 'keep', prefectureDefaulted: true })
+    expect(applyMinWageToWageMaster(wm, md, br, '2025-01-01', { driverCds: ['9003'], overwrite: true }).items[0]).toMatchObject({ status: 'overwrite', prefectureDefaulted: true })
+  })
+
+  it('★ until: asOf の月に有効な改定から until の月までの改定を全部入れる (発効日・額・県そのまま)', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { driverCds: ['9001'], until: '2025-12-31' })
+    expect(r.master.drivers['9001']!.rates).toEqual([
+      { effectiveFrom: '2023-10-01', hourlyRate: 900, prefecture: '架空県' },
+      { effectiveFrom: '2024-10-05', hourlyRate: 950, prefecture: '架空県' },
+      { effectiveFrom: '2025-10-04', hourlyRate: 1000, prefecture: '架空県' },
+    ])
+    expect(r.added).toBe(3)
+    expect(r.items.every(i => i.status === 'add')).toBe(true)
+  })
+
+  it('★ until: 所属は月ごとに引き直す (異動後の月は異動先の県の改定)', () => {
+    const branchAt = (_cd: string, ym: string) => (ym >= '2025-01' ? '乙営業所' : '甲営業所')
+    const r = applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { driverCds: ['9001'], until: '2025-03-31', branchAt })
+    expect(r.items.map(i => [i.prefecture, i.rateEffectiveFrom, i.branch])).toEqual([
+      ['架空県', '2023-10-01', '甲営業所'],
+      ['架空県', '2024-10-05', '甲営業所'],
+      ['別県', '2024-09-01', '乙営業所'],
+    ])
+    // branchAt がその月の所属を知らなければ asOf の所属のまま
+    const r2 = applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-11-01', { driverCds: ['9001'], until: '2024-12-31', branchAt: () => undefined })
+    expect(r2.items.map(i => i.rateEffectiveFrom)).toEqual(['2024-10-05'])
+  })
+
+  /** 入れた単価マスタを月ごとに引いた額が、wage-report と同じ引き方の最低賃金と全月で一致するか */
+  function monthsMismatched(rates: WageMaster['drivers'][string]['rates'], branchAt: (ym: string) => string, from: string, to: string, md: MinWageMaster = M) {
+    const out: string[] = []
+    for (let y = Number(from.slice(0, 4)), m = Number(from.slice(5, 7)); `${y}-${String(m).padStart(2, '0')}` <= to; m === 12 ? (y++, m = 1) : m++) {
+      const ym = `${y}-${String(m).padStart(2, '0')}`
+      const want = minWageForBranch(md, '', y, m, branchAt(ym))
+      const got = rateEntryForMonth(rates, y, m)
+      if ((got?.hourlyRate ?? null) !== want.rate) out.push(`${ym}: 単価 ${got?.hourlyRate} / 最低賃金 ${want.rate}`)
+    }
+    return out
+  }
+
+  it('★★ until + 異動: 異動先の県の改定が前の県の最新改定より古い発効日でも、異動後の月に前の県の額を引かない (その月の 1 日から入れる)', () => {
+    // 甲 (架空県 2024-10-05 950) から 2025-01 に 乙 (別県 2024-09-01 970) へ。発効日のまま入れると
+    // 2025-01 以降も 2024-10-05 の 950 が引かれる (実機の wrangler dev で見つけた欠陥)
+    const at = (ym: string) => (ym >= '2025-01' ? '乙営業所' : '甲営業所')
+    const r = applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { driverCds: ['9001'], until: '2025-12-31', branchAt: (_c, ym) => at(ym) })
+    expect(r.items.find(i => i.prefecture === '別県')).toMatchObject({ rateEffectiveFrom: '2024-09-01', appliedFrom: '2025-01-01' })
+    expect(r.master.drivers['9001']!.rates).toContainEqual({ effectiveFrom: '2025-01-01', hourlyRate: 970, prefecture: '別県' })
+    expect(monthsMismatched(r.master.drivers['9001']!.rates, at, '2024-01', '2025-12')).toEqual([])
+  })
+
+  it('★★ until + 行って戻る異動・最低賃金が引けない月を挟んでも、全月で最低賃金と一致する', () => {
+    const md: MinWageMaster = { ...M, prefectures: { ...M.prefectures, 別県: [{ effectiveFrom: '2024-12-01', rate: 970 }] } }
+    // 2024-06..08 は別県 (まだ額が無い) → 2024-09 から甲に戻る → 2025-03 から別県
+    const at = (ym: string) => ((ym >= '2024-06' && ym <= '2024-08') || ym >= '2025-03' ? '乙営業所' : '甲営業所')
+    const r = applyMinWageToWageMaster({ drivers: {} }, md, br, '2024-01-01', { driverCds: ['9001'], until: '2025-12-31', branchAt: (_c, ym) => at(ym) })
+    const mism = monthsMismatched(r.master.drivers['9001']!.rates, at, '2024-01', '2025-12', md)
+    // 最低賃金が引けない月 (別県 2024-06..08) は単価が入っていても比較の対象外 (wage-report 側が判定できない)
+    expect(mism.filter(x => !/^2024-0[678]/.test(x))).toEqual([])
+    // 同じ改定に戻っただけ (2024-09 の架空県 900) は行を足さない
+    expect(r.master.drivers['9001']!.rates.filter(e => e.hourlyRate === 900)).toHaveLength(1)
+  })
+
+  it('★ until: 単価が 1 件でもある人は keep 1 件だけ (触らない。県の注記の補完もしない)', () => {
+    const wm: WageMaster = { drivers: { 9001: { rates: [{ effectiveFrom: '2023-10-01', hourlyRate: 900 }] } } }
+    const r = applyMinWageToWageMaster(wm, M, br, '2024-01-01', { driverCds: ['9001'], until: '2025-12-31' })
+    expect(r.items).toHaveLength(1)
+    expect(r.items[0]).toMatchObject({ status: 'keep' })
+    expect(r.kept).toBe(1)
+    expect(r.master.drivers['9001']!.rates).toEqual([{ effectiveFrom: '2023-10-01', hourlyRate: 900 }])
+  })
+
+  it('until: 期間中どの月も県が引けなければ unmapped、県はあるが額が無ければ no-rate 1 件', () => {
+    expect(applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { driverCds: ['9003'], until: '2024-03-31' }).items)
+      .toEqual([{ driverCd: '9003', branch: '丙営業所', prefecture: null, rate: null, rateEffectiveFrom: null, status: 'unmapped' }])
+    expect(applyMinWageToWageMaster({ drivers: {} }, M, br, '2022-01-01', { driverCds: ['9001'], until: '2022-12-31' }).items)
+      .toEqual([{ driverCd: '9001', branch: '甲営業所', prefecture: '架空県', rate: null, rateEffectiveFrom: null, status: 'no-rate' }])
+  })
+
+  it('until: 年をまたぐ。driverCds 無し (従来の対象) でも使え、対応付けの無い所属は unmapped', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, { ...M, defaultPrefecture: '既定県' }, br, '2024-11-01', { until: '2025-11-30' })
+    expect(r.items.filter(i => i.driverCd === '9001').map(i => i.rateEffectiveFrom)).toEqual(['2024-10-05', '2025-10-04'])
+    expect(r.items.find(i => i.driverCd === '9003')).toMatchObject({ status: 'unmapped' })
+  })
+
+  it('until + driverCds: 対応付けの無い所属は既定の県で引き、prefectureDefaulted を付ける', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, { ...M, defaultPrefecture: '既定県' }, br, '2024-01-01', { driverCds: ['9003'], until: '2024-12-31' })
+    expect(r.items).toEqual([{ driverCd: '9003', branch: '丙営業所', prefecture: '既定県', rate: 880, rateEffectiveFrom: '2023-10-01', status: 'add', prefectureDefaulted: true }])
+  })
+
+  it('until の検証: 形式・asOf より前・overwrite との同時指定は WageMasterError', () => {
+    expect(() => applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { until: '2024/12/31' })).toThrow(WageMasterError)
+    expect(() => applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { until: '2023-12-31' })).toThrow(WageMasterError)
+    expect(() => applyMinWageToWageMaster({ drivers: {} }, M, br, '2024-01-01', { until: '2024-12-31', overwrite: true })).toThrow('until と overwrite')
+  })
+})

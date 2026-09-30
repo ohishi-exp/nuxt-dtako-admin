@@ -4996,7 +4996,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
 
-    let body: { asOf?: unknown; sites?: unknown; overwrite?: unknown; dryRun?: unknown };
+    let body: { asOf?: unknown; sites?: unknown; overwrite?: unknown; dryRun?: unknown; driverCds?: unknown; until?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -5014,6 +5014,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const sites = (body.sites as string[] | undefined) ?? null;
     const overwrite = body.overwrite === true;
     const dryRun = body.dryRun === true;
+    // 訴訟準備・拘束×賃金の「直し方」(Refs #1133): 乗務員を指定し、期間中の改定を全部入れる
+    if (
+      body.driverCds !== undefined
+      && (!Array.isArray(body.driverCds) || body.driverCds.length === 0
+        || body.driverCds.some((c) => typeof c !== "string" || c.trim() === ""))
+    ) {
+      return dvrJsonError(400, "driverCds は空でない文字列の配列が必要です");
+    }
+    const driverCds = (body.driverCds as string[] | undefined) ?? null;
+    const until = body.until;
+    if (until !== undefined && (typeof until !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(until) || until < asOf)) {
+      return dvrJsonError(400, "until は asOf 以降の YYYY-MM-DD が必要です");
+    }
+    if (until !== undefined && overwrite) {
+      return dvrJsonError(400, "until と overwrite は同時に指定できません (期間の一括は単価がある乗務員に触らない)");
+    }
 
     const readMaster = async <T>(name: "wage-master" | "min-wage", normalize: (raw: unknown) => T, fallback: T): Promise<T | null> => {
       const obj = await bucket.get(this.wageMasterR2Paths(record.compId, name).latest);
@@ -5033,8 +5049,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const ym = asOf.slice(0, 7);
-    const { branches, names } = await this.branchByDriverCd(record.compId, ym);
-    if (branches.size === 0) {
+    const { branches, names, branchAt } = await this.branchByDriverCd(record.compId, ym);
+    // driverCds 指定時は所属が無い人も no-branch の item で返すので、全体を 400 にしない
+    if (branches.size === 0 && !driverCds) {
       return dvrJsonError(400, "社員マスタに乗務員CDつきの所属が見つかりません (社員マスタタブで取り込んでください)");
     }
 
@@ -5044,6 +5061,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         overwrite,
         sites,
         namesByDriverCd: names,
+        driverCds,
+        until: (until as string | undefined) ?? null,
+        branchAt,
       });
     } catch (err) {
       if (err instanceof WageMasterError) return dvrJsonError(400, err.message);
@@ -5052,6 +5072,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     const summary = {
       asOf,
+      ...(until !== undefined ? { until } : {}),
       dryRun,
       added: result.added,
       overwritten: result.overwritten,
@@ -5090,9 +5111,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     branches: Map<string, string>;
     names: Map<string, string>;
     payKubun: Map<string, number>;
+    /** 同じ社員マスタから別の月の所属を引く (期間の一括設定で月ごとに所属を引き直す用) */
+    branchAt: (driverCd: string, ym: string) => string | undefined;
   }> {
+    const none = () => undefined;
     const db = this.env.DTAKO_DB;
-    if (!db) return { branches: new Map(), names: new Map(), payKubun: new Map() };
+    if (!db) return { branches: new Map(), names: new Map(), payKubun: new Map(), branchAt: none };
     try {
       const [employeeResult, attrResult] = await Promise.all([
         db
@@ -5115,10 +5139,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       for (const e of employees) {
         if (e.driverCd && e.name && branches.has(e.driverCd)) names.set(e.driverCd, e.name);
       }
-      return { branches, names, payKubun: payKubunByDriverCdAt(employees, ym, resolveAttrsAt) };
+      const byMonth = new Map<string, Map<string, string>>([[ym, branches]]);
+      const branchAt = (driverCd: string, at: string) => {
+        let m = byMonth.get(at);
+        if (!m) byMonth.set(at, (m = branchByDriverCdAt(employees, at, resolveAttrsAt)));
+        return m.get(driverCd);
+      };
+      return { branches, names, payKubun: payKubunByDriverCdAt(employees, ym, resolveAttrsAt), branchAt };
     } catch (err) {
       console.error(JSON.stringify({ branch_by_driver_cd: "error", error: describeUnknownError(err) }));
-      return { branches: new Map(), names: new Map(), payKubun: new Map() };
+      return { branches: new Map(), names: new Map(), payKubun: new Map(), branchAt: none };
     }
   }
 

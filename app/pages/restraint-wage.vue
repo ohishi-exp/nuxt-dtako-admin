@@ -178,6 +178,7 @@ import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_RANGE, KYUYO
 import type { MonthKosokuMark, WageRangeResponse } from '~/utils/wage-range-view'
 import { pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
 import { getViewerComps } from '~/utils/api'
+import { describeMinWageImport, importMinWageFromMhlw as importMinWageFromMhlwApi, type MinWageFixInput, type MinWageImportResponse } from '~/utils/min-wage-fix'
 import {
   defaultRange,
   emptyRowsNote,
@@ -2302,7 +2303,39 @@ function sumNullable(a: number | null, b: number | null): number | null {
   return (a ?? 0) + (b ?? 0)
 }
 
-const missingRateRows = computed(() => (displayReport.value?.rows ?? []).filter(r => r.wage.hourlyRate === null))
+/** 「直し方」パネル (MinWageFixesPanel) の材料 — 単価未設定・最低賃金が引けない行 (Refs #1133)。 */
+const minWageFixRows = computed<MinWageFixInput[]>(() => (displayReport.value?.rows ?? []).map(r => ({
+  driverCd: r.summary.driverCd,
+  month: month.value,
+  hourlyRate: r.wage.hourlyRate,
+  minWageRate: r.wage.minWage?.rate ?? null,
+  minWagePrefecture: r.wage.minWage?.prefecture ?? null,
+})))
+function minWageFixDriverLabel(cd: string): string {
+  const name = displayReport.value?.rows.find(r => r.summary.driverCd === cd)?.summary.driverName
+  return name ? `${name} (${cd})` : cd
+}
+const minWageFixReloading = ref(false)
+/** パネルで最低賃金を取り込んだ後: マスタの表示を捨てる (次に ▸ 最低賃金 を開いたとき読み直す) */
+function onMinWageFixImported() {
+  reportCache.clear()
+  if (minWageCardOpen.value) loadMinWageMaster()
+  else minWageMasterLoaded.value = false
+}
+/** パネルの ③: 単価マスタと、**いま表示している** 集計 (displayReport の元) だけを読み直す。
+ * GCP を表示中に「現行」まで取りに行かない (64 秒かかり同じ DO を奪い合う — loadGcpWageReport の watch の注記) */
+async function reloadAfterMinWageFix() {
+  minWageFixReloading.value = true
+  try {
+    reportCache.clear()
+    await loadMaster()
+    if (readsMinWageReport.value && minWageRestraintSource.value === 'gcp') await loadGcpWageReport()
+    else await loadWageReport()
+  }
+  finally {
+    minWageFixReloading.value = false
+  }
+}
 
 /** 月次集計テーブルを CSV (UTF-8 BOM) で保存する (全列)。
  *
@@ -4926,26 +4959,10 @@ async function importMinWageFromMhlw(source?: 'history') {
   pageError.value = ''
   minWageMessage.value = ''
   try {
-    const res = await $fetch<{
-      changed: boolean
-      prefectures: number
-      added: number
-      updated: number
-      unchanged: number
-      years?: { from: string, to: string }
-      data: MinWageMaster
-    }>('/restraint-api/min-wage/import-mhlw', {
-      method: 'POST',
-      headers: authHeaders(),
-      ...(source ? { body: { source } } : {}),
-    })
+    const res = await importMinWageFromMhlwApi<MinWageImportResponse & { data: MinWageMaster }>(authHeaders(), source)
     minWageMaster.value = res.data
     minWagePrefectureCount.value = Object.keys(res.data.prefectures).length
-    // 全国一覧は 47 件 (県数)、履歴は (県, 発効日) の件数が返る
-    const range = res.years ? ` (${res.years.from}〜${res.years.to})` : ''
-    minWageMessage.value = res.changed
-      ? `厚労省から ${res.prefectures} ${res.years ? '件' : '都道府県'}を取り込みました${range} (新規 ${res.added} / 更新 ${res.updated})`
-      : `厚労省から ${res.prefectures} ${res.years ? '件' : '都道府県'}を確認しました${range} (改定なし)`
+    minWageMessage.value = describeMinWageImport(res)
     reportCache.clear()
     await loadBranchGroups()
   }
@@ -6084,9 +6101,20 @@ watch([compMap, kyuyoSyncedKeys], () => {
               :description="kosokuNotice.description"
             />
 
-            <p v-if="missingRateRows.length" class="text-xs text-amber-600 dark:text-amber-400 mb-1">
-              ⚠ 単価未設定: {{ missingRateRows.map(r => `${r.summary.driverCd} ${r.summary.driverName}`).join(', ') }} (単価マスタタブで登録してください)
-            </p>
+            <!-- 単価未設定・最低賃金が引けない行の直し方 (訴訟準備・給与比較と共通、Refs #1133) -->
+            <MinWageFixesPanel
+              class="mb-2"
+              :rows="minWageFixRows"
+              :from="month"
+              :to="month"
+              :headers="authHeaders"
+              :retake-label="`${fmtYm(month)} の集計を読み直す`"
+              :retaking="minWageFixReloading"
+              :show-links="false"
+              :driver-label="minWageFixDriverLabel"
+              @imported="onMinWageFixImported"
+              @retake="reloadAfterMinWageFix"
+            />
 
             <p v-if="!displayReport?.rows.length && !displayLoading && !gcpReportError" class="text-sm text-gray-500">
               {{ emptyReportNotice }}

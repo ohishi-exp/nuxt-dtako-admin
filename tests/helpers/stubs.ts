@@ -57,6 +57,7 @@ export const NUXT_UI_PAGE_STUBS = {
   },
   UBadge: { name: 'UBadge', props: ['color'], template: '<span><slot /></span>' },
   UCard: { name: 'UCard', template: '<div><slot /></div>' },
+  NuxtLink: { name: 'NuxtLink', props: ['to'], template: '<a :href="to"><slot /></a>' },
   USelect: {
     name: 'USelect',
     props: ['modelValue', 'items'],

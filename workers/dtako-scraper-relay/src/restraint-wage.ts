@@ -527,8 +527,16 @@ export interface MinWageApplyItem {
    * - `add` 新規に単価を入れる / `overwrite` 既存を上書きする
    * - `keep` 既に単価があるので触らない (既定)
    * - `unmapped` 拠点に都道府県が未設定 / `no-rate` その県にその日時点の額が無い
+   * - `no-branch` `driverCds` で指定したのに社員マスタに所属が無い (指定した人を黙って落とさない)
    */
-  status: "add" | "overwrite" | "keep" | "unmapped" | "no-rate";
+  status: "add" | "overwrite" | "keep" | "unmapped" | "no-rate" | "no-branch";
+  /** until 指定時だけ: 単価マスタに書く適用開始日が発効日と違う (所属の異動で、前の月に効いていた
+   * 改定より古い発効日の県へ移った月)。その月の 1 日から入れる — 発効日のままだと単価マスタの時系列が
+   * 逆転し、異動後の月に前の県の額が引かれる */
+  appliedFrom?: string;
+  /** `driverCds` 指定時だけ: 所属が県に対応付いておらず、最低賃金マスタの既定の県で引いた
+   * (wage-report の `minWageForBranch` と同じ引き方。`mapped: false`) */
+  prefectureDefaulted?: true;
 }
 
 export interface MinWageApplyResult {
@@ -563,11 +571,28 @@ export function applyMinWageToWageMaster(
     sites?: readonly string[] | null;
     /** 乗務員CD → 氏名 (社員マスタ由来)。単価マスタの氏名表示に使う。 */
     namesByDriverCd?: ReadonlyMap<string, string>;
+    /** この乗務員だけを対象にする (訴訟準備の「直し方」、Refs #1133)。所属が無い人も
+     * `no-branch` の item で返す。県は wage-report と同じく既定の県でも引く */
+    driverCds?: readonly string[] | null;
+    /** 期間の終わり (YYYY-MM-DD)。asOf の月から until の月まで、**各月の 1 日に有効な改定を全部**
+     * 入れる (所属は月ごとに `branchAt` で引き直す — 異動後の月に前の県の額を入れない)。
+     * 単価が 1 件でもある乗務員は常に `keep` (overwrite とは併用しない) */
+    until?: string | null;
+    /** 乗務員CD と `YYYY-MM` → その月の所属。until 指定時に使う。無ければ asOf の所属のまま */
+    branchAt?: (driverCd: string, ym: string) => string | undefined;
   } = {},
 ): MinWageApplyResult {
   if (!DATE_RE.test(asOf)) {
     throw new WageMasterError("参照時点は YYYY-MM-DD が必要です");
   }
+  const until = opts.until ?? null;
+  if (until !== null) {
+    if (!DATE_RE.test(until) || until < asOf) {
+      throw new WageMasterError("until は asOf 以降の YYYY-MM-DD が必要です");
+    }
+    if (opts.overwrite) throw new WageMasterError("until と overwrite は同時に指定できません");
+  }
+  const picked = opts.driverCds ? new Set(opts.driverCds) : null;
   const year = Number(asOf.slice(0, 4));
   const month = Number(asOf.slice(5, 7));
   const sites = opts.sites && opts.sites.length > 0 ? opts.sites : null;
@@ -578,7 +603,15 @@ export function applyMinWageToWageMaster(
   }
 
   const items: MinWageApplyItem[] = [];
-  for (const [driverCd, branch] of [...branchByDriverCd].sort((a, b) => compareText(a[0], b[0]))) {
+  // driverCds 指定時は指定した人を全員回す (所属が無い人も no-branch で返す)
+  const targets: [string, string | undefined][] = picked
+    ? [...picked].map((cd) => [cd, branchByDriverCd.get(cd)])
+    : [...branchByDriverCd];
+  for (const [driverCd, branch] of targets.sort((a, b) => compareText(a[0], b[0]))) {
+    if (branch === undefined) {
+      items.push({ driverCd, branch: "", prefecture: null, rate: null, rateEffectiveFrom: null, status: "no-branch" });
+      continue;
+    }
     if (sites && !sites.some((s) => isBranchUnder(s, branch))) {
       continue;
     }
@@ -589,15 +622,22 @@ export function applyMinWageToWageMaster(
       drivers[driverCd] = { ...(drivers[driverCd] ?? { rates: [] }), name };
     }
 
+    if (until !== null) {
+      items.push(...applyMinWageRange(drivers, minWageMaster, driverCd, branch, asOf, until, picked !== null, opts.branchAt));
+      continue;
+    }
+
     // 最低賃金は就業地の県で決まるので所属だけで引く (theearth 事業所名は使わない)
     const lookup = minWageForBranch(minWageMaster, "", year, month, branch);
-    const prefecture = lookup.mapped ? lookup.prefecture : null;
+    // driverCds 指定時は wage-report と同じく既定の県でも引く (従来の一括設定は対応付けを要る)
+    const prefecture = lookup.mapped || picked ? lookup.prefecture : null;
+    const defaulted = picked && !lookup.mapped ? { prefectureDefaulted: true as const } : {};
     if (prefecture === null) {
       items.push({ driverCd, branch, prefecture: null, rate: null, rateEffectiveFrom: null, status: "unmapped" });
       continue;
     }
     if (lookup.rate === null) {
-      items.push({ driverCd, branch, prefecture, rate: null, rateEffectiveFrom: null, status: "no-rate" });
+      items.push({ driverCd, branch, prefecture, rate: null, rateEffectiveFrom: null, status: "no-rate", ...defaulted });
       continue;
     }
     // 適用開始日はその県の最低賃金の発効日 (厚労省が定めた日をそのまま使う)
@@ -614,7 +654,7 @@ export function applyMinWageToWageMaster(
       if (at >= 0 && entries[at]!.hourlyRate === lookup.rate && !entries[at]!.prefecture) {
         entries[at] = { ...entries[at]!, prefecture };
       }
-      items.push({ driverCd, branch, prefecture, rate: lookup.rate, rateEffectiveFrom: appliedFrom, status: "keep" });
+      items.push({ driverCd, branch, prefecture, rate: lookup.rate, rateEffectiveFrom: appliedFrom, status: "keep", ...defaulted });
       continue;
     }
     // どの県の最低賃金を当てたかを履歴に残す (後から見て根拠が分かるように)
@@ -630,6 +670,7 @@ export function applyMinWageToWageMaster(
       rate: lookup.rate,
       rateEffectiveFrom: appliedFrom,
       status: hasAny ? "overwrite" : "add",
+      ...defaulted,
     });
   }
 
@@ -639,8 +680,85 @@ export function applyMinWageToWageMaster(
     added: items.filter((i) => i.status === "add").length,
     overwritten: items.filter((i) => i.status === "overwrite").length,
     kept: items.filter((i) => i.status === "keep").length,
-    unresolved: items.filter((i) => i.status === "unmapped" || i.status === "no-rate").length,
+    unresolved: items.filter((i) => i.status === "unmapped" || i.status === "no-rate" || i.status === "no-branch").length,
   };
+}
+
+/**
+ * `applyMinWageToWageMaster` の until 版 (1 乗務員ぶん)。asOf の月から until の月まで、各月の 1 日に
+ * 有効な改定 (wage-report の `minWageForBranch` と同じ引き方) を入れる。所属は月ごとに `branchAt` で
+ * 引き直す。**入れた単価マスタを月ごとに引くと、どの月も wage-report の最低賃金と同じ改定になる**
+ * ように、前の月から変わった月だけ行を足す: 前の月の 1 日にはまだ効いていなかった改定は発効日のまま、
+ * 効いていた (= 異動で別の県へ移った) ならその月の 1 日から (`appliedFrom`)。
+ * 単価が既にある乗務員は触らない (keep 1 件)。`drivers` は呼び出し側の複製で、ここで直接書き換える。
+ */
+function applyMinWageRange(
+  drivers: Record<string, WageMasterDriver>,
+  minWageMaster: MinWageMaster,
+  driverCd: string,
+  branch: string,
+  asOf: string,
+  until: string,
+  allowDefault: boolean,
+  branchAt: ((driverCd: string, ym: string) => string | undefined) | undefined,
+): MinWageApplyItem[] {
+  const hasAny = (drivers[driverCd]?.rates.length ?? 0) > 0;
+  const found: MinWageApplyItem[] = [];
+  let lastPrefecture: string | null = null;
+  let anyPrefecture = false;
+  /** 前の月に当てた改定 (県|発効日) と、前の月の 1 日 */
+  let prevKey: string | null = null;
+  let prevAnchor: string | null = null;
+  for (let y = Number(asOf.slice(0, 4)), m = Number(asOf.slice(5, 7)); ; ) {
+    const ym = `${y}-${String(m).padStart(2, "0")}`;
+    if (ym > until.slice(0, 7)) break;
+    const monthBranch = branchAt?.(driverCd, ym) ?? branch;
+    const lookup = minWageForBranch(minWageMaster, "", y, m, monthBranch);
+    const prefecture = lookup.mapped || allowDefault ? lookup.prefecture : null;
+    let key: string | null = null;
+    if (prefecture !== null) {
+      anyPrefecture = true;
+      lastPrefecture = prefecture;
+      if (lookup.rate !== null) {
+        const effectiveFrom = lookup.rateEffectiveFrom!;
+        key = `${prefecture}|${effectiveFrom}`;
+        if (key !== prevKey) {
+          // 前の月の 1 日に既に効いていた改定 (= 異動先の県の古い改定) は、その月の 1 日から入れる
+          const appliedFrom = prevAnchor !== null && effectiveFrom <= prevAnchor ? `${ym}-01` : null;
+          found.push({
+            driverCd,
+            branch: monthBranch,
+            prefecture,
+            rate: lookup.rate,
+            rateEffectiveFrom: effectiveFrom,
+            status: hasAny ? "keep" : "add",
+            ...(appliedFrom ? { appliedFrom } : {}),
+            ...(lookup.mapped ? {} : { prefectureDefaulted: true as const }),
+          });
+        }
+      }
+    }
+    // 最低賃金が引けない月は前の改定を覚えたまま (単価マスタはその間も前の行が効くので、
+    // 同じ改定に戻っただけなら行を足さない)
+    if (key !== null) prevKey = key;
+    prevAnchor = `${ym}-01`;
+    if (++m > 12) {
+      m = 1;
+      y++;
+    }
+  }
+  if (!anyPrefecture) {
+    return [{ driverCd, branch, prefecture: null, rate: null, rateEffectiveFrom: null, status: "unmapped" }];
+  }
+  if (found.length === 0) {
+    return [{ driverCd, branch, prefecture: lastPrefecture, rate: null, rateEffectiveFrom: null, status: "no-rate" }];
+  }
+  if (hasAny) return [found[0]!];
+  const entries = [...(drivers[driverCd]?.rates ?? [])];
+  for (const f of found) entries.push({ effectiveFrom: f.appliedFrom ?? f.rateEffectiveFrom!, hourlyRate: f.rate!, prefecture: f.prefecture! });
+  entries.sort((a, b) => compareText(a.effectiveFrom, b.effectiveFrom));
+  drivers[driverCd] = { ...(drivers[driverCd] ?? {}), rates: entries };
+  return found;
 }
 
 // ---------------------------------------------------------------------------
