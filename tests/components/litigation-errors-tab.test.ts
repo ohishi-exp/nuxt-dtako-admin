@@ -87,6 +87,10 @@ let febWageFails = true
 let caseUpdatedAt = CASE.updatedAt
 /** 立てておくと、給与大臣の payroll は勤務月 2025-02 (= 拘束の材料が取れていない月) だけ、この Promise が解けるまで返らない (読込中の表を見る) */
 let payrollGate: Promise<void> | null = null
+/** `GET /restraint-api/employee-master` が返す社員マスタ (PUT が成功すると足される) */
+let employeeMaster: { company: string, payrollCd: string, name: string, driverCd: string | null }[] = []
+/** 社員マスタの PUT を 500 にする */
+let employeePutFails = false
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -127,7 +131,14 @@ function stubDollarFetch() {
     if (url === '/restraint-api/comp-map') {
       return { comps: [{ compId: '27324455', compLabel: '大石運輸倉庫', payrollCompanies: [{ payrollCompany: '0200', legacyLabel: null, payrollCompanyName: null }] }] }
     }
-    if (url === '/restraint-api/employee-master') return { employees: [{ company: '0200', payrollCd: '747', name: '甲野 太郎', driverCd: '1078' }] }
+    if (url === '/restraint-api/employee-master') {
+      if (opts.method === 'PUT') {
+        if (employeePutFails) throw Object.assign(new Error('d1 down'), { statusCode: 500 })
+        employeeMaster = [...employeeMaster, ...(opts.body as { employees: typeof employeeMaster }).employees]
+        return { ok: true }
+      }
+      return { employees: employeeMaster }
+    }
     if (url === '/restraint-api/salary-item-config') return { exists: true, data: { items: { 基本給: 'base', 残業手当: 'overtime' } } }
     if (url === '/api/kyuyo/payroll') {
       if (payrollForbidden) throw Object.assign(new Error('forbidden'), { statusCode: 403 })
@@ -215,6 +226,8 @@ beforeEach(() => {
   storeGetGate = null
   febWageFails = true
   payrollGate = null
+  employeeMaster = [{ company: '0200', payrollCd: '747', name: '甲野 太郎', driverCd: '1078' }]
+  employeePutFails = false
   caseUpdatedAt = CASE.updatedAt
   saved.length = 0
   localStorage.clear()
@@ -727,5 +740,83 @@ describe('給与比較タブ', () => {
     await openSalaryTab(w)
     expect(materialsBtn(w).exists()).toBe(false)
     w.unmount()
+  })
+
+  describe('「明細なし」の乗務員をその場で社員マスタに登録する', () => {
+    const registerBtns = (w: VueWrapper) => w.findAll('[data-testid="litigation-salary-register-button"]')
+    const hint = (w: VueWrapper) => w.find('[data-testid="litigation-salary-register-hint"]')
+    const message = (w: VueWrapper) => w.find('[data-testid="litigation-salary-register-message"]').text()
+    const employeeCalls = () => calls.filter(c => c.url.startsWith('/restraint-api/employee-master'))
+
+    beforeEach(() => {
+      // 給与コード 747 (明細) と乗務員CD 1078 の対応が社員マスタに無い
+      employeeMaster = []
+      febWageFails = false
+    })
+
+    it('★ 氏名が一意に一致すればボタンを出し、押すとその 1 人だけ (金額無し) PUT → 社員マスタを読み直して比較済みになる。明細は読み直さない', async () => {
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('明細なし')
+      expect(registerBtns(w).map(b => b.text())).toEqual(['社員マスタに登録: 747 甲野太郎 (会社 0200) → 乗務員 1078'])
+      expect(hint(w).exists()).toBe(false)
+      const payrollBefore = payrollCalls().length
+      calls = calls.filter(c => !c.url.startsWith('/restraint-api/employee-master'))
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      const puts = employeeCalls().filter(c => c.method === 'PUT')
+      expect(puts).toHaveLength(1)
+      expect(puts[0]!.body).toEqual({
+        employees: [{ company: '0200', payrollCd: '747', name: '甲野太郎', driverCd: '1078', hireDate: null, retireDate: null }],
+        attrs: [],
+        deleteAttrs: [],
+        deleteEmployees: [],
+      })
+      expect(employeeCalls().filter(c => c.method === 'GET')).toHaveLength(1)
+      expect(payrollCalls()).toHaveLength(payrollBefore)
+      expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('比較済み')
+      expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('比較済み')
+      expect(message(w)).toBe('社員マスタに登録しました: 747 甲野太郎 (会社 0200) → 乗務員 1078')
+      // 「明細なし」が無くなればボタンも消える
+      expect(w.find('[data-testid="litigation-salary-register"]').exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('★ 乗務員一覧に同じ氏名が 2 人いれば (案件の外でも) ボタンを出さず、社員マスタタブへの案内文を出す', async () => {
+      api.getDrivers.mockResolvedValue([
+        { id: 'd1', driver_cd: '1078', driver_name: '甲野太郎' },
+        { id: 'd2', driver_cd: '2078', driver_name: '甲野 太郎' },
+      ])
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('明細なし')
+      expect(registerBtns(w)).toHaveLength(0)
+      expect(hint(w).text()).toContain('拘束×賃金の社員マスタタブ')
+      w.unmount()
+    })
+
+    it('★ 社員マスタに (会社, 給与コード) が既に在れば (乗務員CD 未設定でも) 上書きしないようボタンを出さない', async () => {
+      employeeMaster = [{ company: '0200', payrollCd: '747', name: '甲野 太郎', driverCd: null }]
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('明細なし')
+      expect(registerBtns(w)).toHaveLength(0)
+      expect(hint(w).exists()).toBe(true)
+      w.unmount()
+    })
+
+    it('★ PUT に失敗したらその文を出し、社員マスタを読み直さない (行は明細なしのまま)', async () => {
+      employeePutFails = true
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      calls = calls.filter(c => !c.url.startsWith('/restraint-api/employee-master'))
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      expect(message(w)).toContain('社員マスタに登録できませんでした (747 甲野太郎 (会社 0200) → 乗務員 1078)')
+      expect(employeeCalls().map(c => c.method)).toEqual(['PUT'])
+      expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('明細なし')
+      expect(registerBtns(w)[0]!.attributes('disabled')).toBeUndefined()
+      w.unmount()
+    })
   })
 })

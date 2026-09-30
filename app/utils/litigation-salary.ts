@@ -15,8 +15,9 @@
  */
 import { nextYm } from './restraint-wage-view'
 import type { WageReportResponse, WageReportRow } from './restraint-wage-view'
-import { compareSalaryMonth } from './salary-compare'
+import { compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig } from './salary-compare'
+import { splitCdMapKey } from './employee-master'
 import type { LitigationFetched } from './litigation-errors'
 import { litigationDriverMonthKey } from './litigation-errors'
 
@@ -128,4 +129,44 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
  * `/api/kyuyo/payroll` の `month` は**勤務月**で、返る明細の月ラベルは支給月。 */
 export function litigationPayrollMonths(months: readonly string[]): { workMonth: string, payMonth: string }[] {
   return months.map(m => ({ workMonth: m, payMonth: nextYm(m) }))
+}
+
+/** 給与比較タブから社員マスタへ 1 人ずつ登録する候補 (給与大臣の社員 → 乗務員CD)。 */
+export interface LitigationRegisterCandidate {
+  company: string
+  payrollCd: string
+  name: string
+  driverCd: string
+}
+
+export interface LitigationRegisterInput {
+  /** 読み込み済みの全支給月の明細 (連結) */
+  payrollRows: readonly SalaryCsvRow[]
+  /** **全乗務員** (案件の乗務員だけにしない — 同姓同名の別人が居れば一意でないとして提案しないため) */
+  drivers: readonly { summary: { driverCd: string, driverName: string } }[]
+  cdMap: SalaryCdMap
+  /** 社員マスタに既に在る (会社, 給与コード) の全件 */
+  registered: readonly { company: string, payrollCd: string }[]
+  /** 案件の乗務員CD */
+  caseDriverCds: readonly string[]
+}
+
+const registeredKey = (company: string, payrollCd: string) =>
+  `${company.normalize('NFKC').trim()}|${String(Number(payrollCd))}`
+
+/**
+ * 拘束×賃金の「氏名一致で自動設定」(`suggestCdMapEntries`) と同じ一意判定で、案件の乗務員に
+ * 引き当たる明細の社員を挙げる。次の 3 つは捨てる:
+ * - 提案先が案件の乗務員でない
+ * - 社員マスタに (会社, 給与コード) が既に在る — PUT は氏名と乗務員CD を上書きするので、既存の
+ *   突合を黙って付け替えない (表記揺れで cdMap に引っかからない既存行もここで落ちる)
+ * - 同じ乗務員に 2 件以上の給与コードが提案された (明細側の同姓同名・複数社) — その乗務員の候補は全部
+ */
+export function litigationRegisterCandidates(input: LitigationRegisterInput): LitigationRegisterCandidate[] {
+  const known = new Set(input.registered.map(e => registeredKey(e.company, e.payrollCd)))
+  const candidates = Object.entries(suggestCdMapEntries([...input.payrollRows], input.drivers, input.cdMap))
+    .map(([key, driverCd]) => ({ ...splitCdMapKey(key), driverCd }))
+    .filter(c => input.caseDriverCds.some(cd => sameCd(cd, c.driverCd))
+      && !known.has(registeredKey(c.company, c.payrollCd)))
+  return candidates.filter(c => candidates.filter(o => sameCd(o.driverCd, c.driverCd)).length === 1)
 }

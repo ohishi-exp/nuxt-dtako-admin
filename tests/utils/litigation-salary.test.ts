@@ -5,7 +5,7 @@
  * - 材料が取れていない・明細に居ない・引き当てが衝突 を「比較済み」と同じ見た目にしない
  */
 import { describe, it, expect } from 'vitest'
-import { buildLitigationSalaryRows, litigationPayrollMonths, type LitigationSalaryInput } from '~/utils/litigation-salary'
+import { buildLitigationSalaryRows, litigationPayrollMonths, litigationRegisterCandidates, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
 import type { SalaryCsvRow } from '~/utils/salary-compare'
 import type { WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
 import type { LitigationFetched } from '~/utils/litigation-errors'
@@ -124,5 +124,44 @@ describe('buildLitigationSalaryRows', () => {
   it('並びは乗務員ごと・月の古い順', () => {
     const rows = buildLitigationSalaryRows(input({ driverCds: ['1590', '1078'], months: ['2023-06', '2023-07'] }))
     expect(rows.map(r => `${r.driverCd}|${r.month}`)).toEqual(['1590|2023-06', '1590|2023-07', '1078|2023-06', '1078|2023-07'])
+  })
+})
+
+describe('litigationRegisterCandidates', () => {
+  // 架空の社員: 給与コード 9001 の山田 太郎 = 乗務員CD 9101 (番号が違うので社員マスタが無いと引き当たらない)
+  const driver = (cd: string, name: string) => ({ summary: { driverCd: cd, driverName: name } })
+  function reg(over: Partial<LitigationRegisterInput> = {}): LitigationRegisterInput {
+    return {
+      payrollRows: [pay('9001', '山田 太郎', '2023-07'), pay('9001', '山田 太郎', '2023-08'), pay('9002', '佐藤 花子', '2023-07')],
+      drivers: [driver('9101', '山田　太郎'), driver('9102', '佐藤 花子')],
+      cdMap: { entries: {} },
+      registered: [],
+      caseDriverCds: ['9101'],
+      ...over,
+    }
+  }
+
+  it('氏名が一意に一致する案件の乗務員だけ、会社・給与コード・氏名・乗務員CD で 1 件にする', () => {
+    expect(litigationRegisterCandidates(reg())).toEqual([{ company: '0200', payrollCd: '9001', name: '山田太郎', driverCd: '9101' }])
+  })
+
+  it('提案先が案件の乗務員でなければ出さない', () => {
+    expect(litigationRegisterCandidates(reg({ caseDriverCds: ['9102'] })).map(c => c.driverCd)).toEqual(['9102'])
+    expect(litigationRegisterCandidates(reg({ caseDriverCds: ['9999'] }))).toEqual([])
+  })
+
+  it('社員マスタに (会社, 給与コード) が既に在れば出さない (前ゼロ・全角は同じ社員として見る)', () => {
+    expect(litigationRegisterCandidates(reg({ registered: [{ company: '０２００', payrollCd: '09001' }] }))).toEqual([])
+    // 別の会社の同じ給与コードは別人
+    expect(litigationRegisterCandidates(reg({ registered: [{ company: '0100', payrollCd: '9001' }] }))).toHaveLength(1)
+  })
+
+  it('全乗務員に同姓同名が居れば (案件の外でも) 出さない', () => {
+    expect(litigationRegisterCandidates(reg({ drivers: [driver('9101', '山田 太郎'), driver('9201', '山田 太郎')] }))).toEqual([])
+  })
+
+  it('同じ乗務員に 2 件以上の給与コードが提案されたら、その乗務員の候補は全部出さない', () => {
+    const payrollRows = [pay('9001', '山田 太郎', '2023-07'), pay('9001', '山田 太郎', '2023-07', { company: '0300' })]
+    expect(litigationRegisterCandidates(reg({ payrollRows }))).toEqual([])
   })
 })
