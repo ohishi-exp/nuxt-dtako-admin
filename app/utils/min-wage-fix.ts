@@ -102,6 +102,8 @@ export interface RateMasterApplyItem {
   rate: number | null
   rateEffectiveFrom: string | null
   status: RateMasterApplyStatus
+  /** 単価マスタに書く適用開始日が発効日と違う (所属の異動で、その月の 1 日から入れる) */
+  appliedFrom?: string
   prefectureDefaulted?: true
 }
 
@@ -149,7 +151,8 @@ export function rateMasterApplyLines(res: RateMasterApplyResponse): RateMasterAp
   return res.items.map((i) => {
     if (i.status === 'add' || i.status === 'overwrite') {
       const pref = `${i.prefecture}${i.prefectureDefaulted ? ' (所属に県が無く既定の県)' : ''}`
-      return { driverCd: i.driverCd, text: `${pref} ${i.rate!.toLocaleString('ja-JP')}円/h (${i.rateEffectiveFrom} 発効)`, willAdd: true }
+      const from = i.appliedFrom ? `${i.rateEffectiveFrom} 発効、所属の異動で ${i.appliedFrom} から` : `${i.rateEffectiveFrom} 発効`
+      return { driverCd: i.driverCd, text: `${pref} ${i.rate!.toLocaleString('ja-JP')}円/h (${from})`, willAdd: true }
     }
     return { driverCd: i.driverCd, text: STATUS_NOTE[i.status], willAdd: false }
   })

@@ -95,6 +95,7 @@ describe('単価マスタを最低賃金で作る', () => {
     const lines = rateMasterApplyLines(res([
       { driverCd: '9001', branch: '甲', prefecture: '架空県', rate: 1000, rateEffectiveFrom: '2024-10-05', status: 'add' },
       { driverCd: '9001', branch: '甲', prefecture: '既定県', rate: 950, rateEffectiveFrom: '2023-10-01', status: 'overwrite', prefectureDefaulted: true },
+      { driverCd: '9001', branch: '乙', prefecture: '別県', rate: 970, rateEffectiveFrom: '2024-09-01', appliedFrom: '2025-01-01', status: 'add' },
       { driverCd: '9002', branch: '甲', prefecture: '架空県', rate: 1000, rateEffectiveFrom: '2024-10-05', status: 'keep' },
       { driverCd: '9003', branch: '乙', prefecture: null, rate: null, rateEffectiveFrom: null, status: 'unmapped' },
       { driverCd: '9004', branch: '甲', prefecture: '架空県', rate: null, rateEffectiveFrom: null, status: 'no-rate' },
@@ -103,6 +104,7 @@ describe('単価マスタを最低賃金で作る', () => {
     expect(lines).toEqual([
       { driverCd: '9001', text: '架空県 1,000円/h (2024-10-05 発効)', willAdd: true },
       { driverCd: '9001', text: '既定県 (所属に県が無く既定の県) 950円/h (2023-10-01 発効)', willAdd: true },
+      { driverCd: '9001', text: '別県 970円/h (2024-09-01 発効、所属の異動で 2025-01-01 から)', willAdd: true },
       { driverCd: '9002', text: '既に単価がある — 触りません (単価マスタタブで確認)', willAdd: false },
       { driverCd: '9003', text: '所属から県が引けない — 拘束×賃金 → 最低賃金チェック → ▸ 最低賃金 で拠点の県を設定', willAdd: false },
       { driverCd: '9004', text: 'その県の最低賃金が期間中に無い — 過去の最低賃金を取り込んでからやり直す', willAdd: false },

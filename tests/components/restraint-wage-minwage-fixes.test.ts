@@ -50,6 +50,8 @@ function wageReportBody(patch: Record<string, unknown>) {
 }
 
 let calls: { url: string, method: string, body: unknown }[] = []
+let rawCalls = 0
+const fetchRawCalls = () => rawCalls
 
 /** 最低賃金チェックタブを開いた状態で描く。タブ・対象月は `sessionStorage`、
  * theearth セッションは `localStorage` から `onMounted` が復元する
@@ -84,6 +86,7 @@ async function mountMinWageTab(patch: Record<string, unknown>) {
     (url: unknown): Promise<unknown>, raw: unknown
   }
   fetchFn.raw = vi.fn(async (url: unknown) => {
+    rawCalls++
     calls.push({ url: String(url), method: 'GET', body: undefined })
     return { _data: reply(url) }
   })
@@ -119,6 +122,7 @@ beforeEach(() => {
   sessionStorage.clear()
   nuxtState.clear()
   calls = []
+  rawCalls = 0
 })
 
 afterEach(() => {
@@ -153,13 +157,16 @@ describe('/restraint-wage 最低賃金チェック: 単価未設定の行を「�
     expect(w.find('[data-testid="min-wage-fix-import-message"]').text()).toContain('厚労省から 12 件を取り込みました (2002-10〜2025-10)')
   })
 
-  it('★ ③ はこの月の集計と単価マスタを読み直す (既存の再読込。キャッシュを使わない)', async () => {
+  it('★ ③ は単価マスタと、表示中の集計 (GCP) だけを読み直す', async () => {
     const w = await mountMinWageTab({ hourlyRate: null, minWage: FULL_MIN_WAGE })
     calls = []
+    rawCalls = 0
     await w.find('[data-testid="min-wage-fix-retake-button"]').trigger('click')
     for (let i = 0; i < 6; i++) await flushPromises()
     const urls = calls.map(c => c.url)
     expect(urls.some(u => u.includes('/restraint-api/wage-master'))).toBe(true)
-    expect(urls.filter(u => u.includes('/wage-report')).length).toBeGreaterThanOrEqual(1)
+    // GCP (既定) を表示中なので GCP の集計だけを読み直す (現行 = $fetch.raw の wage-report は叩かない)
+    expect(calls.filter(c => c.url.includes('/wage-report'))).toHaveLength(1)
+    expect(fetchRawCalls()).toBe(0)
   })
 })

@@ -98,6 +98,7 @@ async function importHistory() {
       />
     </div>
     <div class="flex items-center gap-2 flex-wrap" data-testid="min-wage-fix-retake">
+      <span>③</span>
       <UButton
         size="xs"
         icon="i-lucide-refresh-cw"
@@ -107,7 +108,7 @@ async function importHistory() {
         data-testid="min-wage-fix-retake-button"
         @click="emit('retake')"
       />
-      <span v-if="retakeNote">③ {{ retakeNote }}</span>
+      <span v-if="retakeNote">{{ retakeNote }}</span>
     </div>
   </div>
 </template>

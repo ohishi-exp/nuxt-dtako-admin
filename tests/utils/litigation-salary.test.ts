@@ -290,9 +290,11 @@ describe('rateBasisStatus / rateBasisLabel (計算に使った単価と最低賃
 
   it('★ どちらかが無ければ unknown (一致扱いにしない): 単価なし / 最低賃金が引けない', () => {
     expect(rateBasisStatus(basis({ hourlyRate: null })).status).toBe('unknown')
-    expect(rateBasisStatus(basis({ hourlyRate: null })).message).toBe('判定できない: 単価マスタに単価が無い (上の『直し方』の手順で単価を入れる)')
+    expect(rateBasisStatus(basis({ hourlyRate: null })).message).toBe('判定できない: 単価マスタに単価が無い (上の『直し方』の ② → ③)')
     expect(rateBasisStatus(basis({ minWageRate: null })).status).toBe('unknown')
-    expect(rateBasisStatus(basis({ minWageRate: null })).message).toBe('判定できない: この月の最低賃金が引けない (上の『直し方』で取り込み → 取り直し)')
+    expect(rateBasisStatus(basis({ minWageRate: null })).message).toBe('判定できない: この月の最低賃金が引けない (上の『直し方』の ① → ③)')
+    // 県が引けない月 (県 null) も同じ文言 — 古い保存物と見分けられないので、パネルの ① に任せる
+    expect(rateBasisStatus(basis({ minWageRate: null, minWagePrefecture: null })).message).toBe('判定できない: この月の最低賃金が引けない (上の『直し方』の ① → ③)')
   })
 
   it('単価の表示: 適用年月・県つき / 県なし / 適用開始なし (古い保存物) / 単価なし', () => {

@@ -2322,14 +2322,15 @@ function onMinWageFixImported() {
   if (minWageCardOpen.value) loadMinWageMaster()
   else minWageMasterLoaded.value = false
 }
-/** パネルの ③: 単価マスタと、いま表示している月の集計を読み直す (既存の再読込の流儀) */
+/** パネルの ③: 単価マスタと、**いま表示している** 集計 (displayReport の元) だけを読み直す。
+ * GCP を表示中に「現行」まで取りに行かない (64 秒かかり同じ DO を奪い合う — loadGcpWageReport の watch の注記) */
 async function reloadAfterMinWageFix() {
   minWageFixReloading.value = true
   try {
     reportCache.clear()
     await loadMaster()
-    await loadWageReport()
-    if (minWageRestraintSource.value === 'gcp') await loadGcpWageReport()
+    if (readsMinWageReport.value && minWageRestraintSource.value === 'gcp') await loadGcpWageReport()
+    else await loadWageReport()
   }
   finally {
     minWageFixReloading.value = false
