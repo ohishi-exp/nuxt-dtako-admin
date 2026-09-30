@@ -858,7 +858,7 @@ async function loadSalaryPayroll() {
     for (const [i, { workMonth, payMonth }] of targets.entries()) {
       salaryLoadingPayMonth.value = payMonth
       const rows: SalaryCsvRow[] = []
-      const syncs: { source?: 'cache' | 'live', syncedAt: string | null }[] = []
+      const syncs: { source?: 'cache' | 'live', syncedAt?: string | null }[] = []
       let failure: string | null = null
       for (const company of companies) {
         salaryProgress.value = `${i + 1} / ${targets.length} — ${payMonth} 支給 (会社 ${company}) を読んでいます (保存が無い月は給与大臣から読むので 10〜20 秒)`
