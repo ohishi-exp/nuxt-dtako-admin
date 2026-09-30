@@ -17,7 +17,8 @@ import { sha256Hex } from './profit-r2-io'
 interface FetcherLike {
   fetch(input: Request): Promise<Response>
 }
-interface KyuyoUpstreamEnv {
+// `fetchIchiban` の第 1 引数 (Record<string, unknown>) にそのまま渡すため交差型にする (interface だと index signature が無く通らない)。
+type KyuyoUpstreamEnv = Record<string, unknown> & {
   NUXT_KYUYO_UPSTREAM?: unknown
   ICHIBAN_KYUYO?: FetcherLike
 }
