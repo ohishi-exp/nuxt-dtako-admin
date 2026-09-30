@@ -5,10 +5,11 @@
  * だけで、e-Stat にも data.go.jp にも地域別最低賃金額のデータセットは無い
  * (「最低賃金に関する実態調査」は別物)。よって HTML テーブルを取り込む。
  *
- * 取得元に `saiteichingin.mhlw.go.jp` を選んだ理由: URL が安定している。
- * `mhlw.go.jp` 側の「地域別最低賃金改定状況」xlsx は平成14年度からの全履歴が
- * 入っていて魅力的だが、URL に年ごとに変わる content ID (`001571219.xlsx`) が
- * 入るためインデックスページの走査が要る。
+ * 現行の一覧は `saiteichingin.mhlw.go.jp` から取る (URL が安定している。最新の
+ * 改定 1 件だけ)。平成14年度からの全履歴は `mhlw.go.jp` の「地域別最低賃金改定状況」
+ * xlsx にあり、URL の content ID (`001753407.xlsx`) が年度ごとに変わるので、
+ * 一覧ページ (MHLW_REVISION_INDEX_URL) からリンクを拾って読む
+ * (findRevisionXlsxHref / readXlsxParts / parseMhlwRevisionHistory)。
  *
  * このモジュールは **pure** に保つ (fetch はしない)。呼び出し側が取得した HTML
  * 文字列を渡す。ネットワーク経路が変わっても (worker fetch / 貼り付け) パーサは
@@ -143,6 +144,240 @@ export function parseMhlwNationalList(html: string): MinWageImportRow[] {
     );
   }
   return rows;
+}
+
+/** 厚労省「地域別最低賃金の全国一覧」ページ (改定状況 xlsx へのリンクを載せている)。 */
+export const MHLW_REVISION_INDEX_URL =
+  "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/minimumichiran/index.html";
+
+/** xlsx の取得先として許す host。一覧ページの href を鵜呑みにしない。 */
+const MHLW_XLSX_HOST = "www.mhlw.go.jp";
+
+/** xlsx (zip) と、その中の 1 エントリを展開した大きさの上限。 */
+const MAX_XLSX_BYTES = 5 * 1024 * 1024;
+
+function decodeXmlText(text: string): string {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * 一覧ページから「改定状況」xlsx のリンクを 1 本だけ拾い、絶対 URL にする。
+ * 0 本・2 本以上・mhlw.go.jp 以外・xlsx 以外は throw (取得先を広げない)。
+ */
+export function findRevisionXlsxHref(indexHtml: string, baseUrl: string): string {
+  const hrefs = new Set<string>();
+  for (const m of indexHtml.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    if (!textOf(m[2]!).includes("改定状況")) continue;
+    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(m[1]!)?.[1];
+    if (href && /\.xlsx(?:[?#].*)?$/i.test(href)) hrefs.add(decodeXmlText(href));
+  }
+  if (hrefs.size !== 1) {
+    throw new MinWageImportError(`改定状況 xlsx のリンクが ${hrefs.size} 本見つかりました (1 本のはず)`);
+  }
+  let url: URL;
+  try {
+    url = new URL([...hrefs][0]!, baseUrl);
+  } catch {
+    throw new MinWageImportError("改定状況 xlsx のリンクを URL として解釈できません");
+  }
+  if (url.protocol !== "https:" || url.hostname !== MHLW_XLSX_HOST || !/\.xlsx$/i.test(url.pathname)) {
+    throw new MinWageImportError(`改定状況 xlsx のリンクが厚労省 (${MHLW_XLSX_HOST}) の xlsx ではありません`);
+  }
+  return url.toString();
+}
+
+/** zip の 1 エントリ (中央ディレクトリ → local header) を stored / deflate で展開する。 */
+async function readZipEntry(buf: ArrayBuffer, name: string): Promise<string> {
+  const view = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 22 - 65535); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new MinWageImportError("xlsx (zip) の末尾を読めません");
+  const count = view.getUint16(eocd + 10, true);
+  let pos = view.getUint32(eocd + 16, true);
+  for (let n = 0; n < count; n++) {
+    if (view.getUint32(pos, true) !== 0x02014b50) throw new MinWageImportError("xlsx (zip) の中央ディレクトリが壊れています");
+    const method = view.getUint16(pos + 10, true);
+    const csize = view.getUint32(pos + 20, true);
+    const usize = view.getUint32(pos + 24, true);
+    const nameLen = view.getUint16(pos + 28, true);
+    const extraLen = view.getUint16(pos + 30, true);
+    const commentLen = view.getUint16(pos + 32, true);
+    const local = view.getUint32(pos + 42, true);
+    const entryName = new TextDecoder().decode(bytes.subarray(pos + 46, pos + 46 + nameLen));
+    pos += 46 + nameLen + extraLen + commentLen;
+    if (entryName !== name) continue;
+    if (usize > MAX_XLSX_BYTES) throw new MinWageImportError(`${name} が大きすぎます (${usize} バイト)`);
+    if (view.getUint32(local, true) !== 0x04034b50) throw new MinWageImportError("xlsx (zip) の local header が壊れています");
+    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    const data = bytes.subarray(start, start + csize);
+    if (data.length !== csize) throw new MinWageImportError("xlsx (zip) のデータが途中で切れています");
+    if (method === 0) return new TextDecoder().decode(data);
+    if (method !== 8) throw new MinWageImportError(`xlsx (zip) の圧縮方式 ${method} は未対応です`);
+    const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > MAX_XLSX_BYTES) throw new MinWageImportError(`${name} の展開結果が大きすぎます`);
+      chunks.push(value);
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return new TextDecoder().decode(out);
+  }
+  throw new MinWageImportError(`xlsx に ${name} がありません`);
+}
+
+/**
+ * xlsx (zip) から シート 1 枚と共有文字列表を取り出す。依存パッケージを足さないため
+ * 中央ディレクトリを自前で読む (operation-zip.ts は契約が逆なので使わない)。
+ * DecompressionStream の TypeError・DataView の RangeError も含め、失敗は必ず
+ * MinWageImportError にする (route で 400 に写すため。500 に落とさない)。
+ */
+export async function readXlsxParts(
+  buf: ArrayBuffer,
+): Promise<{ sheetXml: string; sharedStringsXml: string }> {
+  if (buf.byteLength > MAX_XLSX_BYTES) throw new MinWageImportError("xlsx が大きすぎます");
+  try {
+    return {
+      sheetXml: await readZipEntry(buf, "xl/worksheets/sheet1.xml"),
+      sharedStringsXml: await readZipEntry(buf, "xl/sharedStrings.xml"),
+    };
+  } catch (err) {
+    if (err instanceof MinWageImportError) throw err;
+    throw new MinWageImportError(`xlsx を展開できません (${String(err)})`);
+  }
+}
+
+/** `AB` → 28。 */
+function columnIndex(letters: string): number {
+  let n = 0;
+  for (const ch of letters) n = n * 26 + ch.charCodeAt(0) - 64;
+  return n;
+}
+
+/** sharedStrings.xml → 文字列表 (ふりがな `<rPh>` は落とす)。 */
+function parseSharedStrings(xml: string): string[] {
+  return [...xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/gi)].map((si) =>
+    [...si[1]!.replace(/<rPh\b[\s\S]*?<\/rPh>/gi, "").matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/gi)]
+      .map((t) => decodeXmlText(t[1]!))
+      .join(""),
+  );
+}
+
+/** シート → 行番号 → (列番号 → 文字列)。値の無いセルは持たない。 */
+function parseSheetCells(sheetXml: string, strings: string[]): Map<number, Map<number, string>> {
+  const rows = new Map<number, Map<number, string>>();
+  for (const cell of sheetXml.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/gi)) {
+    const ref = /\br="([A-Z]+)(\d+)"/.exec(cell[1]!);
+    const v = /<v>([\s\S]*?)<\/v>/.exec(cell[2] ?? "")?.[1];
+    if (!ref || v === undefined) continue;
+    let text = decodeXmlText(v);
+    if (/\bt="s"/.test(cell[1]!)) {
+      const s = strings[Number(text)];
+      if (s === undefined) throw new MinWageImportError(`共有文字列 ${text} がありません`);
+      text = s;
+    }
+    const row = rows.get(Number(ref[2])) ?? new Map<number, string>();
+    row.set(columnIndex(ref[1]!), text);
+    rows.set(Number(ref[2]), row);
+  }
+  return rows;
+}
+
+/** Excel シリアル値 (1900 系、2000-01-01 以降) → `YYYY-MM-DD`。範囲外は throw。 */
+function excelSerialToIso(text: string): string {
+  const serial = Number(text);
+  if (!/^\d+$/.test(text) || serial < 36526 || serial > 73050) {
+    throw new MinWageImportError(`発効年月日 (シリアル値) が不正です: ${text}`);
+  }
+  return new Date((serial - 25569) * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** `福　岡` → `福岡県`。全角・半角スペースを除いた前方一致が 1 県に決まらなければ throw。 */
+function normalizePrefecture(label: string): string {
+  const key = label.replace(/[\s　]/g, "");
+  const hits = key === "" ? [] : PREFECTURES.filter((p) => p.startsWith(key));
+  if (hits.length !== 1) throw new MinWageImportError(`都道府県名を特定できません: ${label}`);
+  return hits[0]!;
+}
+
+export interface MinWageHistory {
+  rows: MinWageImportRow[];
+  /** 取り込んだ年度の範囲 (見出しの表記のまま)。 */
+  years: { from: string; to: string };
+}
+
+/**
+ * 「地域別最低賃金改定状況」xlsx (1 シート) → 全県 × 全年度の (額, 発効日)。
+ *
+ * 1 行目は年度名 (2 列結合)、2 行目は各年度の「改定額」「発効年月日」、3 行目以降が
+ * 県。末尾の「全国加重平均額」行は県ではないので読まない。**年度ごとに 47 県が
+ * 揃わなければ throw する** (1 年度でも欠けると、その年度の月が前年度の額で引かれて
+ * 最低賃金割れを見逃すため)。列全体が空の年度 (未公表) だけは飛ばす。
+ * 同じ (県, 発効日) が年度をまたいで現れるのは据え置き年度で、額が同じなら 1 件にする。
+ */
+export function parseMhlwRevisionHistory(sheetXml: string, sharedStringsXml: string): MinWageHistory {
+  const rows = parseSheetCells(sheetXml, parseSharedStrings(sharedStringsXml));
+  const yearRow = rows.get(1) ?? new Map<number, string>();
+  const headRow = rows.get(2) ?? new Map<number, string>();
+  const dataRows = [...rows.entries()]
+    .filter(([r, cells]) => r >= 3 && (cells.get(1) ?? "") !== "")
+    .filter(([, cells]) => !cells.get(1)!.startsWith("全国"));
+
+  const merged = new Map<string, MinWageImportRow>();
+  const years: string[] = [];
+  for (const [col, head] of headRow) {
+    if (!head.startsWith("改定額")) continue;
+    if (!(headRow.get(col + 1) ?? "").startsWith("発効年月日")) {
+      throw new MinWageImportError(`${col} 列目の「改定額」に「発効年月日」が続いていません`);
+    }
+    const year = yearRow.get(col) ?? `${col} 列目`;
+    const filled = dataRows.filter(([, c]) => c.has(col) || c.has(col + 1));
+    if (filled.length === 0) continue;
+    const seen = new Set<string>();
+    for (const [, cells] of filled) {
+      const prefecture = normalizePrefecture(cells.get(1)!);
+      if (seen.has(prefecture)) throw new MinWageImportError(`${year}: 都道府県が重複しています: ${prefecture}`);
+      seen.add(prefecture);
+      const rateText = (cells.get(col) ?? "").replace(/[,，]|円/g, "").trim();
+      const rate = Number(rateText);
+      if (!/^\d+$/.test(rateText) || rate < MIN_RATE || rate > MAX_RATE) {
+        throw new MinWageImportError(`${year} ${prefecture}: 最低賃金時間額が不正です: ${cells.get(col) ?? "(空)"}`);
+      }
+      const effectiveFrom = excelSerialToIso((cells.get(col + 1) ?? "").trim());
+      const key = `${prefecture}|${effectiveFrom}`;
+      const prior = merged.get(key);
+      if (prior && prior.rate !== rate) {
+        throw new MinWageImportError(`${prefecture} ${effectiveFrom}: 年度により額が食い違っています`);
+      }
+      merged.set(key, { prefecture, rate, effectiveFrom });
+    }
+    const missing = PREFECTURES.filter((p) => !seen.has(p));
+    if (missing.length > 0) {
+      throw new MinWageImportError(`${year}: 取り込めた都道府県が ${seen.size} 件で 47 件に足りません (欠け: ${missing.join("、")})`);
+    }
+    years.push(year);
+  }
+  if (years.length === 0) throw new MinWageImportError("改定状況 xlsx から年度を 1 つも読めませんでした");
+  return { rows: [...merged.values()], years: { from: years[0]!, to: years[years.length - 1]! } };
 }
 
 export interface MinWageMergeResult {

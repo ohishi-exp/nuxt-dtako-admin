@@ -4918,7 +4918,9 @@ async function loadBranchGroups() {
 /** 都道府県が未設定の拠点 (この分は最低賃金を引けない)。 */
 const unmappedBranchGroups = computed(() => branchGroups.value.filter(g => g.prefecture === null))
 
-async function importMinWageFromMhlw() {
+// 'history' は厚労省の「改定状況」xlsx (平成14年度〜の全県 × 全年度) を取り込む。
+// 過去月の最低賃金を引けるようにするため。既定 (現行の全国一覧) は最新の改定だけ。
+async function importMinWageFromMhlw(source?: 'history') {
   if (!session.value) return
   importingMinWage.value = true
   pageError.value = ''
@@ -4930,13 +4932,20 @@ async function importMinWageFromMhlw() {
       added: number
       updated: number
       unchanged: number
+      years?: { from: string, to: string }
       data: MinWageMaster
-    }>('/restraint-api/min-wage/import-mhlw', { method: 'POST', headers: authHeaders() })
+    }>('/restraint-api/min-wage/import-mhlw', {
+      method: 'POST',
+      headers: authHeaders(),
+      ...(source ? { body: { source } } : {}),
+    })
     minWageMaster.value = res.data
     minWagePrefectureCount.value = Object.keys(res.data.prefectures).length
+    // 全国一覧は 47 件 (県数)、履歴は (県, 発効日) の件数が返る
+    const range = res.years ? ` (${res.years.from}〜${res.years.to})` : ''
     minWageMessage.value = res.changed
-      ? `厚労省から ${res.prefectures} 都道府県を取り込みました (新規 ${res.added} / 更新 ${res.updated})`
-      : `厚労省から ${res.prefectures} 都道府県を確認しました (改定なし)`
+      ? `厚労省から ${res.prefectures} ${res.years ? '件' : '都道府県'}を取り込みました${range} (新規 ${res.added} / 更新 ${res.updated})`
+      : `厚労省から ${res.prefectures} ${res.years ? '件' : '都道府県'}を確認しました${range} (改定なし)`
     reportCache.clear()
     await loadBranchGroups()
   }
@@ -6394,7 +6403,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 <UButton
                   size="xs" variant="soft" icon="i-lucide-download"
                   label="厚労省から取り込む" :loading="importingMinWage"
-                  @click="importMinWageFromMhlw"
+                  @click="importMinWageFromMhlw()"
+                />
+                <UButton
+                  size="xs" variant="soft" icon="i-lucide-history"
+                  label="過去の改定も取り込む (平成14年度〜)" :loading="importingMinWage"
+                  @click="importMinWageFromMhlw('history')"
                 />
                 <UButton size="xs" variant="ghost" icon="i-lucide-refresh-cw" label="拠点を再読込" :loading="loadingBranchGroups" @click="loadBranchGroups" />
               </div>
