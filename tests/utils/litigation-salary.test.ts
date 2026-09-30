@@ -5,7 +5,7 @@
  * - 材料が取れていない・明細に居ない・引き当てが衝突 を「比較済み」と同じ見た目にしない
  */
 import { describe, it, expect } from 'vitest'
-import { buildLitigationSalaryRows, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
+import { buildLitigationSalaryRows, diffSignClass, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
 import type { SalaryCsvRow } from '~/utils/salary-compare'
 import type { WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
 import type { LitigationFetched } from '~/utils/litigation-errors'
@@ -215,5 +215,17 @@ describe('splitPayrollTargets (保存済みと保存が無い月に分ける)', 
 
   it('synced が空 (synced-months が読めない) なら全部 live = 直列', () => {
     expect(splitPayrollTargets(targets, new Set())).toEqual({ cached: [], live: targets })
+  })
+})
+
+describe('diffSignClass (差の符号で文字色)', () => {
+  it('正は青、負は赤 (ダークモードの色つき)', () => {
+    expect(diffSignClass(1)).toBe('text-blue-600 dark:text-blue-400')
+    expect(diffSignClass(-1)).toBe('text-red-600 dark:text-red-400')
+  })
+
+  it('0 と null (計算できない) は色を付けない', () => {
+    expect(diffSignClass(0)).toBe('')
+    expect(diffSignClass(null)).toBe('')
   })
 })

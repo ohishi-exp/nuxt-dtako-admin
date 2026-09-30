@@ -220,3 +220,13 @@ export function narrowKyuyoEmployees(res: KyuyoEmployeesResponse, payrollCd: str
   const key = (v: string) => String(Number(v.trim()))
   return { ...res, employees: res.employees.filter(r => key(r.employee_code_key) === key(payrollCd)) }
 }
+
+/**
+ * 差の符号で決める文字色 (給与比較の「差」の行)。正 (> 0) は青、負 (< 0) は赤、
+ * 0 と null (計算できない) は色を付けない。
+ * 拘束×賃金の給与比較 (`restraint-wage.vue`) の色はこれと独立 (そちらは変えない)。
+ */
+export function diffSignClass(v: number | null): string {
+  if (v === null || v === 0) return ''
+  return v > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'
+}

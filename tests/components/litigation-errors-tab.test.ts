@@ -604,6 +604,11 @@ describe('給与比較タブ', () => {
     // 残業は 1,500 円 × 10 h = 15,000 に対して明細 30,000 → +15,000
     expect(cell('overtime')).toEqual(['明細30,000', '計算15,000', '差+15,000'])
     expect(cell('total')).toHaveLength(3)
+    // 差の色: 正 (残業 +15,000) は青、0 (基本給) は色なし
+    const diffClass = (key: string) => w.find(`[data-salary-row="1078|2025-01"] [data-salary-cell="${key}"] [data-salary-line="diff"]`).classes()
+    expect(diffClass('overtime')).toContain('text-blue-600')
+    expect(diffClass('base')).not.toContain('text-blue-600')
+    expect(diffClass('base')).not.toContain('text-red-600')
     // 2 月は wage-report が 504 だったので比べない (0 と言わない)
     expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('拘束の材料が取れていない')
     // 給与の書き込み口 (sync) は叩かない
@@ -621,6 +626,7 @@ describe('給与比較タブ', () => {
     expect(line('1078|2025-01', 'theory').text()).toContain('16,667')
     expect(line('1078|2025-01', 'paid').text()).toContain('30,000')
     expect(line('1078|2025-01', 'diff37').text()).toContain('+13,333')
+    expect(line('1078|2025-01', 'diff37').classes()).toContain('text-blue-600') // 正は青
     expect(line('1078|2025-01', 'diff37').classes()).not.toContain('text-red-600')
     expect(w.find('[data-testid="litigation-salary-shortfall37"]').text()).toBe('37条で不足 0 件')
     // 比べられない行 (2 月は拘束の材料なし) は列を出さず「-」
@@ -635,6 +641,9 @@ describe('給与比較タブ', () => {
     const diff = w.find('[data-salary-row="1078|2025-01"] [data-salary-line="diff37"]')
     expect(diff.text()).toContain('-6,667')
     expect(diff.classes()).toContain('text-red-600')
+    expect(diff.classes()).not.toContain('text-blue-600')
+    // 明細の残業 10,000 は計算 15,000 を下回る → 残業の差 (-5,000) も赤
+    expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="overtime"] [data-salary-line="diff"]').classes()).toContain('text-red-600')
     expect(w.find('[data-testid="litigation-salary-shortfall37"]').text()).toBe('37条で不足 1 件')
     w.unmount()
   })
