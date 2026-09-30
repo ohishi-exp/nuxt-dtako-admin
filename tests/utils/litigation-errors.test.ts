@@ -18,7 +18,6 @@ import {
   litigationChunkMonths,
   litigationChunkWarnings,
   litigationDriverMonthKey,
-  litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
   litigationAlcReadingRange,
@@ -373,33 +372,6 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     const w = litigationChunkWarnings(chunks, [result({ warnings: ['w1'], warningsCount: 7 }), result()])
     expect(w).toEqual([{ driverCd: '1078', label: '2025-01〜2025-02', warnings: ['w1'], warningsCount: 7 }])
     expect(litigationChunkWarnings(chunks, [])).toEqual([])
-  })
-
-  it('★ CSV は BOM 付き・判定と内容の 2 列ずつ・カンマや引用符をエスケープする', () => {
-    const rows = buildLitigationErrorRows(input({
-      driverCds: ['1078'],
-      months: ['2025-01'],
-      unkoGaps: new Map([['1078|2025-01', { ok: false, reason: '失敗, "理由"' }]]),
-    }))
-    const csv = litigationErrorsCsv(rows, cd => (cd === '1078' ? '山田 太郎' : cd), [])
-    expect(csv.startsWith('﻿')).toBe(true)
-    const lines = csv.slice(1).trimEnd().split('\n')
-    expect(lines[0]).toBe('乗務員CD,氏名,月,alc の運行 判定,alc の運行 内容,Y時間の欠け 判定,Y時間の欠け 内容,alc にあってオンプレのデジタコに無い運行 判定,alc にあってオンプレのデジタコに無い運行 内容,最低賃金の不変条件 判定,最低賃金の不変条件 内容')
-    expect(lines[1]).toContain('1078,山田 太郎,2025-01,未実行,')
-    expect(lines[1]).toContain(',判定できない,"失敗, ""理由""",')
-    expect(lines).toHaveLength(2)
-  })
-
-  it('CSV の末尾に冊単位の警告を別の表として続ける (総数が多ければ添える)', () => {
-    const csv = litigationErrorsCsv([], cd => cd, [
-      { driverCd: '1078', label: '2025-01〜2025-02', warnings: ['a', 'b'], warningsCount: 9 },
-      { driverCd: '2000', label: '2025-01〜2025-02', warnings: ['c'], warningsCount: 1 },
-    ])
-    const lines = csv.slice(1).trimEnd().split('\n')
-    expect(lines[1]).toBe('')
-    expect(lines[2]).toBe('乗務員CD,氏名,期間,Y時間の警告 (冊単位・月に割り振れない)')
-    expect(lines[3]).toBe('1078,1078,2025-01〜2025-02,a / b ほか (全 9 件)')
-    expect(lines[4]).toBe('2000,2000,2025-01〜2025-02,c')
   })
 })
 

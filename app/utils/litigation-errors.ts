@@ -30,7 +30,6 @@ import type { LitigationOutputChunk, LitigationOutputResult } from './litigation
 import type { WageInvariantCheck, WageReportResponse } from './restraint-wage-view'
 import { fmtShiftOverlap, invariantRowStatus, nextYm } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
-import { csvCell } from './wage-range-view'
 
 export type LitigationCheckKey = 'alcOps' | 'yTime' | 'unkoGaps' | 'invariants'
 export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending'
@@ -388,39 +387,6 @@ export function litigationChunkWarnings(
     }
   })
   return out
-}
-
-/** ZIP に入れる CSV のファイル名 */
-export const LITIGATION_ERRORS_CSV_FILENAME = 'エラー一覧.csv'
-
-/**
- * エラー一覧の CSV。**先頭に UTF-8 BOM** を付ける (Excel が Shift_JIS と誤認しないため)。
- * 1 行 = 乗務員 × 月、各検知は「判定」と「内容」の 2 列。冊単位の Y時間の警告は
- * 月に割り振れないので、空行のあとに別の表として続ける。
- */
-export function litigationErrorsCsv(
-  rows: readonly LitigationErrorRow[],
-  driverName: (driverCd: string) => string,
-  warnings: readonly LitigationChunkWarning[],
-): string {
-  const lines: string[] = []
-  const header = ['乗務員CD', '氏名', '月']
-  for (const k of LITIGATION_CHECK_KEYS) header.push(`${LITIGATION_CHECK_LABELS[k]} 判定`, `${LITIGATION_CHECK_LABELS[k]} 内容`)
-  lines.push(header.map(csvCell).join(','))
-  for (const r of rows) {
-    const cols = [r.driverCd, driverName(r.driverCd), r.month]
-    for (const k of LITIGATION_CHECK_KEYS) cols.push(LITIGATION_CHECK_STATE_LABELS[r.cells[k].state], r.cells[k].message)
-    lines.push(cols.map(csvCell).join(','))
-  }
-  if (warnings.length > 0) {
-    lines.push('')
-    lines.push(['乗務員CD', '氏名', '期間', 'Y時間の警告 (冊単位・月に割り振れない)'].map(csvCell).join(','))
-    for (const w of warnings) {
-      const more = w.warningsCount > w.warnings.length ? ` ほか (全 ${w.warningsCount} 件)` : ''
-      lines.push([w.driverCd, driverName(w.driverCd), w.label, `${w.warnings.join(' / ')}${more}`].map(csvCell).join(','))
-    }
-  }
-  return `﻿${lines.join('\n')}\n`
 }
 
 // ---- 取り込みボタン ----

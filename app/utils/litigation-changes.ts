@@ -407,10 +407,8 @@ export const LITIGATION_CHANGE_LOG_MAX_DAYS = 400
 export const LITIGATION_CHANGES_CSV_FILENAME = '変更記録.csv'
 
 /**
- * 変更記録 CSV。**先頭に UTF-8 BOM** (litigation-errors.ts の `litigationErrorsCsv` と
- * 同じ作法 — Excel が Shift_JIS と誤認しないため)。`notices` (記録開始日の文言・
- * 403・読めなかった旨) は空行のあとに別の表として続ける
- * (`litigationErrorsCsv` の警告ブロックと同じ形)。
+ * 変更記録 CSV。**先頭に UTF-8 BOM** (Excel が Shift_JIS と誤認しないため)。
+ * `notices` (記録開始日の文言・403・読めなかった旨) は空行のあとに別の表として続ける。
  */
 export function litigationChangesCsv(rows: readonly LitigationChangeRow[], notices: readonly string[] = []): string {
   const header = ['記録日時', '種別', '対象', '内容', '理由']

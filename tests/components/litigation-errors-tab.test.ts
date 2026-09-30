@@ -351,8 +351,8 @@ describe('取り込みボタン', () => {
   })
 })
 
-describe('出力タブの ZIP にエラー一覧.csv を入れる', () => {
-  it('★ xlsx と並べて エラー一覧.csv (UTF-8 BOM 付き) が入り、Y時間の欠けが月の行に出る', async () => {
+describe('出力タブの ZIP に エラー一覧.csv が入らない', () => {
+  it('★ ZIP のキーは xlsx と 変更記録.csv だけ (エラー一覧.csv は入らない)', async () => {
     stubFetch((url) => {
       if (url !== '/api/y-time-export') throw new Error(`unexpected fetch ${url}`)
       return new Response('xlsx-bytes', {
@@ -369,19 +369,13 @@ describe('出力タブの ZIP にエラー一覧.csv を入れる', () => {
     await settle()
     expect(saved).toHaveLength(1)
     const zip = await JSZip.loadAsync(await saved[0]!.blob.arrayBuffer())
-    expect(Object.keys(zip.files).sort()).toEqual(['1078_2025-01-2025-02.xlsx', 'エラー一覧.csv', '変更記録.csv'])
-    const csv = await zip.file('エラー一覧.csv')!.async('string')
-    expect(csv.charCodeAt(0)).toBe(0xFEFF)
-    const lines = csv.slice(1).trimEnd().split('\n')
-    expect(lines).toHaveLength(3)
-    expect(lines[1]).toMatch(/^1078,甲野太郎,2025-01,未実行,.*,異常なし,書けなかった日なし,未実行,/)
-    expect(lines[2]).toMatch(/^1078,甲野太郎,2025-02,未実行,.*,異常あり,テンプレに行が無く書けなかった日: 2025-02-03,未実行,/)
+    expect(Object.keys(zip.files).sort()).toEqual(['1078_2025-01-2025-02.xlsx', '変更記録.csv'])
     // エラータブを開いていないので wage-report も wage-snapshot も呼ばない
     expect(calls.filter(c => c.url.includes('/restraint-api/wage-'))).toHaveLength(0)
     w.unmount()
   })
 
-  it('Excel が 0 冊でも エラー一覧.csv だけの ZIP を保存し、成功の見た目にしない', async () => {
+  it('Excel が 0 冊でも 変更記録.csv だけの ZIP を保存し、成功の見た目にしない', async () => {
     stubFetch(() => new Response('', { status: 200, headers: { 'x-y-time-rows': '0' } }))
     const w = mount(Page, {
       global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
@@ -391,10 +385,10 @@ describe('出力タブの ZIP にエラー一覧.csv を入れる', () => {
     await buttonByText(w, 'ZIP を作る').trigger('click')
     await settle()
     const zip = await JSZip.loadAsync(await saved[0]!.blob.arrayBuffer())
-    expect(Object.keys(zip.files)).toEqual(['エラー一覧.csv', '変更記録.csv'])
+    expect(Object.keys(zip.files)).toEqual(['変更記録.csv'])
     const alerts = w.findAllComponents({ name: 'UAlert' })
     expect(alerts.map(a => a.props('color'))).toEqual(['error'])
-    expect(alerts[0]!.text()).toContain('エラー一覧.csv / 変更記録.csv だけを入れて保存しました')
+    expect(alerts[0]!.text()).toContain('変更記録.csv だけを入れて保存しました')
     w.unmount()
   })
 })
@@ -479,7 +473,7 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
 })
 
 describe('出力タブ: ZIP に入るものの概要', () => {
-  it('★ 作る前から、Excel は「まだ」・CSV 2 本は中身の要点つきで並ぶ', async () => {
+  it('★ 作る前から、Excel は「まだ」・変更記録.csv は中身の要点つきで並ぶ', async () => {
     const w = mount(Page, {
       global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true } },
     })
@@ -489,7 +483,7 @@ describe('出力タブ: ZIP に入るものの概要', () => {
     const summary = w.find('[data-testid="litigation-zip-summary"]')
     expect(summary.text()).toContain('ZIP に入るもの')
     expect(summary.find('[data-zip-file="1078_2025-01-2025-02.xlsx"]').text()).toContain('まだ')
-    expect(summary.find('[data-zip-file="エラー一覧.csv"]').text()).toContain('乗務員 × 月 2 行')
+    expect(summary.find('[data-zip-file="エラー一覧.csv"]').exists()).toBe(false)
     expect(summary.find('[data-zip-file="変更記録.csv"]').text()).toContain('空の表')
     w.unmount()
   })
