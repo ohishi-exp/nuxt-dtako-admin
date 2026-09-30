@@ -5,8 +5,8 @@
  * - 材料が取れていない・明細に居ない・引き当てが衝突 を「比較済み」と同じ見た目にしない
  */
 import { describe, it, expect } from 'vitest'
-import { buildLitigationSalaryRows, diffSignClass, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
-import type { SalaryCsvRow } from '~/utils/salary-compare'
+import { buildLitigationSalaryRows, diffSignClass, minWageBasisLabel, rateBasisLabel, rateBasisPeriods, rateBasisStatus, type LitigationSalaryRow, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
+import type { SalaryCsvRow, SalaryRateBasis } from '~/utils/salary-compare'
 import type { WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
 import type { LitigationFetched } from '~/utils/litigation-errors'
 
@@ -268,5 +268,91 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     expect(salaryRowCells({ ...none, statutoryMinutes: 0 } as SalaryComparisonRow).over37NoneReason).toBe('(法定内時間が 0)')
     expect(salaryRowCells(none as SalaryComparisonRow).over37NoneReason).toBe('(割増の基礎に入る支給が 0)')
     expect(salaryRowCells({ ...base, overtimeFixed: true }).overtimeFixed).toBe(true)
+  })
+})
+
+describe('rateBasisStatus / rateBasisLabel (計算に使った単価と最低賃金、Refs #1133)', () => {
+  const basis = (over: Partial<SalaryRateBasis> = {}): SalaryRateBasis => ({
+    hourlyRate: 1000, effectiveFrom: '2024-10-05', prefecture: '架空県',
+    minWageRate: 1000, minWagePrefecture: '架空県', minWageEffectiveFrom: '2024-10-01', ...over,
+  })
+
+  it('一致は ok', () => {
+    expect(rateBasisStatus(basis())).toEqual({ status: 'ok', message: '最低賃金と一致' })
+  })
+
+  it('★ 下回る月も上回る月も mismatch。違う最低賃金の額・県・発効年月を併記する (「下回る」とは書かない)', () => {
+    expect(rateBasisStatus(basis({ hourlyRate: 950 }))).toEqual({ status: 'mismatch', message: '最低賃金 架空県 1,000円/h (2024-10 発効) と違う' })
+    expect(rateBasisStatus(basis({ hourlyRate: 1100 })).status).toBe('mismatch')
+    // 県・発効が無い最低賃金でも併記は崩れない
+    expect(rateBasisStatus(basis({ hourlyRate: 1100, minWagePrefecture: null, minWageEffectiveFrom: null })).message).toBe('最低賃金 1,000円/h (発効 不明) と違う')
+  })
+
+  it('★ どちらかが無ければ unknown (一致扱いにしない): 単価なし / 最低賃金が引けない', () => {
+    expect(rateBasisStatus(basis({ hourlyRate: null })).status).toBe('unknown')
+    expect(rateBasisStatus(basis({ hourlyRate: null })).message).toContain('単価マスタに単価が無い')
+    expect(rateBasisStatus(basis({ minWageRate: null })).status).toBe('unknown')
+    expect(rateBasisStatus(basis({ minWageRate: null })).message).toContain('最低賃金が引けない')
+  })
+
+  it('単価の表示: 適用年月・県つき / 県なし / 適用開始なし (古い保存物) / 単価なし', () => {
+    expect(rateBasisLabel(basis())).toBe('1,000円/h (2024-10 適用、架空県)')
+    expect(rateBasisLabel(basis({ prefecture: null }))).toBe('1,000円/h (2024-10 適用)')
+    expect(rateBasisLabel(basis({ effectiveFrom: null }))).toContain('1,000円/h (適用開始 不明')
+    expect(rateBasisLabel(basis({ effectiveFrom: null, prefecture: null }))).not.toContain('、')
+    expect(rateBasisLabel(basis({ hourlyRate: null }))).toBe('単価なし (単価マスタに無い)')
+  })
+
+  it('最低賃金の表示: 県・発効なし', () => {
+    expect(minWageBasisLabel({ minWageRate: 1000, minWagePrefecture: null, minWageEffectiveFrom: null })).toBe('1,000円/h (発効 不明)')
+  })
+})
+
+describe('rateBasisPeriods (紙面の「計算に使った単価」一覧)', () => {
+  const b = (over: Partial<SalaryRateBasis> = {}): SalaryRateBasis => ({
+    hourlyRate: 1000, effectiveFrom: '2024-10-05', prefecture: '架空県',
+    minWageRate: 1000, minWagePrefecture: '架空県', minWageEffectiveFrom: '2024-10-01', ...over,
+  })
+  const row = (driverCd: string, month: string, basis: SalaryRateBasis | null): LitigationSalaryRow => ({
+    driverCd, month, payMonth: month, state: basis ? 'ok' : 'unknown', message: '', payrollNote: '',
+    compared: basis ? ({ rateBasis: basis } as unknown as SalaryComparisonRow) : null,
+  })
+
+  it('同じ単価 (額・適用開始・県) が続く月を 1 期間にまとめ、単価が変わったら切る', () => {
+    const ps = rateBasisPeriods([row('9001', '2025-01', b()), row('9001', '2025-02', b()), row('9001', '2025-03', b({ hourlyRate: 1050, effectiveFrom: '2025-03-01', minWageRate: 1050 }))])
+    expect(ps).toHaveLength(2)
+    expect(ps[0]).toMatchObject({ driverCd: '9001', from: '2025-01', to: '2025-02', hourlyRate: 1000, effectiveFrom: '2024-10-05', prefecture: '架空県', months: 2, mismatchMonths: 0, unknownMonths: 0, mismatchMinWages: [] })
+    expect(ps[1]).toMatchObject({ from: '2025-03', to: '2025-03', hourlyRate: 1050, months: 1 })
+  })
+
+  it('額が同じでも適用開始日や県が違えば別の期間', () => {
+    expect(rateBasisPeriods([row('9001', '2025-01', b()), row('9001', '2025-02', b({ effectiveFrom: '2025-02-01' })), row('9001', '2025-03', b({ effectiveFrom: '2025-02-01', prefecture: '別県' }))])).toHaveLength(3)
+  })
+
+  it('★ 比較できていない月 (compared なし) で期間を切る。間の月の単価は分からない', () => {
+    const ps = rateBasisPeriods([row('9001', '2025-01', b()), row('9001', '2025-02', null), row('9001', '2025-03', b())])
+    expect(ps.map(p => [p.from, p.to])).toEqual([['2025-01', '2025-01'], ['2025-03', '2025-03']])
+  })
+
+  it('乗務員が変われば同じ単価でも別の期間', () => {
+    expect(rateBasisPeriods([row('9001', '2025-01', b()), row('9002', '2025-01', b())]).map(p => p.driverCd)).toEqual(['9001', '9002'])
+  })
+
+  it('★ 最低賃金と違う月数と、その最低賃金 (重複を除く) を持つ。上側の不一致も数える。判定できない月は別に数える', () => {
+    const ps = rateBasisPeriods([
+      row('9001', '2025-01', b({ hourlyRate: 1100, minWageRate: 1000 })),
+      row('9001', '2025-02', b({ hourlyRate: 1100, minWageRate: 1000 })),
+      row('9001', '2025-03', b({ hourlyRate: 1100, minWageRate: 1020, minWageEffectiveFrom: null, minWagePrefecture: null })),
+      row('9001', '2025-04', b({ hourlyRate: 1100, minWageRate: null })),
+      row('9001', '2025-05', b({ hourlyRate: 1100, minWageRate: 1100 })),
+    ])
+    expect(ps).toHaveLength(1)
+    expect(ps[0]).toMatchObject({ months: 5, mismatchMonths: 3, unknownMonths: 1 })
+    expect(ps[0]!.mismatchMinWages).toEqual(['架空県 1,000円/h (2024-10 発効)', '1,020円/h (発効 不明)'])
+  })
+
+  it('単価なしの月は unknown として期間に入る (hourlyRate null)', () => {
+    const ps = rateBasisPeriods([row('9001', '2025-01', b({ hourlyRate: null, effectiveFrom: null, prefecture: null }))])
+    expect(ps[0]).toMatchObject({ hourlyRate: null, unknownMonths: 1, mismatchMonths: 0 })
   })
 })

@@ -16,6 +16,7 @@ import {
   normalizeSalaryItemConfig,
   normalizeWageConfig,
   normalizeWageMaster,
+  rateEntryForMonth,
   rateForMonth,
   splitCsvCells,
   splitMinWageOvertimePay,
@@ -263,6 +264,18 @@ describe('rateForMonth', () => {
   it('適用前・履歴なしは null', () => {
     expect(rateForMonth(rates, 2024, 3)).toBeNull()
     expect(rateForMonth([], 2025, 4)).toBeNull()
+  })
+})
+
+describe('rateEntryForMonth', () => {
+  it('選んだ履歴を丸ごと返す (適用開始日・県を捨てない)', () => {
+    const rates = [
+      { effectiveFrom: '2024-04-01', hourlyRate: 1100 },
+      { effectiveFrom: '2025-10-01', hourlyRate: 1200, prefecture: '架空県' },
+    ]
+    expect(rateEntryForMonth(rates, 2025, 4)).toEqual({ effectiveFrom: '2024-04-01', hourlyRate: 1100 })
+    expect(rateEntryForMonth(rates, 2025, 11)).toEqual({ effectiveFrom: '2025-10-01', hourlyRate: 1200, prefecture: '架空県' })
+    expect(rateEntryForMonth(rates, 2024, 3)).toBeNull()
   })
 })
 
@@ -789,9 +802,24 @@ describe('computeWageRow', () => {
     expect(row.minWageDiff).toBe(row.hourlyEquivalent! - 956)
   })
 
+  // Refs #1133: 訴訟準備の給与比較で「計算に使った単価」を適用年月・県つきで出す
+  it('採った単価の適用開始日と県を載せる / 県の無い履歴は県を出さない', () => {
+    const withPref: WageMaster = {
+      drivers: { 9901: { rates: [{ effectiveFrom: '2024-10-05', hourlyRate: 956, prefecture: '架空県' }] } },
+    }
+    const row = computeWageRow(baseSummary, 2025, 4, withPref, MIN_WAGE, DEFAULT_WAGE_CONFIG)
+    expect(row.hourlyRateEffectiveFrom).toBe('2024-10-05')
+    expect(row.hourlyRatePrefecture).toBe('架空県')
+    const noPref = computeWageRow(baseSummary, 2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG)
+    expect(noPref.hourlyRateEffectiveFrom).toBe('2024-04-01')
+    expect('hourlyRatePrefecture' in noPref).toBe(false)
+  })
+
   it('単価マスタに居ない乗務員は金額 null (時間の分類だけ返す)', () => {
     const row = computeWageRow(baseSummary, 2025, 4, { drivers: {} }, MIN_WAGE, DEFAULT_WAGE_CONFIG)
     expect(row.hourlyRate).toBeNull()
+    expect('hourlyRateEffectiveFrom' in row).toBe(false)
+    expect('hourlyRatePrefecture' in row).toBe(false)
     expect(row.amounts).toBeNull()
     expect(row.totalAmount).toBeNull()
     expect(row.hourlyEquivalent).toBeNull()

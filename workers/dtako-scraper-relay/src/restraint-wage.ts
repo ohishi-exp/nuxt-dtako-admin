@@ -439,8 +439,9 @@ function monthAnchor(year: number, month: number): string {
   return `${year}-${String(month).padStart(2, "0")}-01`;
 }
 
-/** 対象月の 1 日に有効な単価 (effectiveFrom <= 月初日 の最新)。無ければ null。 */
-export function rateForMonth(entries: WageRateEntry[], year: number, month: number): number | null {
+/** 対象月の 1 日に有効な単価履歴 (effectiveFrom <= 月初日 の最新)。無ければ null。
+ * 適用開始日・県も要るとき (wage-report の `hourlyRateEffectiveFrom` 等) はこちらを使う。 */
+export function rateEntryForMonth(entries: WageRateEntry[], year: number, month: number): WageRateEntry | null {
   const anchor = monthAnchor(year, month);
   let best: WageRateEntry | null = null;
   for (const e of entries) {
@@ -448,7 +449,12 @@ export function rateForMonth(entries: WageRateEntry[], year: number, month: numb
       best = e;
     }
   }
-  return best ? best.hourlyRate : null;
+  return best;
+}
+
+/** 対象月の 1 日に有効な単価 (effectiveFrom <= 月初日 の最新)。無ければ null。 */
+export function rateForMonth(entries: WageRateEntry[], year: number, month: number): number | null {
+  return rateEntryForMonth(entries, year, month)?.hourlyRate ?? null;
 }
 
 export interface MinWageLookup {
@@ -827,6 +833,11 @@ export interface WageRow {
   branchName: string;
   /** 対象月に有効な基本時間単価。単価マスタに無ければ null (金額列は計算しない)。 */
   hourlyRate: number | null;
+  /** `hourlyRate` を採った単価履歴の適用開始日 ("YYYY-MM-DD")。単価が無ければ付かない
+   * (Refs #1133 — 訴訟準備の給与比較で「計算に使った単価」を適用年月つきで出す)。 */
+  hourlyRateEffectiveFrom?: string;
+  /** `hourlyRate` を採った単価履歴の県 (最低賃金の一括設定で入れた単価だけが持つ)。無ければ付かない。 */
+  hourlyRatePrefecture?: string;
   minutes: WageCategoryMinutes;
   amounts: WageCategoryAmounts | null;
   totalAmount: number | null;
@@ -1061,7 +1072,8 @@ export function computeWageRow(
    * 依存しないフォールバック (`minWage.rate × 係数`) を持つため。 */
   missing = false,
 ): WageRow {
-  const hourlyRate = rateForMonth(wageMaster.drivers[summary.driverCd]?.rates ?? [], year, month);
+  const rateEntry = rateEntryForMonth(wageMaster.drivers[summary.driverCd]?.rates ?? [], year, month);
+  const hourlyRate = rateEntry?.hourlyRate ?? null;
   // 60h 超の係数だけが月で変わる (2023-03 以前は 1.25)。金額を出す 2 か所はこれを使う
   const monthConfig = effectiveConfigForMonth(config, year, month);
   const minutes = classifyMonth(summary.days, year, month, config, prevMonthDays);
@@ -1120,6 +1132,8 @@ export function computeWageRow(
     driverName: summary.driverName,
     branchName: summary.branchName,
     hourlyRate,
+    ...(rateEntry ? { hourlyRateEffectiveFrom: rateEntry.effectiveFrom } : {}),
+    ...(rateEntry?.prefecture ? { hourlyRatePrefecture: rateEntry.prefecture } : {}),
     minutes,
     amounts,
     totalAmount,

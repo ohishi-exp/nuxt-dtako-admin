@@ -6,6 +6,7 @@
       "driverName": "試験　太郎（正常）",
       "branchName": "テスト運輸　第一営業所",
       "hourlyRate": 1400,
+      "hourlyRateEffectiveFrom": "2020-01-01",
       "minutes": {
         "statutory": 9480,
         "overtime": 1200,
@@ -60,6 +61,7 @@
       "driverName": "試験　次郎（時給が最低賃金割れ）",
       "branchName": "テスト運輸　第一営業所",
       "hourlyRate": 900,
+      "hourlyRateEffectiveFrom": "2020-01-01",
       "minutes": {
         "statutory": 9600,
         "overtime": 0,
@@ -114,6 +116,7 @@
       "driverName": "試験　三郎（月60h超の残業代が最低賃金割れ）",
       "branchName": "テスト運輸　第一営業所",
       "hourlyRate": 960,
+      "hourlyRateEffectiveFrom": "2020-01-01",
       "minutes": {
         "statutory": 4800,
         "overtime": 6000,
