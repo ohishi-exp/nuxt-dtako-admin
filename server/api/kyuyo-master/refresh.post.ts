@@ -10,7 +10,8 @@
  * **JWT は cookie (`logi_auth_token`) から組む** (Refs #375、`server/utils/browser-jwt.ts`)。
  */
 import { defineEventHandler, createError } from 'h3'
-import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { fetchKyuyo } from '../../utils/kyuyo-upstream'
 import { resolveBrowserAuthorization } from '../../utils/browser-jwt'
 import { getKyuyoDb, listKyuyoCompanies, upsertKyuyoCompany } from '../../utils/kyuyo-master-db'
 
@@ -33,7 +34,7 @@ export default defineEventHandler(async (event) => {
 
   let upstreamRes: Response
   try {
-    upstreamRes = await fetchIchiban(cfEnv(event), 'api/kyuyo/databases', '', { Authorization: authorization })
+    upstreamRes = await fetchKyuyo(event, 'GET', 'databases', '', authorization)
   }
   catch (e: unknown) {
     const err = e as IchibanUpstreamError

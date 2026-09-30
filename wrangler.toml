@@ -98,6 +98,10 @@ service = "auth-worker"
 binding = "SCRAPER_RELAY"
 service = "nuxt-dtako-admin-scraper-relay"
 
+[[services]]
+binding = "ICHIBAN_KYUYO"
+service = "ichibanboshi-kyuyo"
+
 [vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
@@ -175,6 +179,10 @@ service = "auth-worker-staging"
 binding = "SCRAPER_RELAY"
 service = "nuxt-dtako-admin-scraper-relay-staging"
 
+[[env.staging.services]]
+binding = "ICHIBAN_KYUYO"
+service = "ichibanboshi-kyuyo"
+
 [env.staging.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
@@ -240,6 +248,10 @@ service = "auth-worker-staging"
 [[env.preview.services]]
 binding = "SCRAPER_RELAY"
 service = "nuxt-dtako-admin-scraper-relay-preview"
+
+[[env.preview.services]]
+binding = "ICHIBAN_KYUYO"
+service = "ichibanboshi-kyuyo"
 
 [env.preview.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
@@ -315,6 +327,10 @@ service = "auth-worker"
 [[env.dev.services]]
 binding = "SCRAPER_RELAY"
 service = "nuxt-dtako-admin-scraper-relay-staging"
+
+[[env.dev.services]]
+binding = "ICHIBAN_KYUYO"
+service = "ichibanboshi-kyuyo"
 
 [env.dev.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"

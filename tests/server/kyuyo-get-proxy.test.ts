@@ -154,13 +154,12 @@ describe('kyuyo GET proxy の JWT 解決 (Refs #369, #375)', () => {
       .rejects.toMatchObject({ statusCode: 502 })
   })
 
-  it('path パラメータが無ければ api/kyuyo/ の root に転送する', async () => {
+  it('path パラメータが無ければ allowlist 外 (空 path) で 404、上流を呼ばない', async () => {
     const event = eventWith({ cookies: { logi_auth_token: 'jwt-cookie' } })
     event.context.params = {} as unknown as { path: string }
 
-    await call(event)
-
-    expect(new URL(String(fetchMock.mock.calls[0]![0])).pathname).toBe('/api/kyuyo/')
+    await expect(call(event)).rejects.toMatchObject({ statusCode: 404 })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('upstream が Content-Type を返さなければこちらも付けない', async () => {
