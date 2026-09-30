@@ -775,7 +775,7 @@ const salaryProgress = ref('')
 const salaryLoadingPayMonth = ref<string | null>(null)
 const salaryError = ref('')
 let salaryEpoch = 0
-const SALARY_RETRY = '「給与大臣から読み込む」を押してやり直してください'
+const SALARY_RETRY = '「給与大臣から読み直す」を押してやり直してください'
 
 watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
   salaryEpoch++
@@ -784,6 +784,15 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value
   salaryLoadingPayMonth.value = null
   salaryProgress.value = ''
   salaryError.value = ''
+})
+
+// 給与比較タブを開いたら明細を自動で読む。案件切替の watch (上) が salaryPayroll を空にした後に走らせる
+// (宣言順)。失敗 (salaryError) の後は自動で再試行しない — ボタンで読み直す
+watch(() => [activeTab.value, openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
+  if (activeTab.value === 'salary' && openCase.value && salaryPayroll.value.size === 0
+    && !salaryLoading.value && caseMonths.value.length > 0 && !salaryError.value) {
+    loadSalaryPayroll()
+  }
 })
 
 const salaryRows = computed(() => buildLitigationSalaryRows({
@@ -1470,13 +1479,13 @@ function fmtDateTime(iso: string): string {
           <p class="text-sm text-gray-600 dark:text-gray-400">
             拘束×賃金の給与比較と同じ比べ方で、案件の乗務員 × 月を並べます。明細の実支給 (基本給・残業代・総支給) と、明細の【補助】単価 × 勤務日数・時間外 (拘束は GCP) で出した額の差です (+ は明細の方が多い)。
             明細は支給月 = 勤務月の翌月で合わせます。拘束の材料はエラータブの「検知を実行」で取ったものを使います (未取得の月は比べられません)。
-            明細は「給与大臣から読み込む」で読みます — 保存済みの月はすぐ返り、保存が無い月だけ給与大臣から読んで保存します (1 社 10〜20 秒)。金額と氏名は画面を閉じると消えます。
+            明細はタブを開くと自動で読みます (読み直すときは「給与大臣から読み直す」)。保存済みの月はすぐ返り、保存が無い月だけ給与大臣から読んで保存します (1 社 10〜20 秒)。金額と氏名は画面を閉じると消えます。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
             <UButton
               icon="i-lucide-banknote"
-              label="給与大臣から読み込む"
+              label="給与大臣から読み直す"
               :loading="salaryLoading"
               :disabled="salaryLoading || caseMonths.length === 0"
               data-testid="litigation-salary-load"

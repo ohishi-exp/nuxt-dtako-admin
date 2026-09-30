@@ -103,7 +103,7 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
         continue
       }
       if (!pay) {
-        out.push({ ...base, state: 'pending', message: '給与明細が未読込 — 「給与大臣から読み込む」' })
+        out.push({ ...base, state: 'pending', message: '給与明細が未読込 (給与比較タブを開くと自動で読みます)' })
         continue
       }
       if (!pay.ok) {
