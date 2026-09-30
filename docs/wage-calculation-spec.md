@@ -44,7 +44,7 @@ Refs #244 (時間給計算の導入), #253 (給与比較・最低賃金), #268 (
 | 法定休日 (legalHoliday) | 1.35 | |
 | 法定休日深夜 (legalHolidayNight) | 1.6 | |
 | 週40超過 (weekly40Excess) | 1.25 | 対象時間は法定内から控除済み (§5、二重計上なし) |
-| 月60h超過 (overtimeOver60h) | 1.5 | 最低賃金ベース残業代 **と単価マスタ換算の両方** (§6) |
+| 月60h超過 (overtimeOver60h) | 1.5 (**2023-03 以前の月は 1.25**) | 最低賃金ベース残業代 **と単価マスタ換算の両方** (§6) |
 
 ## 4. 日別分類ルール
 
@@ -108,7 +108,16 @@ Refs #244 (時間給計算の導入), #253 (給与比較・最低賃金), #268 (
 (computeWageAmounts → amounts / totalAmount / actualOvertimePay / actualNightOvertimePay)
 の**両方**に適用している (単価マスタ側は Refs #670 で後から入れた)。
 
-**代替休暇 (労基法37条3項) は運用していないため、60h 超は全額 1.5 倍で計上する**
+**中小企業の適用猶予: 1.5 倍になるのは 2023-04 の勤務月から。2023-03 以前の月は 60h 超も
+1.25 倍のまま** (`OVERTIME_OVER60H_EFFECTIVE_FROM = '2023-04'`)。境界は relay
+(`workers/dtako-scraper-relay/src/restraint-wage.ts`) と front (`app/utils/restraint-wage-view.ts`)
+に**同名同値で 2 か所**置く (worker から app を import できないため)。relay は `computeWageRow` が
+月から実効の設定 (`overtimeOver60h` を `overtime` に揃えたもの) を作って
+`computeWageAmounts` / `splitMinWageOvertimePay` に渡す。係数の設定値そのものは変えない。
+front は `computeOvertimePayAtRate` / `compareSalaryMonth` が勤務月を必須で受け取り、
+`isMonthlyOvertimeOver60h` (橙) も猶予期間の月は false を返す。
+
+**代替休暇 (労基法37条3項) は運用していないため、60h 超は (適用月では) 全額 1.5 倍で計上する**
 (オーナー確認 2026-08-26)。運用していないものを分岐で用意すると死に分岐になり、
 「運用しているのかもしれない」と次に読む人を迷わせるので、その分岐は置かない。
 

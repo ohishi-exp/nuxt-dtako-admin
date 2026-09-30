@@ -14,6 +14,7 @@
  */
 
 import type { WageReportRow } from './restraint-wage-view'
+import { isOver60hPremiumMonth } from './restraint-wage-view'
 
 /**
  * 支給項目の区分 (Refs #278)。法令上の除外集合は 2 軸で別物のため、
@@ -685,11 +686,15 @@ const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
  * worker の computeMinWageOvertimePay と同一ロジック — 時間外軸 (月60hまで
  * 1.25倍・超過分1.5倍) と深夜軸 (常時+0.25倍) の独立加算。係数は既定値固定
  * (rate に給与明細由来の基礎単価を渡すため、ブラウザ内で完結して計算する)。
+ * 60h 超の 1.5 倍は `month` (勤務月 `YYYY-MM`) が 2023-04 以降のときだけ。
+ * 猶予期間 (〜2023-03) は 60h 超も 1.25 倍 (`OVERTIME_OVER60H_EFFECTIVE_FROM`)。
  *
+ * @param month 勤務月 `YYYY-MM` (必須。渡し漏れを型検査で捕まえる)
  * @param overtimeMinutes 時間外 + 時間外深夜 + 週40超過 の合計 (分、月60h判定の対象)
  * @param overtimeNightMinutes うち時間外深夜 (分、深夜加算 0.25 の対象)
  */
 export function computeOvertimePayAtRate(
+  month: string,
   overtimeMinutes: number,
   overtimeNightMinutes: number,
   rate: number,
@@ -698,7 +703,7 @@ export function computeOvertimePayAtRate(
   const over = Math.max(0, overtimeMinutes - MONTHLY_OVERTIME_THRESHOLD_MINUTES)
   return Math.round(
     (under / 60) * rate * 1.25
-    + (over / 60) * rate * 1.5
+    + (over / 60) * rate * (isOver60hPremiumMonth(month) ? 1.5 : 1.25)
     + (overtimeNightMinutes / 60) * rate * 0.25,
   )
 }
@@ -808,6 +813,8 @@ export function compareSalaryMonth(
   csvRows: SalaryCsvRow[],
   reportRows: WageReportRow[],
   config: SalaryItemConfig,
+  /** 勤務月 `YYYY-MM` (必須。60h 超の割増率が月で変わる)。明細の月ではなく**勤務月**。 */
+  month: string,
   cdMap: SalaryCdMap = { entries: {} },
 ): SalaryComparison {
   const warnings: string[] = []
@@ -932,7 +939,7 @@ export function compareSalaryMonth(
       ? sums.premiumBase.total / (statutoryMinutes / 60)
       : null
     const baseRateOvertimePay = baseRateActual !== null
-      ? computeOvertimePayAtRate(minWageOvertimeMinutes, report.wage.nightOvertimeMinutes, baseRateActual)
+      ? computeOvertimePayAtRate(month, minWageOvertimeMinutes, report.wage.nightOvertimeMinutes, baseRateActual)
       : null
 
     rows.push({

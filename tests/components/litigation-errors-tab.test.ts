@@ -78,6 +78,7 @@ let febOnpremOpeNos: string[] = []
 let storedItems: unknown[] = []
 /** 給与大臣の payroll を 403 にする */
 let payrollForbidden = false
+let payrollOvertimePay = 30000
 /** 保存済みの結果の読み込み (GET litigation-checks) を失敗させる / 解けるまで待たせる */
 let storeGetFails = false
 let storeGetGate: Promise<void> | null = null
@@ -186,7 +187,7 @@ function stubDollarFetch() {
         database: 'KYDATA0200_125C',
         rows: [{
           employee_code: '0747', employee_code_key: '747', employee_name: '甲野 太郎', pay_date: `${pay}-25`,
-          payments: { 基本給: 200000, 残業手当: 30000 },
+          payments: { 基本給: 200000, 残業手当: payrollOvertimePay },
           base_rate: 10000, overtime_rate: 1500, totals: { soshikyu: 230000 },
         }],
         warnings: [],
@@ -258,6 +259,7 @@ beforeEach(() => {
   })
   storedItems = []
   payrollForbidden = false
+  payrollOvertimePay = 30000
   storeGetFails = false
   storeGetGate = null
   febWageFails = true
@@ -606,6 +608,34 @@ describe('給与比較タブ', () => {
     expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('拘束の材料が取れていない')
     // 給与の書き込み口 (sync) は叩かない
     expect(calls.filter(c => c.url.split('?')[0] === '/api/kyuyo/sync')).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('★ 残業代 (37条) の列: 基礎単価 (基本給 ÷ 法定内時間) × 割増の理論値を、支給と並べて縦に出す。不足 (差が負) は赤く、集計行が数える', async () => {
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    const line = (row: string, key: string) => w.find(`[data-salary-row="${row}"] [data-salary-cell="over37"] [data-salary-line="${key}"]`)
+    // 基本給 200,000 ÷ 法定内 150h = 1,333.33 円/h。残業 10h × 1,333.33 × 1.25 = 16,667。明細の残業 30,000 は上回る
+    expect(line('1078|2025-01', 'rate').text()).toContain('1,333')
+    expect(line('1078|2025-01', 'minutes').text()).toContain('10h00m')
+    expect(line('1078|2025-01', 'theory').text()).toContain('16,667')
+    expect(line('1078|2025-01', 'paid').text()).toContain('30,000')
+    expect(line('1078|2025-01', 'diff37').text()).toContain('+13,333')
+    expect(line('1078|2025-01', 'diff37').classes()).not.toContain('text-red-600')
+    expect(w.find('[data-testid="litigation-salary-shortfall37"]').text()).toBe('37条で不足 0 件')
+    // 比べられない行 (2 月は拘束の材料なし) は列を出さず「-」
+    expect(w.find('[data-salary-row="1078|2025-02"] [data-salary-cell="over37"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('★ 残業代 (37条): 明細の残業代が理論値を下回れば差を赤く出し、集計行が「37条で不足」を数える', async () => {
+    payrollOvertimePay = 10000 // 理論値 16,667 より少ない
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    const diff = w.find('[data-salary-row="1078|2025-01"] [data-salary-line="diff37"]')
+    expect(diff.text()).toContain('-6,667')
+    expect(diff.classes()).toContain('text-red-600')
+    expect(w.find('[data-testid="litigation-salary-shortfall37"]').text()).toBe('37条で不足 1 件')
     w.unmount()
   })
 

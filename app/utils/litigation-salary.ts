@@ -80,9 +80,9 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
       continue
     }
     // 明細の月ラベルは支給日から採る (payrollToParsedSalary) ので、支給月の行だけを使う
-    // (拘束×賃金の salaryMonthRows と同じ絞り方。compareSalaryMonth 自身は月を見ない)
+    // (拘束×賃金の salaryMonthRows と同じ絞り方。compareSalaryMonth の month は 60h 超の割増率用の勤務月)
     const payMonth = nextYm(month)
-    const compared = compareSalaryMonth(pay.value.filter(r => r.month === payMonth), reportRows, input.config, input.cdMap)
+    const compared = compareSalaryMonth(pay.value.filter(r => r.month === payMonth), reportRows, input.config, month, input.cdMap)
     byMonth.set(month, { rows: compared.rows, conflictCds: compared.conflicts.map(c => c.driverCd) })
   }
 

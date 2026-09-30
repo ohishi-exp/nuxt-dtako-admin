@@ -82,7 +82,7 @@ import {
   splitDateRangeByMaxDays,
   type LitigationChangeRow,
 } from '~/utils/litigation-changes'
-import { fmtYen, monthRange, nextYm, type WageReportResponse } from '~/utils/restraint-wage-view'
+import { fmtMinutes, fmtRatePerHour, fmtYen, monthRange, nextYm, type WageReportResponse } from '~/utils/restraint-wage-view'
 import {
   buildLitigationSalaryRows,
   LITIGATION_SALARY_STATE_LABELS,
@@ -843,6 +843,9 @@ const salarySourceCounts = computed(() => {
   return { cache, live }
 })
 const salaryNeedsMaterials = computed(() => salaryRows.value.some(r => r.message.startsWith('拘束の材料が')))
+// 労基法37条 (基礎単価 × 割増) の理論値を、明細の残業代が下回った行の数 (差が負の行)
+const salaryShortfall37Count = computed(() =>
+  salaryRows.value.filter(r => (r.compared?.diffCsvVsBaseRateOvertime ?? 0) < 0).length)
 const salaryCounts = computed(() => {
   const c: Record<LitigationSalaryState, number> = { ok: 0, pending: 0, unknown: 0, noPayroll: 0 }
   for (const r of salaryRows.value) c[r.state]++
@@ -1702,6 +1705,7 @@ function fmtDateTime(iso: string): string {
           <div v-if="salaryError" class="text-sm text-red-600 dark:text-red-400" data-testid="litigation-salary-error">{{ salaryError }}</div>
           <div class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-summary">
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
+            / <span data-testid="litigation-salary-shortfall37">37条で不足 {{ salaryShortfall37Count }} 件</span>
             / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
           </div>
           <div v-if="salaryCounts.noPayroll > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-register">
@@ -1757,6 +1761,7 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium text-right">基本給</th>
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
+                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 法定内時間。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
                   <th class="px-3 py-2 font-medium text-right">勤務日 / 時間外</th>
                 </tr>
               </thead>
@@ -1792,9 +1797,19 @@ function fmtDateTime(iso: string): string {
                       <div class="flex justify-between gap-3" data-salary-line="diff"><span class="text-xs text-gray-500">差</span><span>{{ fmtDiff(cell.diff) }}</span></div>
                       <div v-if="cell.key === 'overtime' && row.compared.overtimeFixed" class="text-xs text-gray-500 text-right">月給 (固定残業) — 差は出さない</div>
                     </td>
+                    <td class="px-3 py-2 whitespace-nowrap tabular-nums" data-salary-cell="over37">
+                      <template v-if="row.compared.baseRateOvertimePay !== null">
+                        <div class="flex justify-between gap-3" data-salary-line="rate"><span class="text-xs text-gray-500">基礎単価</span><span>{{ fmtRatePerHour(row.compared.baseRateActual) }} 円/h</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="minutes"><span class="text-xs text-gray-500">残業時間</span><span>{{ fmtMinutes(row.compared.minWageOvertimeMinutes) }}</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="theory"><span class="text-xs text-gray-500">理論値</span><span>{{ fmtYen(row.compared.baseRateOvertimePay) }}</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="paid"><span class="text-xs text-gray-500">支給</span><span>{{ fmtYen(row.compared.csvOvertime) }}</span></div>
+                        <div class="flex justify-between gap-3" data-salary-line="diff37" :class="(row.compared.diffCsvVsBaseRateOvertime ?? 0) < 0 ? 'text-red-600 font-bold' : ''"><span class="text-xs text-gray-500">差</span><span>{{ fmtDiff(row.compared.diffCsvVsBaseRateOvertime) }}</span></div>
+                      </template>
+                      <div v-else class="text-xs text-gray-500 text-right" data-salary-line="none">- {{ row.compared.statutoryMinutes > 0 ? '(割増の基礎に入る支給が 0)' : '(法定内時間が 0)' }}</div>
+                    </td>
                     <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ row.compared.sysWorkDays }} 日 / {{ Math.round(row.compared.sysOvertimeMinutes / 6) / 10 }} h</td>
                   </template>
-                  <td v-else colspan="4" class="px-3 py-2 text-xs text-gray-400">-</td>
+                  <td v-else colspan="5" class="px-3 py-2 text-xs text-gray-400">-</td>
                 </tr>
               </tbody>
             </table>
