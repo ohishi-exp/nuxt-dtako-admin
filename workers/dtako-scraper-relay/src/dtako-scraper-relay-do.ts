@@ -269,10 +269,15 @@ import {
 } from "./restraint-wage";
 import {
   MHLW_NATIONAL_LIST_URL,
+  MHLW_REVISION_INDEX_URL,
   MinWageImportError,
   PREFECTURES,
+  findRevisionXlsxHref,
   mergeMinWageRows,
   parseMhlwNationalList,
+  parseMhlwRevisionHistory,
+  readXlsxParts,
+  type MinWageImportRow,
 } from "./min-wage-import";
 import { branchByDriverCdAt, buildBranchGroups, resolveBranchPrefecture } from "./branch-prefecture";
 import {
@@ -4842,45 +4847,37 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
 
     let pastedHtml: string | null = null;
+    let history = false;
     if ((request.headers.get("content-type") ?? "").includes("application/json")) {
       try {
-        const body = (await request.json()) as { html?: unknown };
+        const body = (await request.json()) as { html?: unknown; source?: unknown };
         if (typeof body?.html === "string" && body.html.trim() !== "") pastedHtml = body.html;
+        if (body?.source !== undefined && body.source !== "history") {
+          return dvrJsonError(400, `source は "history" のみ指定できます`);
+        }
+        history = body?.source === "history";
       } catch {
         return dvrJsonError(400, "JSON body が不正です");
       }
     }
-
-    let html: string;
-    let source: string;
-    if (pastedHtml !== null) {
-      html = pastedHtml;
-      source = "paste";
-    } else {
-      source = MHLW_NATIONAL_LIST_URL;
-      let res: Response;
-      try {
-        res = await fetch(MHLW_NATIONAL_LIST_URL, {
-          headers: { "User-Agent": "nuxt-dtako-admin/min-wage-import (+https://dtako.ippoan.org)" },
-        });
-      } catch (err) {
-        return dvrJsonError(
-          502,
-          `厚労省サイトへ接続できませんでした (${describeUnknownError(err)})。ページのソースを貼り付けて取り込むこともできます`,
-        );
-      }
-      if (!res.ok) {
-        return dvrJsonError(502, `厚労省サイトが ${res.status} を返しました (${source})`);
-      }
-      html = await res.text();
+    if (history && pastedHtml !== null) {
+      return dvrJsonError(400, "source と html は同時に指定できません");
     }
 
-    let rows;
-    try {
-      rows = parseMhlwNationalList(html);
-    } catch (err) {
-      if (err instanceof MinWageImportError) return dvrJsonError(400, err.message);
-      throw err;
+    let rows: MinWageImportRow[];
+    let source: string;
+    let years: { from: string; to: string } | undefined;
+    if (history) {
+      const fetched = await this.fetchMhlwRevisionHistory();
+      if (fetched instanceof Response) return fetched;
+      rows = fetched.rows;
+      years = fetched.years;
+      source = "mhlw-history";
+    } else {
+      const parsed = await this.loadMinWageNationalList(pastedHtml);
+      if (parsed instanceof Response) return parsed;
+      rows = parsed.rows;
+      source = parsed.source;
     }
 
     const paths = this.wageMasterR2Paths(record.compId, "min-wage");
@@ -4910,6 +4907,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       saved: true,
       changed: result.changed,
       source,
+      ...(years ? { years } : {}),
       prefectures: rows.length,
       added: merged.added,
       updated: merged.updated,
@@ -4917,6 +4915,65 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       data: merged.master,
       version: result.sha256,
     });
+  }
+
+  /** 全国一覧 HTML (貼り付け or 取得) を解析する。失敗は Response (502/400) で返す。 */
+  private async loadMinWageNationalList(
+    pastedHtml: string | null,
+  ): Promise<{ rows: MinWageImportRow[]; source: string } | Response> {
+    let html: string;
+    let source: string;
+    if (pastedHtml !== null) {
+      html = pastedHtml;
+      source = "paste";
+    } else {
+      source = MHLW_NATIONAL_LIST_URL;
+      const got = await this.fetchMhlw(MHLW_NATIONAL_LIST_URL, "全国一覧");
+      if ("fail" in got) return got.fail;
+      html = await got.res.text();
+    }
+    try {
+      return { rows: parseMhlwNationalList(html), source };
+    } catch (err) {
+      if (err instanceof MinWageImportError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * 厚労省の一覧ページから「改定状況」xlsx を辿り、平成14年度からの全履歴を読む。
+   * fetch の失敗は 502、リンク・zip・シートの解析失敗は MinWageImportError → 400。
+   */
+  private async fetchMhlwRevisionHistory(): Promise<
+    { rows: MinWageImportRow[]; years: { from: string; to: string } } | Response
+  > {
+    const index = await this.fetchMhlw(MHLW_REVISION_INDEX_URL, "一覧ページ");
+    if ("fail" in index) return index.fail;
+    try {
+      const href = findRevisionXlsxHref(await index.res.text(), MHLW_REVISION_INDEX_URL);
+      const xlsx = await this.fetchMhlw(href, "改定状況 xlsx");
+      if ("fail" in xlsx) return xlsx.fail;
+      const { sheetXml, sharedStringsXml } = await readXlsxParts(await xlsx.res.arrayBuffer());
+      return parseMhlwRevisionHistory(sheetXml, sharedStringsXml);
+    } catch (err) {
+      if (err instanceof MinWageImportError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+  }
+
+  /** 厚労省サイトへの GET (Workers の fetch は UA を送らないので明示する)。失敗は 502。 */
+  private async fetchMhlw(url: string, what: string): Promise<{ res: Response } | { fail: Response }> {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { "User-Agent": "nuxt-dtako-admin/min-wage-import (+https://dtako.ippoan.org)" },
+      });
+    } catch (err) {
+      const message = `厚労省サイトへ接続できませんでした (${what}: ${describeUnknownError(err)})。全国一覧はページのソースを貼り付けて取り込むこともできます`;
+      return { fail: dvrJsonError(502, message) };
+    }
+    if (!res.ok) return { fail: dvrJsonError(502, `厚労省サイトが ${res.status} を返しました (${what}: ${url})`) };
+    return { res };
   }
 
   /**
