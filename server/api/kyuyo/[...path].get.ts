@@ -56,7 +56,8 @@
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
-import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { fetchKyuyo } from '../../utils/kyuyo-upstream'
 import { resolveBrowserAuthorization } from '../../utils/browser-jwt'
 
 export default defineEventHandler(async (event: H3Event) => {
@@ -67,11 +68,10 @@ export default defineEventHandler(async (event: H3Event) => {
   if (!authorization) {
     throw createError({ statusCode: 401, statusMessage: 'ログインが必要です (認証 cookie が届いていません)' })
   }
-  const extraHeaders: Record<string, string> = { Authorization: authorization }
 
   let upstreamRes: Response
   try {
-    upstreamRes = await fetchIchiban(env, `api/kyuyo/${pathParam}`, getRequestURL(event).search, extraHeaders)
+    upstreamRes = await fetchKyuyo(event, 'GET', pathParam, getRequestURL(event).search, authorization)
   }
   catch (e: unknown) {
     const err = e as IchibanUpstreamError

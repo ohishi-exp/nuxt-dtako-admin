@@ -15,7 +15,7 @@ function eventWith(
     devLogin?: boolean
   } = {},
 ) {
-  const path = opts.path ?? 'wage-snapshot'
+  const path = opts.path ?? 'sync'
   const url = opts.url ?? `https://dtako.ippoan.org/api/kyuyo/${path}`
   return {
     context: {
@@ -84,7 +84,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     expect(event.__statusCode).toBe(200)
     expect(event.__responseHeaders['Content-Type']).toBe('application/json')
     const [url, init] = fetchMock.mock.calls[0]!
-    expect(String(url)).toBe('https://rust-ichiban.mtamaramu.com/api/kyuyo/wage-snapshot')
+    expect(String(url)).toBe('https://rust-ichiban.mtamaramu.com/api/kyuyo/sync')
     expect(init.method).toBe('POST')
     expect(init.body).toBe('{"month":"2026-01","rows":[]}')
     expect(init.headers['CF-Access-Client-Id']).toBe('client-id-x')
@@ -217,14 +217,12 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
    * path 欠落 / body が文字列でない / Content-Type 無しの 3 arm が未通過だった。
    * **本番コードは 1 行も足していない** — 既に在る枝を通しただけ。
    */
-  it('path パラメータが無ければ api/kyuyo/ の root に転送する', async () => {
-    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
+  it('path パラメータが無ければ allowlist 外 (空 path) で 404、上流を呼ばない', async () => {
     const event = eventWith(ENV, { cookies: { logi_auth_token: 'jwt-cookie' } })
     event.context.params = {} as unknown as { path: string }
 
-    await call(event)
-
-    expect(new URL(String(fetchMock.mock.calls[0]![0])).pathname).toBe('/api/kyuyo/')
+    await expect(call(event)).rejects.toMatchObject({ statusCode: 404 })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   /** `readRawBody` は body 無しのとき `undefined` を返しうる。**空文字に倒して転送する**
