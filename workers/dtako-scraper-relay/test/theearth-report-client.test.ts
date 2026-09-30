@@ -1860,7 +1860,7 @@ function reportRowHtml(row: number, v: {
     <span id="${id("lblVehicleCD")}">6572</span>
     <span id="${id("lblVehicleName")}">佐賀100あ6572</span>
     <span id="${id("lblDriverCD1")}">1405</span>
-    <span id="${id("lblDriverName1")}">松尾　等</span>
+    <span id="${id("lblDriverName1")}">丙野　三郎</span>
     <span id="${id("lblWorkStartDateTime")}">07/01 07:50</span>
     <span id="${id("lblWorkEndDateTime")}">${v.workEndDateTime ?? "07/01 18:00"}</span>
     <span id="${id("lblOperationStartDateTime")}">07/01 08:00</span>

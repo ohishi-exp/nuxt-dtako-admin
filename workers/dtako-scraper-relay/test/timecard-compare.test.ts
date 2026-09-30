@@ -1272,7 +1272,7 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.residualMinutes).toBe(-1);
   });
 
-  it("フェリーと日跨ぎ始業の頭が併発した日も説明が付く (1029 冨田 03-18 の形)", () => {
+  it("フェリーと日跨ぎ始業の頭が併発した日も説明が付く (1029 己野 03-18 の形)", () => {
     // -89 = -ferry 84 - 頭 5
     const d = compareTimecardMonth({
       month: "2026-03",

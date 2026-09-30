@@ -164,15 +164,15 @@ describe('parseDriverMasterPage', () => {
     const page = parseDriverMasterPage(
       listPage({
         rows: [
-          { cd: '1009', name: '大石 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' },
-          { cd: '1078', name: '大石 二郎', retiredOn: '2025/03/31', classification4: '999:退職' },
+          { cd: '1009', name: '丁野 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' },
+          { cd: '1078', name: '丁野 二郎', retiredOn: '2025/03/31', classification4: '999:退職' },
         ],
       }),
     )
     expect(page.rows).toEqual([
       {
         driverCd: '1009',
-        name: '大石 一郎',
+        name: '丁野 一郎',
         retiredOn: '',
         classification4: '001:正社員',
         licenseIssuedOn: '2021/04/01',
@@ -180,7 +180,7 @@ describe('parseDriverMasterPage', () => {
       },
       {
         driverCd: '1078',
-        name: '大石 二郎',
+        name: '丁野 二郎',
         retiredOn: '2025/03/31',
         classification4: '999:退職',
         licenseIssuedOn: '',
@@ -199,7 +199,7 @@ describe('parseDriverMasterPage', () => {
       '<tr><td>&nbsp;</td><td><span id="lstMain_LabelValue90_0">a</span></td>' +
       '<td><span id="lstMain_LabelValue91_0">b</span></td>' +
       '<td><span id="lstMain_LabelValue1_0">1009</span></td>' +
-      '<td><span id="lstMain_LabelValue2_0">大石 一郎</span></td>' +
+      '<td><span id="lstMain_LabelValue2_0">丁野 一郎</span></td>' +
       '<td><span id="lstMain_LabelValue21_0">第一種大型</span></td>' +
       '<td><span id="lstMain_LabelValue12_0"></span></td>' +
       '<td><span id="lstMain_LabelValue13_0">001:正社員</span></td>' +
@@ -211,7 +211,7 @@ describe('parseDriverMasterPage', () => {
     expect(page.rows).toEqual([
       {
         driverCd: '1009',
-        name: '大石 一郎',
+        name: '丁野 一郎',
         retiredOn: '',
         classification4: '001:正社員',
         licenseIssuedOn: '2021/04/01',
@@ -226,12 +226,12 @@ describe('parseDriverMasterPage', () => {
         extraRows:
           '<tr><td>&nbsp;</td>' +
           '<td><span id="lstMain_LabelValue1_0"><b>1009</b></span></td>' +
-          '<td><span id="lstMain_LabelValue2_0">&nbsp;大石&amp;三郎&#39;s&nbsp;</span></td>' +
+          '<td><span id="lstMain_LabelValue2_0">&nbsp;丁野&amp;三郎&#39;s&nbsp;</span></td>' +
           '<td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>',
       }),
     )
     expect(page.rows[0].driverCd).toBe('1009')
-    expect(page.rows[0].name).toBe("大石&三郎's")
+    expect(page.rows[0].name).toBe("丁野&三郎's")
   })
 
   it('header に無い列は空文字になる', () => {
@@ -240,12 +240,12 @@ describe('parseDriverMasterPage', () => {
         headerRow: '<tr><th>&nbsp;</th><th>乗務員CD</th><th>乗務員名</th></tr>',
         extraRows:
           '<tr><td>&nbsp;</td><td><span id="lstMain_LabelValue1_0">1009</span></td>' +
-          '<td><span id="lstMain_LabelValue2_0">大石 一郎</span></td></tr>',
+          '<td><span id="lstMain_LabelValue2_0">丁野 一郎</span></td></tr>',
       }),
     )
     expect(page.rows[0]).toEqual({
       driverCd: '1009',
-      name: '大石 一郎',
+      name: '丁野 一郎',
       retiredOn: '',
       classification4: '',
       licenseIssuedOn: '',
@@ -258,7 +258,7 @@ describe('parseDriverMasterPage', () => {
       listPage({
         extraRows:
           '<tr><td>&nbsp;</td><td><span id="lstMain_LabelValue1_0">1009</span></td>' +
-          '<td><span id="lstMain_LabelValue2_0">大石 一郎</span></td></tr>',
+          '<td><span id="lstMain_LabelValue2_0">丁野 一郎</span></td></tr>',
       }),
     )
     expect(page.rows[0].licenseExpiresOn).toBe('')
@@ -268,7 +268,7 @@ describe('parseDriverMasterPage', () => {
     const page = parseDriverMasterPage(
       listPage({
         headerRow: '<tr><th>乗務員名</th><th>備考</th></tr>',
-        rows: [{ cd: '1009', name: '大石 一郎' }],
+        rows: [{ cd: '1009', name: '丁野 一郎' }],
       }),
     )
     expect(page.rows).toEqual([])
@@ -281,7 +281,7 @@ describe('parseDriverMasterPage', () => {
           '<tr><th>&nbsp;</th><th>乗務員CD</th><th>乗務員名</th><th>&nbsp;</th><th>乗務員CD</th></tr>',
         extraRows:
           '<tr><td>&nbsp;</td><td><span id="lstMain_LabelValue1_0">1009</span></td>' +
-          '<td><span id="lstMain_LabelValue2_0">大石 一郎</span></td>' +
+          '<td><span id="lstMain_LabelValue2_0">丁野 一郎</span></td>' +
           '<td>&nbsp;</td><td><span id="lstMain_LabelValue99_0">9999</span></td></tr>',
       }),
     )
@@ -352,7 +352,7 @@ describe('toIsoDate', () => {
 function row(overrides: Partial<DriverMasterRow> = {}): DriverMasterRow {
   return {
     driverCd: '1009',
-    name: '大石 一郎',
+    name: '丁野 一郎',
     retiredOn: '',
     classification4: '001:正社員',
     licenseIssuedOn: '2021/04/01',
@@ -380,7 +380,7 @@ describe('toUpsertItems', () => {
     expect(toUpsertItems([row()])).toEqual([
       {
         code: '1009',
-        name: '大石 一郎',
+        name: '丁野 一郎',
         nfc_id: '2021040120260520',
         license_issue_date: '2021-04-01',
         license_expiry_date: '2026-05-20',
@@ -435,7 +435,7 @@ describe('toUpsertItems', () => {
 
   it('免許証番号は items に 1 度も現れない (読まない列)', () => {
     const page = parseDriverMasterPage(
-      listPage({ rows: [{ cd: '1009', name: '大石 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' }] }),
+      listPage({ rows: [{ cd: '1009', name: '丁野 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' }] }),
     )
     expect(JSON.stringify(toUpsertItems(page.rows))).not.toContain('第一種大型')
   })
@@ -520,7 +520,7 @@ describe('fetchDriverMaster', () => {
       sequenceFetch(
         [
           html(listPage({})),
-          html(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], rowCountSelected: '30' })),
+          html(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], rowCountSelected: '30' })),
         ],
         captured,
       ),
@@ -773,7 +773,7 @@ describe('mergeUpsertResults', () => {
 
 describe('describeDriverMasterStructure', () => {
   it('見出しが読めた一覧は「検出」で、引けない列が無いことまで出る', () => {
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }))
     expect(out).toContain('見出し=検出')
     expect(out).toContain('引けない列=[]')
     expect(out).toContain('データ行=1')
@@ -782,7 +782,7 @@ describe('describeDriverMasterStructure', () => {
   it('見出しが 1 つも当たらなければ「未検出」で、実物のラベルが出る', () => {
     // 列名は個人データではないので、実物をそのまま出して差を見えるようにする。
     const renamed = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>社員番号</th>')
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: renamed }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: renamed }))
     expect(out).toContain('見出し=未検出')
     expect(out).toContain('社員番号')
     expect(out).toContain('乗務員名')
@@ -791,15 +791,15 @@ describe('describeDriverMasterStructure', () => {
   it('★ 切り詰められても原因が読めるよう、見出しの検出可否と実物のラベルが先頭に来る', () => {
     // 呼び出し元 (driver-master-run.ts) が本文を切るので、並び順が診断の可否を決める。
     // 2026-09-02 は `引けない列=[乗務員CD,乗` で切れ、見出しラベルが落ちた。
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }))
     // 先頭は「どの経路で列を引けたか」— これが読めれば直し方が決まる。
     expect(out.startsWith('列定義から引けた列=')).toBe(true)
     expect(out.indexOf('見出し候補=')).toBeLessThan(out.indexOf('title='))
   })
 
   it('★ 乗務員の行の中身は 1 文字も出さない (見出し行だけを引用する)', () => {
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
-    expect(out).not.toContain('大石 一郎')
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }))
+    expect(out).not.toContain('丁野 一郎')
     expect(out).not.toContain('1009')
   })
 
@@ -823,8 +823,8 @@ describe('fetchDriverMaster — 行数変更と 0 行の扱い', () => {
         html(
           listPage({
             rows: [
-              { cd: '1009', name: '大石 一郎' },
-              { cd: '1010', name: '大石 二郎' },
+              { cd: '1009', name: '丁野 一郎' },
+              { cd: '1010', name: '丁野 二郎' },
             ],
             withRowCountButton: true,
           }),
@@ -863,7 +863,7 @@ describe('fetchDriverMaster — 行数変更と 0 行の扱い', () => {
 })
 
 describe('見出しの表記ゆれ (2026-09-02 の 見出し=未検出)', () => {
-  const row = [{ cd: '1009', name: '大石 一郎' }]
+  const row = [{ cd: '1009', name: '丁野 一郎' }]
 
   it('★ 全角の見出し (乗務員ＣＤ) でも引ける', () => {
     const header = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>乗務員ＣＤ</th>')
@@ -878,7 +878,7 @@ describe('見出しの表記ゆれ (2026-09-02 の 見出し=未検出)', () => 
       '<th> 有効期限 </th>',
     )
     const page = parseDriverMasterPage(
-      listPage({ rows: [{ cd: '1009', name: '大石 一郎', expiresOn: '2026/05/20' }], headerRow: header }),
+      listPage({ rows: [{ cd: '1009', name: '丁野 一郎', expiresOn: '2026/05/20' }], headerRow: header }),
     )
     expect(page.rows).toHaveLength(1)
     expect(page.rows[0]!.driverCd).toBe('1009')
@@ -888,7 +888,7 @@ describe('見出しの表記ゆれ (2026-09-02 の 見出し=未検出)', () => 
   it('全角の分類列 (乗務員分類４) も引けて、退職判定が効く', () => {
     const header = HEADER_ROW.replace('<th>乗務員分類4</th>', '<th>乗務員分類４</th>')
     const page = parseDriverMasterPage(
-      listPage({ rows: [{ cd: '1009', name: '大石 一郎', classification4: '999:退職' }], headerRow: header }),
+      listPage({ rows: [{ cd: '1009', name: '丁野 一郎', classification4: '999:退職' }], headerRow: header }),
     )
     expect(page.rows).toHaveLength(1)
     expect(isRetiredDriver(page.rows[0]!)).toBe(true)
@@ -896,7 +896,7 @@ describe('見出しの表記ゆれ (2026-09-02 の 見出し=未検出)', () => 
 
   it('★ 見出しの正規化は値には掛からない (乗務員CD の全角はそのまま渡す)', () => {
     // 値を正規化すると alc 側のキーが静かに変わる。緩めるのは照合だけ。
-    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '１００９', name: '大石 一郎' }] }))
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '１００９', name: '丁野 一郎' }] }))
     expect(page.rows[0]!.driverCd).toBe('１００９')
   })
 })
@@ -919,13 +919,13 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
   it('★ 並べ替えボタンの value を見出しとして引ける', () => {
     const page = parseDriverMasterPage(
       listPage({
-        rows: [{ cd: '1009', name: '大石 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' }],
+        rows: [{ cd: '1009', name: '丁野 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' }],
         headerRow: buttonHeader,
       }),
     )
     expect(page.rows).toHaveLength(1)
     expect(page.rows[0]!.driverCd).toBe('1009')
-    expect(page.rows[0]!.name).toBe('大石 一郎')
+    expect(page.rows[0]!.name).toBe('丁野 一郎')
     expect(page.rows[0]!.licenseIssuedOn).toBe('2021/04/01')
     expect(page.rows[0]!.licenseExpiresOn).toBe('2026/05/20')
   })
@@ -935,7 +935,7 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
       '<input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" />',
       '<img src="h.gif" alt="乗務員CD" />',
     )
-    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: header }))
     expect(page.rows[0]!.driverCd).toBe('1009')
   })
 
@@ -951,10 +951,10 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
         '<input type="submit" name="ctl00$lstMain$s2" value="乗務員名" />',
         `<img src="a.gif" alt="" /><img src="b.gif" alt='乗務員名' />`,
       )
-    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: header }))
     expect(page.rows).toHaveLength(1)
     expect(page.rows[0]!.driverCd).toBe('1009')
-    expect(page.rows[0]!.name).toBe('大石 一郎')
+    expect(page.rows[0]!.name).toBe('丁野 一郎')
   })
 
   it('★ hidden / text の value は拾わない (__VIEWSTATE や入力済みの値を見出しにしない)', () => {
@@ -963,9 +963,9 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
       '<input type="hidden" name="__VIEWSTATE" value="VS-JUNK" /><input type="text" value="入力中" />',
     )
     // 乗務員CD が引けないので見出し行として成立しない = 0 行 (junk を列名にしない)
-    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: header }))
     expect(page.rows).toHaveLength(0)
-    expect(describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header })))
+    expect(describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: header })))
       .not.toContain('VS-JUNK')
   })
 
@@ -974,13 +974,13 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
       '<th><input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" /></th>',
       '<th>乗務員CD<input type="submit" value="並べ替え" /></th>',
     )
-    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: header }))
     expect(page.rows[0]!.driverCd).toBe('1009')
   })
 
   it('★ 見出し候補は非空セルが多い行から 3 本出す (フォーム行 1 つで埋めない)', () => {
     // 実機は先頭に「事業所」1 セルだけの行が居て、それだけが出て詰まった。
-    const page = listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: buttonHeader })
+    const page = listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: buttonHeader })
     const withFormRow = page.replace('<table id="lstMain_itemPlaceholderContainer">', '<table><tr><td>事業所</td></tr></table><table id="lstMain_itemPlaceholderContainer">')
     const out = describeDriverMasterStructure(withFormRow)
     expect(out).toContain('乗務員CD')
@@ -990,21 +990,21 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
 
 describe('ラベル位置の要約', () => {
   it('見出しが在れば囲んでいる開始タグを出す (乗務員の値は出さない)', () => {
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }))
     expect(out).toContain('ラベル位置=[')
     expect(out).toContain('乗務員CD=<th')
-    expect(out).not.toContain('大石 一郎')
+    expect(out).not.toContain('丁野 一郎')
   })
 
   it('★ ラベルが HTML に無ければ「無」と言う (読めないのか書かれていないのかを分ける)', () => {
     const header = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>社員番号</th>')
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }], headerRow: header }))
     expect(out).toContain('乗務員CD=無')
     expect(out).toContain('乗務員名=<th')
   })
 
   it('データ 1 行目のセル数を出す (入れ子で行が切れていれば実列数と合わない)', () => {
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }))
     expect(out).toContain('1行目のセル数=8')
   })
 
@@ -1043,7 +1043,7 @@ describe('extractGridSpec', () => {
   })
 
   it('構造要約の末尾に列定義が載る (切られたら最初に落ちる位置)', () => {
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }))
     expect(out).toContain('列定義=無')
     expect(out.indexOf('列定義=')).toBeGreaterThan(out.indexOf('見出し候補='))
   })
@@ -1099,12 +1099,12 @@ describe('列定義で引く経路 (実機 F-MMS0320)', () => {
 
   it('★ 見出しの日本語が 1 つも無くても、列定義の番号で値を引ける', () => {
     const page = parseDriverMasterPage(
-      specPage([{ cd: '1009', name: '大石 一郎', issued: '2021/04/01', expires: '2026/05/20' }]),
+      specPage([{ cd: '1009', name: '丁野 一郎', issued: '2021/04/01', expires: '2026/05/20' }]),
     )
     expect(page.rows).toHaveLength(1)
     expect(page.rows[0]).toEqual({
       driverCd: '1009',
-      name: '大石 一郎',
+      name: '丁野 一郎',
       retiredOn: '',
       classification4: '001:正社員',
       licenseIssuedOn: '2021/04/01',
@@ -1114,13 +1114,13 @@ describe('列定義で引く経路 (実機 F-MMS0320)', () => {
 
   it('★ 列定義の番号で引くので、セルの並び順が変わっても当たる', () => {
     // 位置で引いていたら、この並べ替えで別の列を読む。
-    const shuffled = specPage([{ cd: '1009', name: '大石 一郎', expires: '2026/05/20' }]).replace(
-      '<td><span id="lstMain_LabelValue1_0">1009</span></td><td><span id="lstMain_LabelValue2_0">大石 一郎</span></td>',
-      '<td><span id="lstMain_LabelValue2_0">大石 一郎</span></td><td><span id="lstMain_LabelValue1_0">1009</span></td>',
+    const shuffled = specPage([{ cd: '1009', name: '丁野 一郎', expires: '2026/05/20' }]).replace(
+      '<td><span id="lstMain_LabelValue1_0">1009</span></td><td><span id="lstMain_LabelValue2_0">丁野 一郎</span></td>',
+      '<td><span id="lstMain_LabelValue2_0">丁野 一郎</span></td><td><span id="lstMain_LabelValue1_0">1009</span></td>',
     )
     const page = parseDriverMasterPage(shuffled)
     expect(page.rows[0]!.driverCd).toBe('1009')
-    expect(page.rows[0]!.name).toBe('大石 一郎')
+    expect(page.rows[0]!.name).toBe('丁野 一郎')
   })
 
   it('退職者は列定義経由でも判定できる (退職年月日 / 分類4)', () => {
@@ -1132,24 +1132,24 @@ describe('列定義で引く経路 (実機 F-MMS0320)', () => {
 
   it('列定義に無い列は空文字 (捏造しない)', () => {
     const page = parseDriverMasterPage(
-      specPage([{ cd: '1009', name: '大石 一郎' }]).replace('IssuanceDate:22:0:datetime:::::10::1:left::交付年月日:95,', ''),
+      specPage([{ cd: '1009', name: '丁野 一郎' }]).replace('IssuanceDate:22:0:datetime:::::10::1:left::交付年月日:95,', ''),
     )
     expect(page.rows[0]!.licenseIssuedOn).toBe('')
     expect(page.rows[0]!.driverCd).toBe('1009')
   })
 
   it('壊れた列定義の要素は飛ばす (列番号が数字でない / ラベルが空)', () => {
-    const broken = specPage([{ cd: '1009', name: '大石 一郎' }]).replace(
+    const broken = specPage([{ cd: '1009', name: '丁野 一郎' }]).replace(
       'BranchCD:5:0:int',
       'BranchCD:xx:0:int',
     )
     expect(parseDriverMasterPage(broken).rows[0]!.driverCd).toBe('1009')
-    const shortEntry = specPage([{ cd: '1009', name: '大石 一郎' }]).replace('DriverCD:1:', 'zz,DriverCD:1:')
+    const shortEntry = specPage([{ cd: '1009', name: '丁野 一郎' }]).replace('DriverCD:1:', 'zz,DriverCD:1:')
     expect(parseDriverMasterPage(shortEntry).rows[0]!.driverCd).toBe('1009')
   })
 
   it('PageLoad はあるが列が 1 つも読めなければ見出し経路に落ちる', () => {
-    const page = listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }).replace(
+    const page = listPage({ rows: [{ cd: '1009', name: '丁野 一郎' }] }).replace(
       '<form>',
       `<form><script>//<![CDATA[\nPageLoad('MMS0320', '::')\n//]]></script>`,
     )
@@ -1158,7 +1158,7 @@ describe('列定義で引く経路 (実機 F-MMS0320)', () => {
 
   it('★ 列定義に在る列でも、その行に span が無ければ空文字 (捏造しない)', () => {
     const page = parseDriverMasterPage(
-      specPage([{ cd: '1009', name: '大石 一郎', issued: '2021/04/01' }]).replace(
+      specPage([{ cd: '1009', name: '丁野 一郎', issued: '2021/04/01' }]).replace(
         '<td><span id="lstMain_LabelValue22_0">2021/04/01</span></td>',
         '<td>&nbsp;</td>',
       ),
@@ -1168,7 +1168,7 @@ describe('列定義で引く経路 (実機 F-MMS0320)', () => {
   })
 
   it('同じ列番号の span が 1 行に 2 つあれば先勝ち (隠し要素で値を上書きしない)', () => {
-    const dup = specPage([{ cd: '1009', name: '大石 一郎' }]).replace(
+    const dup = specPage([{ cd: '1009', name: '丁野 一郎' }]).replace(
       '<td><span id="lstMain_LabelValue1_0">1009</span></td>',
       '<td><span id="lstMain_LabelValue1_0">1009</span><span id="lstMain_LabelValue1_0">9999</span></td>',
     )
@@ -1176,7 +1176,7 @@ describe('列定義で引く経路 (実機 F-MMS0320)', () => {
   })
 
   it('同じ列名が 2 回出てきたら先勝ち (後から上書きしない)', () => {
-    const dup = specPage([{ cd: '1009', name: '大石 一郎' }]).replace(
+    const dup = specPage([{ cd: '1009', name: '丁野 一郎' }]).replace(
       'BranchCD:5:0:int:MT00020Branch:BranchCD:BranchName::8::1:left::所属事業所CD:150',
       'Dup:99:0:int:::::8::1:left::乗務員CD:75',
     )

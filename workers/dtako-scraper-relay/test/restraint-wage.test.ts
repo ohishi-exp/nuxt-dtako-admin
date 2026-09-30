@@ -408,11 +408,11 @@ describe('applyMinWageToWageMaster', () => {
   it('氏名を補完する — 単価の追加可否と関係なく', () => {
     // 一括設定で新規に作った行が氏名なしになるバグを踏んだ (2026-07-25)。
     // 後追いの再実行で埋められるよう、keep の行でも氏名だけは入れる
-    const names = new Map([['1018', '金原　敏雄'], ['1030', '一瀬　道広']])
+    const names = new Map([['1018', '架空　太郎'], ['1030', '架空　花子']])
     const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2024-04-01', hourlyRate: 1500 }] } } }
     const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01', { namesByDriverCd: names })
-    expect(r.master.drivers['1018']!.name).toBe('金原　敏雄') // keep でも氏名は入る
-    expect(r.master.drivers['1030']!.name).toBe('一瀬　道広') // add でも入る
+    expect(r.master.drivers['1018']!.name).toBe('架空　太郎') // keep でも氏名は入る
+    expect(r.master.drivers['1030']!.name).toBe('架空　花子') // add でも入る
     expect(r.master.drivers['1021']!.name).toBeUndefined() // 氏名が無ければ付けない
   })
 
