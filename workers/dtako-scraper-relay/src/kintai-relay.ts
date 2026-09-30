@@ -157,6 +157,14 @@ export interface KintaiRelayDeps {
   onprem(path: string, init?: RequestInit): Promise<Response>;
   /** auth-worker 経由で GCP を叩く。`X-Tenant-ID` は実装側で付ける。 */
   gcp(path: string, init?: RequestInit): Promise<Response>;
+  /** 給与閲覧の認可確認の上流切替 (`checkKyuyoAccess` だけが読む)。未指定 = オンプレ。 */
+  kyuyoUpstream?: KyuyoUpstream;
+}
+
+/** `checkKyuyoAccess` の上流切替。`mode === "worker"` のときだけ `binding` (給与大臣 Worker) を叩く。 */
+export interface KyuyoUpstream {
+  mode?: string | null;
+  binding?: FetcherLike | null;
 }
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -884,6 +892,15 @@ export async function relayKintaiChangeLog(
  */
 const KYUYO_ACCESS_PATH = "/api/kyuyo/access";
 
+/**
+ * worker モード (`NUXT_KYUYO_UPSTREAM=worker`) の宛先。**path は定数** (外部入力から組まない)。
+ * Worker の認可なし POST /probe には届かない。host は service binding が無視する。
+ * 語彙 (`worker` だけが Worker、他はすべてオンプレ) は app 側 `server/utils/kyuyo-upstream.ts` と揃える。
+ */
+const KYUYO_WORKER_ACCESS_URL = "https://ichibanboshi-kyuyo/kyuyo/access";
+
+const KYUYO_WORKER_UNREACHABLE_MESSAGE = "給与大臣の Worker に届きません";
+
 /** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
 const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
 /** 期間集計の口 (同上)。 */
@@ -933,6 +950,35 @@ function kyuyoAccessMessage(body: string, status: number): string {
   return body.trim() ? body.trim().slice(0, 200) : `上流が status ${status} を返しました`;
 }
 
+/** worker モード。fail-closed は onprem と同じ (binding 無し・reject・401・404 は 503)。理由文は日本語に写す。 */
+async function checkKyuyoAccessViaWorker(
+  binding: FetcherLike | null | undefined,
+  bearer: string,
+): Promise<KyuyoAccessDenial | null> {
+  const unreachable = { status: 503, message: KYUYO_WORKER_UNREACHABLE_MESSAGE };
+  if (!binding) return unreachable;
+  let res: Response;
+  try {
+    res = await binding.fetch(KYUYO_WORKER_ACCESS_URL, {
+      headers: { Authorization: `Bearer ${bearer}` },
+    });
+  } catch {
+    return unreachable;
+  }
+  if (res.ok) return null;
+  if (res.status === 401) {
+    return { status: KYUYO_ACCESS_UNIDENTIFIED_STATUS, message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE };
+  }
+  if (res.status === 403) return { status: 403, message: "給与の閲覧許可リストに無いアカウントです" };
+  if (res.status === 404) {
+    return { status: 503, message: "給与大臣の Worker に /kyuyo/access がありません" };
+  }
+  if (kyuyoAccessMessage(await res.text(), res.status) === "kyuyo_allowlist_unset") {
+    return { status: 503, message: "給与の閲覧許可リストが未設定です" };
+  }
+  return unreachable;
+}
+
 /**
  * 給与 allowlist を上流に問い合わせる (Refs #951)。**通れば null。**
  *
@@ -952,11 +998,13 @@ function kyuyoAccessMessage(body: string, status: number): string {
  *
  * ## allowlist はここに持たない
  *
- * 正は上流の `KYUYO_ALLOWED_EMAILS` 1 か所。relay 側に写しを持つと二重管理に
- * なり、片方だけ更新されて食い違う。
+ * relay 側に写しを持つと二重管理になり、片方だけ更新されて食い違う。
+ * 既定 (オンプレ) の正は上流の `KYUYO_ALLOWED_EMAILS` 1 か所。worker モードでは
+ * auth-worker の KV `kyuyo-allowed-emails` が正。並走中はオンプレの `[kyuyo] allowed_emails`
+ * と両方を同時に直す。
  */
 export async function checkKyuyoAccess(
-  deps: Pick<KintaiRelayDeps, "onprem">,
+  deps: Pick<KintaiRelayDeps, "onprem" | "kyuyoUpstream">,
   bearer: string | null,
 ): Promise<KyuyoAccessDenial | null> {
   // Bearer が無いなら上流に聞くまでもない (必ず 401 が返る)。往復を省くだけで、
@@ -966,6 +1014,10 @@ export async function checkKyuyoAccess(
       status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
       message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
     };
+  }
+
+  if (deps.kyuyoUpstream?.mode === "worker") {
+    return checkKyuyoAccessViaWorker(deps.kyuyoUpstream.binding, bearer);
   }
 
   let res: Response;
