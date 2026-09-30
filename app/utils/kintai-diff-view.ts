@@ -267,8 +267,6 @@ export interface KintaiWindowReportView {
   months: string[]
   drivers: number
   events: number
-  /** 運んだ行の運行NO の種類数。**古い relay (キーが無い) は `null`** — 0 と読まない。 */
-  operations: number | null
   driversWritten: number
   daysWritten: number
   daysDeleted: number
@@ -285,7 +283,6 @@ export function parseKintaiWindowReport(raw: unknown): KintaiWindowReportView | 
     months: Array.isArray(r.months) ? r.months.filter((m): m is string => typeof m === 'string') : [],
     drivers: typeof r.drivers === 'number' && Number.isFinite(r.drivers) ? r.drivers : 0,
     events: typeof r.events === 'number' && Number.isFinite(r.events) ? r.events : 0,
-    operations: typeof r.operations === 'number' && Number.isFinite(r.operations) ? r.operations : null,
     driversWritten: typeof r.driversWritten === 'number' && Number.isFinite(r.driversWritten) ? r.driversWritten : 0,
     daysWritten: typeof r.daysWritten === 'number' && Number.isFinite(r.daysWritten) ? r.daysWritten : 0,
     daysDeleted: typeof r.daysDeleted === 'number' && Number.isFinite(r.daysDeleted) ? r.daysDeleted : 0,
