@@ -479,6 +479,10 @@ export interface SalaryComparisonRow {
   sysBase: number | null
   sysOvertime: number | null
   sysTotal: number | null
+  /** 基本給(計算) の根拠 (`computeSysBase` が返したもの)。掛けた単価・区分・量を運ぶだけで計算は変えない。 */
+  sysBaseBasis: SysBaseBasis
+  /** 残業(計算) に掛けた残業単価 (時給、円/h)。掛けた量は `sysOvertimeMinutes`。単価が無ければ null。 */
+  sysOvertimeRate: number | null
   /** 計算根拠の表示用: システム稼働日数と時間外(+深夜) 分。 */
   sysWorkDays: number
   sysOvertimeMinutes: number
@@ -789,6 +793,23 @@ export function mergeSalaryCsvRows(rows: SalaryCsvRow[]): SalaryCsvRow {
 export const PAY_KUBUN_MONTHLY = 1
 export const PAY_KUBUN_DAILY = 2
 export const PAY_KUBUN_HOURLY = 3
+export const PAY_KUBUN_OTHER = 4
+
+/** 基本給(計算) の根拠の種類。`days` = 日額 × 日数 / `hours` = 時給 × 分 / `monthly` = 月給・その他 (計算なし) /
+ * `unknown` = 給与区分が取れていない (計算なし) / `norate` = 単価なし。 */
+export type SysBaseKind = 'days' | 'hours' | 'monthly' | 'unknown' | 'norate'
+
+export interface SysBaseBasis {
+  kind: SysBaseKind
+  /** 掛けた基本単価 (日額 or 時給)。`norate` は null。 */
+  rate: number | null
+  /** 掛けた量 (`days` は日数、`hours` は分)。それ以外は null。 */
+  quantity: number | null
+}
+
+export interface SysBaseResult extends SysBaseBasis {
+  value: number | null
+}
 
 /**
  * 「基本給(計算)」= 給与明細の【補助】基本単価 × システム集計。**単価の単位が
@@ -798,7 +819,7 @@ export const PAY_KUBUN_HOURLY = 3
  * |---|---|
  * | 2 日給 | 日額 × 稼働日数 |
  * | 3 時給 | 時給 × 実働時間 |
- * | 1 月給 / 4 その他 / 不明 | **null (「単価なし」)** |
+ * | 1 月給 / 4 その他 / 不明 | **value = null (計算なし)** |
  *
  * 月給を null にするのは、月額に稼働日数を掛けても実額に対応しないため。実額
  * (`csvBase`) 側だけが残り、意味のない差が出なくなる。**不明も null に倒す**のが
@@ -812,11 +833,11 @@ export function computeSysBase(
   payKubun: number | null,
   workDays: number,
   workingMinutes: number,
-): number | null {
-  if (baseRate === null) return null
-  if (payKubun === PAY_KUBUN_DAILY) return Math.round(baseRate * workDays)
-  if (payKubun === PAY_KUBUN_HOURLY) return Math.round((baseRate * workingMinutes) / 60)
-  return null
+): SysBaseResult {
+  if (baseRate === null) return { value: null, rate: null, kind: 'norate', quantity: null }
+  if (payKubun === PAY_KUBUN_DAILY) return { value: Math.round(baseRate * workDays), rate: baseRate, kind: 'days', quantity: workDays }
+  if (payKubun === PAY_KUBUN_HOURLY) return { value: Math.round((baseRate * workingMinutes) / 60), rate: baseRate, kind: 'hours', quantity: workingMinutes }
+  return { value: null, rate: baseRate, kind: payKubun === PAY_KUBUN_MONTHLY || payKubun === PAY_KUBUN_OTHER ? 'monthly' : 'unknown', quantity: null }
 }
 
 /**
@@ -935,7 +956,7 @@ export function compareSalaryMonth(
     // みなして `単価 × 稼働日数` にしていたため、月給者では桁が 1 つ以上ずれた値が
     // 「差」として並んでいた (実データで基本給 165,000 の月給者に 2,640,000)。
     // 残業側は区分に関わらず時給単価なので従来どおり。
-    const sysBase = computeSysBase(csv.rates.base, report.pay_kubun ?? null, workDays, workingMinutes)
+    const { value: sysBase, ...sysBaseBasis } = computeSysBase(csv.rates.base, report.pay_kubun ?? null, workDays, workingMinutes)
     const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
     // 月給者 = 固定残業とみなす (Refs #449)。定額と「単価×時間」の差は判定に使えない
     const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
@@ -975,6 +996,8 @@ export function compareSalaryMonth(
       sysBase,
       sysOvertime,
       sysTotal,
+      sysBaseBasis,
+      sysOvertimeRate: csv.rates.overtime,
       sysWorkDays: workDays,
       sysOvertimeMinutes: overtimeMinutes,
       overtimeFixed,

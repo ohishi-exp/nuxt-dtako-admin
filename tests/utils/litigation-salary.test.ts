@@ -242,18 +242,31 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     baseRateActual: 1333.3, baseRateOvertimePay: 16667, diffCsvVsBaseRateOvertime: 13333,
     minWageOvertimeMinutes: 600, statutoryMinutes: 9000,
     sysWorkDays: 20, sysOvertimeMinutes: 605,
+    sysBaseBasis: { kind: 'days', rate: 9500, quantity: 20 }, sysOvertimeRate: 1040,
   } as unknown as SalaryComparisonRow
 
   it('基本給・残業・総支給を 明細 / 計算 / 差 の順で返し、時間外は小数 1 桁の時間にする', () => {
     const c = salaryRowCells(base)
     expect(c.amounts).toEqual([
-      { key: 'base', csv: 200000, sys: 190000, diff: 10000 },
-      { key: 'overtime', csv: 30000, sys: 15000, diff: 15000 },
-      { key: 'total', csv: 250000, sys: 205000, diff: 45000 },
+      { key: 'base', csv: 200000, sys: 190000, diff: 10000, basis: '9,500 円 × 20 日' },
+      { key: 'overtime', csv: 30000, sys: 15000, diff: 15000, basis: '1,040 円/h × 10h05m' },
+      { key: 'total', csv: 250000, sys: 205000, diff: 45000, basis: null },
     ])
     expect(c.workDays).toBe(20)
     expect(c.overtimeHours).toBe(10.1)
     expect(c.overtimeFixed).toBe(false)
+  })
+
+  it('★ 計算の根拠: 日給 = 日額 × 日数 / 時給 = 時給 × 時間 / 月給・区分不明は計算なし / 単価なし、残業 = 残業単価 × 時間外', () => {
+    const basis = (b: SalaryComparisonRow['sysBaseBasis'], over: Partial<SalaryComparisonRow> = {}) =>
+      salaryRowCells({ ...base, sysBaseBasis: b, ...over }).amounts.map(a => a.basis)
+    expect(basis({ kind: 'days', rate: 3249, quantity: 28 })).toEqual(['3,249 円 × 28 日', '1,040 円/h × 10h05m', null])
+    expect(basis({ kind: 'hours', rate: 1050, quantity: 5200 })[0]).toBe('1,050 円/h × 86h40m')
+    expect(basis({ kind: 'monthly', rate: 165000, quantity: null })[0]).toBe('計算なし (月給)')
+    expect(basis({ kind: 'unknown', rate: 1000, quantity: null })[0]).toBe('計算なし (給与区分が不明)')
+    expect(basis({ kind: 'norate', rate: null, quantity: null }, { sysOvertimeRate: null }))
+      .toEqual(['単価なし', '単価なし', null])
+    expect(salaryRowCells({ ...base, sysOvertimeMinutes: 2709 }).amounts[1]!.basis).toBe('1,040 円/h × 45h09m')
   })
 
   it('37条は理論値があれば 5 項目、差が負のときだけ shortfall', () => {
@@ -359,3 +372,12 @@ describe('rateBasisPeriods (紙面の「計算に使った単価」一覧)', () 
   })
 })
 
+
+describe('fmtSalaryDiff', () => {
+  it('+ は明細の方が多い。0 は符号なし、計算できない (null) は「-」', () => {
+    expect(fmtSalaryDiff(15000)).toBe('+15,000')
+    expect(fmtSalaryDiff(-6667)).toBe('-6,667')
+    expect(fmtSalaryDiff(0)).toBe('0')
+    expect(fmtSalaryDiff(null)).toBe('-')
+  })
+})

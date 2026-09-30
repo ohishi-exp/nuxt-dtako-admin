@@ -415,35 +415,36 @@ function reportRow(
 }
 
 describe('computeSysBase (給与区分による分岐、Refs #429)', () => {
-  it('日給 (2) は 日額 × 稼働日数', () => {
-    expect(computeSysBase(11060, 2, 20, 9600)).toBe(221200)
+  it('日給 (2) は 日額 × 稼働日数 (根拠は日額と日数)', () => {
+    expect(computeSysBase(11060, 2, 20, 9600)).toEqual({ value: 221200, rate: 11060, kind: 'days', quantity: 20 })
   })
 
-  it('時給 (3) は 時給 × 実働時間 (分は 60 で割って円未満四捨五入)', () => {
+  it('時給 (3) は 時給 × 実働時間 (分は 60 で割って円未満四捨五入。根拠の量は分)', () => {
     // 1,031 円 × 192h08m (11528 分) = 198,089.46… → 198,089
-    expect(computeSysBase(1031, 3, 24, 11528)).toBe(198089)
+    expect(computeSysBase(1031, 3, 24, 11528)).toEqual({ value: 198089, rate: 1031, kind: 'hours', quantity: 11528 })
   })
 
-  it('月給 (1) は null — 月額に稼働日数を掛けても実額に対応しない', () => {
-    // これが 110,000 × 24 = 2,640,000 と表示されていた壊れ方 (実データ、谷西)
-    expect(computeSysBase(110000, 1, 24, 11528)).toBeNull()
+  it('月給 (1)・その他 (4) は value null (monthly) — 月額に稼働日数を掛けても実額に対応しない', () => {
+    // これが 110,000 × 24 = 2,640,000 と表示されていた壊れ方 (実データ)
+    expect(computeSysBase(110000, 1, 24, 11528)).toEqual({ value: null, rate: 110000, kind: 'monthly', quantity: null })
+    expect(computeSysBase(11060, 4, 20, 9600)).toEqual({ value: null, rate: 11060, kind: 'monthly', quantity: null })
   })
 
-  it('その他 (4)・未設定 (0)・不明 (null) はすべて null に倒す', () => {
+  it('未設定 (0)・不明 (null) は value null (unknown) — 月給と言い切らない', () => {
     // 既定を日給にすると、月給者へ日額計算を掛ける今回の壊れ方が再発する
-    expect(computeSysBase(11060, 4, 20, 9600)).toBeNull()
-    expect(computeSysBase(11060, 0, 20, 9600)).toBeNull()
-    expect(computeSysBase(11060, null, 20, 9600)).toBeNull()
+    expect(computeSysBase(11060, 0, 20, 9600)).toEqual({ value: null, rate: 11060, kind: 'unknown', quantity: null })
+    expect(computeSysBase(11060, null, 20, 9600)).toEqual({ value: null, rate: 11060, kind: 'unknown', quantity: null })
   })
 
-  it('単価が無ければ区分に関わらず null (従来どおり「単価なし」)', () => {
-    expect(computeSysBase(null, 2, 20, 9600)).toBeNull()
-    expect(computeSysBase(null, 3, 20, 9600)).toBeNull()
+  it('単価が無ければ区分に関わらず norate (従来どおり「単価なし」)', () => {
+    const none = { value: null, rate: null, kind: 'norate', quantity: null }
+    expect(computeSysBase(null, 2, 20, 9600)).toEqual(none)
+    expect(computeSysBase(null, 3, 20, 9600)).toEqual(none)
   })
 
-  it('稼働 0 日・実働 0 分でも 0 を返す (null と区別する)', () => {
-    expect(computeSysBase(11060, 2, 0, 0)).toBe(0)
-    expect(computeSysBase(1031, 3, 0, 0)).toBe(0)
+  it('稼働 0 日・実働 0 分でも value 0 を返す (null と区別する)', () => {
+    expect(computeSysBase(11060, 2, 0, 0).value).toBe(0)
+    expect(computeSysBase(1031, 3, 0, 0).value).toBe(0)
   })
 })
 
@@ -458,6 +459,18 @@ describe('compareSalaryMonth — 給与区分 (Refs #429)', () => {
     expect(row!.diffBase).toBeNull()
     expect(row!.sysTotal).toBeNull()
     expect(row!.diffTotal).toBeNull()
+    expect(row!.sysBaseBasis).toEqual({ kind: 'monthly', rate: 110000, quantity: null })
+  })
+
+  it('★ 根拠が行に写る: 日給 = 日額と日数 / 残業単価 / 単価なし (計算結果は変えない)', () => {
+    const csv = csvRow({ driverCd: '1239', cdKey: '1239', driverName: '架空 花子', rates: { base: 3249, overtime: 1040 } })
+    const [row] = compareSalaryMonth([csv], [reportRow('1239', '架空 花子', { workDays: 28, payKubun: 2 })], config, '2023-04').rows
+    expect(row!.sysBaseBasis).toEqual({ kind: 'days', rate: 3249, quantity: 28 })
+    expect(row!.sysOvertimeRate).toBe(1040)
+    const none = csvRow({ driverCd: '1239', cdKey: '1239', driverName: '架空 花子', rates: { base: null, overtime: null } })
+    const [r2] = compareSalaryMonth([none], [reportRow('1239', '架空 花子', { payKubun: 2 })], config, '2023-04').rows
+    expect(r2!.sysBaseBasis).toEqual({ kind: 'norate', rate: null, quantity: null })
+    expect(r2!.sysOvertimeRate).toBeNull()
   })
 
   it('時給者は実働時間で計算する', () => {
@@ -465,6 +478,7 @@ describe('compareSalaryMonth — 給与区分 (Refs #429)', () => {
     const [row] = compareSalaryMonth([csv], [reportRow('91', '時給 太郎', { workDays: 24, workingMinutes: 11528, payKubun: 3 })], config, '2023-04').rows
     expect(row!.sysBase).toBe(198089)
     expect(row!.diffBase).toBe(200000 - 198089)
+    expect(row!.sysBaseBasis).toEqual({ kind: 'hours', rate: 1031, quantity: 11528 })
   })
 
   it('時給者の実働が null (theearth CSV の欠損) でも 0 として扱う', () => {
@@ -477,6 +491,7 @@ describe('compareSalaryMonth — 給与区分 (Refs #429)', () => {
     const csv = csvRow({ driverCd: '1', cdKey: '1', driverName: '未取込 太郎', amounts: { 基本給: 100000 }, rates: { base: 5000, overtime: null } })
     const [row] = compareSalaryMonth([csv], [reportRow('1', '未取込 太郎', { workDays: 20, payKubun: null })], config, '2023-04').rows
     expect(row!.sysBase).toBeNull()
+    expect(row!.sysBaseBasis.kind).toBe('unknown')
   })
 })
 

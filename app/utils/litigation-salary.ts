@@ -13,7 +13,7 @@
  * **金額と氏名はブラウザに残さない** (拘束×賃金と同じ方針、Refs #467) — 給与明細はメモリだけに持ち、
  * 開き直したら読み直す (保存済みの月は給与大臣を開かずに返るので速い)。
  */
-import { nextYm } from './restraint-wage-view'
+import { fmtMinutes, fmtYen, nextYm } from './restraint-wage-view'
 import type { WageReportResponse, WageReportRow } from './restraint-wage-view'
 import { compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
@@ -231,11 +231,19 @@ export function diffSignClass(v: number | null): string {
   return v > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'
 }
 
+/** 差の表示 (+ は明細の方が多い)。計算できない (単価なし・固定残業) は「-」 */
+export function fmtSalaryDiff(v: number | null): string {
+  if (v === null) return '-'
+  return `${v > 0 ? '+' : ''}${fmtYen(v)}`
+}
+
 export interface LitigationSalaryAmountCell {
   key: 'base' | 'overtime' | 'total'
   csv: number
   sys: number | null
   diff: number | null
+  /** 「計算」の根拠 (`3,249 円 × 28 日` など)。総支給は null (基本給と残業の和なので根拠を持たない) */
+  basis: string | null
 }
 
 export interface LitigationSalaryOver37 {
@@ -261,16 +269,32 @@ export interface LitigationSalaryRowCells {
   overtimeHours: number
 }
 
+const yen = (v: number) => v.toLocaleString('ja-JP')
+
+/** 基本給(計算) の根拠。掛けた単価・区分・量は `computeSysBase` が決めたもの (区分の分岐はそこ 1 か所)。 */
+function sysBaseBasisText(b: SalaryComparisonRow['sysBaseBasis']): string {
+  switch (b.kind) {
+    case 'days': return `${yen(b.rate!)} 円 × ${b.quantity} 日`
+    case 'hours': return `${yen(b.rate!)} 円/h × ${fmtMinutes(b.quantity)}`
+    case 'monthly': return '計算なし (月給)'
+    case 'unknown': return '計算なし (給与区分が不明)'
+    case 'norate': return '単価なし'
+  }
+}
+
 /**
- * 比較済みの 1 行を、表示用のセル一式にする。画面の 3 段 (明細・計算・差を縦に積む) と
- * 印刷の紙面 (1 か月 1 行で横に並べる) の両方がこれを読む — 表示の形の違いはテンプレートに残す。
+ * 比較済みの 1 行を、表示用のセル一式にする。画面と印刷の紙面は同じ縦に積んだセル
+ * (明細 / 計算 / 差 + 根拠) をこれで組む。
  */
 export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells {
   return {
     amounts: [
-      { key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase },
-      { key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime },
-      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal },
+      { key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: sysBaseBasisText(c.sysBaseBasis) },
+      {
+        key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime,
+        basis: c.sysOvertimeRate === null ? '単価なし' : `${yen(c.sysOvertimeRate)} 円/h × ${fmtMinutes(c.sysOvertimeMinutes)}`,
+      },
+      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal, basis: null },
     ],
     overtimeFixed: c.overtimeFixed,
     over37: c.baseRateOvertimePay === null
@@ -293,7 +317,6 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
 
 export type RateBasisStatus = 'ok' | 'mismatch' | 'unknown'
 
-const yen = (v: number) => v.toLocaleString('ja-JP')
 /** "YYYY-MM-DD" → "YYYY-MM" */
 const ym = (d: string) => d.slice(0, 7)
 
