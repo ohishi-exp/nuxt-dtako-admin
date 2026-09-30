@@ -137,7 +137,12 @@ describe("POST /restraint-api/min-wage/apply-to-wage-master (driverCds / until)"
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ saved: true, added: 3 });
     const saved = JSON.parse(r2.store.get(`restraint/${COMP}/wage-master/latest.json`)!) as { drivers: Record<string, { name?: string; rates: unknown[] }> };
-    expect(saved.drivers["9001"]!.rates).toHaveLength(3);
+    // 別県の改定 (2024-09-01) は甲の最新改定 (2024-10-05) より古いので、異動した月の 1 日から入る
+    expect(saved.drivers["9001"]!.rates).toEqual([
+      { effectiveFrom: "2023-10-01", hourlyRate: 900, prefecture: "架空県" },
+      { effectiveFrom: "2024-10-05", hourlyRate: 950, prefecture: "架空県" },
+      { effectiveFrom: "2025-01-01", hourlyRate: 970, prefecture: "別県" },
+    ]);
     expect(saved.drivers["9001"]!.name).toBe("架空 一郎");
     const again = (await (await post({ asOf: "2024-01-01", until: "2025-03-31", driverCds: ["9001"] })).json()) as { kept: number; added: number };
     expect(again).toMatchObject({ kept: 1, added: 0 });
