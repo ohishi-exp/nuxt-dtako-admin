@@ -82,7 +82,7 @@ describe('buildLitigationSalaryRows', () => {
   })
 
   it('拘束の材料: 未取得 / 取れていない / この乗務員の行が無い を言い分ける', () => {
-    expect(buildLitigationSalaryRows(input({ wageReports: new Map() }))[0]).toMatchObject({ state: 'pending', message: '拘束の材料が未取得 — エラータブで「検知を実行」' })
+    expect(buildLitigationSalaryRows(input({ wageReports: new Map() }))[0]).toMatchObject({ state: 'pending', message: '拘束の材料が未取得 (9/29 以前の古い形の保存も含む) — 「拘束の材料を取る」' })
     expect(buildLitigationSalaryRows(input({ wageReports: new Map([['1590|2023-06', { ok: false, reason: '504' }]]) }))[0]).toMatchObject({ state: 'unknown', message: '拘束の材料が取れていない: 504' })
     expect(buildLitigationSalaryRows(input({ wageReports: new Map([['1590|2023-06', wage([])]]) }))[0]!.state).toBe('unknown')
   })
