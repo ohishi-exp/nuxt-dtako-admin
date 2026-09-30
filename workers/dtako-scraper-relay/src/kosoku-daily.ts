@@ -270,7 +270,7 @@ export function parsePaperDriftByDriver(body: unknown): KosokuParseResult<Map<st
  *
  * 勤務への貼り付け (`ferry_minus_minutes`) は「その日に始まる勤務か、その日に掛かる
  * parts が応答に居る」前提で、**前月に始業した勤務だけが覆う日**の控除は貼れずに
- * 落ちる (実測 1026 一瀬 2026-05-01: 出庫 04-30 の運行のフェリー 76 分)。突合は
+ * 落ちる (実測 1026 架空 2026-05-01: 出庫 04-30 の運行のフェリー 76 分)。突合は
  * このマップを優先し、無ければ従来の貼り付け値へ倒す (旧上流との互換)。
  */
 export function parseFerryMinusByDriver(body: unknown): KosokuParseResult<Map<string, number>> {

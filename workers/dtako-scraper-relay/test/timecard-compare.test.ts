@@ -1334,7 +1334,7 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.residualMinutes).toBe(0);
   });
 
-  it("紙だけが数える勤務外は実額で説明する (1069 前田 01-05 の形)", () => {
+  it("紙だけが数える勤務外は実額で説明する (1069 寅野 01-05 の形)", () => {
     // 終業 17:17 の後も夜通し続く「積み」(状態切り忘れ) を紙は 0 時まで数える。
     // +402 = 紙が大きい向き — explained は負 (rust の paper_outside_by_date)
     const d = compareTimecardMonth({
@@ -1508,7 +1508,7 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("unknown");
   });
 
-  it("実額どうしの汎用ペアで説明する (1069 前田 01-13 の形)", () => {
+  it("実額どうしの汎用ペアで説明する (1069 寅野 01-13 の形)", () => {
     // -64 = lunch 実額 60 + punch-head 4 — 個別列挙に無い組み合わせは部分和で拾う
     const d = compareTimecardMonth({
       month: "2026-01",

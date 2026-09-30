@@ -401,7 +401,7 @@ title = 「運行データ入力」。行 id は `MainContent_lstOperation_<Fiel
 | `lblOperationDate` | 運行日 (`YY/MM/DD`、2桁年) | `26/07/04` |
 | `lblBranchCD` / `lblDisplayName` | 事業所CD / 事業所名 | `8` / `佐賀大石運輸㈱` |
 | `lblVehicleCD` / `lblVehicleName` | 車輌CD / 車輌名 | `6572` / `佐賀100あ6572` |
-| `lblDriverCD1` / `lblDriverName1` | 乗務員CD1 / 乗務員名1 | `1405` / `松尾　等` |
+| `lblDriverCD1` / `lblDriverName1` | 乗務員CD1 / 乗務員名1 | `1405` / `丙野　三郎` |
 | `lblWorkStartDateTime` / `lblWorkEndDateTime` | 出社日時 / **退社日時 (=読取日、`MM/DD HH:mm`)** | `07/04 12:56` / `07/08 10:57` |
 | `lblOperationStartDateTime` / `lblOperationEndDateTime` | 出庫日時 / 帰庫日時 (`MM/DD HH:mm`) | |
 | `lblTotalRunningDist` | 総走行距離 | `1890.2` |
