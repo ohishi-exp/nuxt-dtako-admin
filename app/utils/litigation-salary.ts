@@ -230,3 +230,61 @@ export function diffSignClass(v: number | null): string {
   if (v === null || v === 0) return ''
   return v > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'
 }
+
+export interface LitigationSalaryAmountCell {
+  key: 'base' | 'overtime' | 'total'
+  csv: number
+  sys: number | null
+  diff: number | null
+}
+
+export interface LitigationSalaryOver37 {
+  rate: number | null
+  minutes: number
+  theory: number
+  paid: number
+  diff: number | null
+  /** 明細の残業代が理論値を下回った (差が負) — 太字にするのはこれだけ */
+  shortfall: boolean
+}
+
+export interface LitigationSalaryRowCells {
+  /** 基本給・残業・総支給 (明細 / 計算 / 差) */
+  amounts: LitigationSalaryAmountCell[]
+  /** 残業の差を出さない月給 (固定残業) */
+  overtimeFixed: boolean
+  /** 37条の比較。出せないときは null と、その理由 */
+  over37: LitigationSalaryOver37 | null
+  over37NoneReason: string
+  workDays: number
+  /** 時間外 (時間、小数 1 桁) */
+  overtimeHours: number
+}
+
+/**
+ * 比較済みの 1 行を、表示用のセル一式にする。画面の 3 段 (明細・計算・差を縦に積む) と
+ * 印刷の紙面 (1 か月 1 行で横に並べる) の両方がこれを読む — 表示の形の違いはテンプレートに残す。
+ */
+export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells {
+  return {
+    amounts: [
+      { key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase },
+      { key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime },
+      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal },
+    ],
+    overtimeFixed: c.overtimeFixed,
+    over37: c.baseRateOvertimePay === null
+      ? null
+      : {
+          rate: c.baseRateActual,
+          minutes: c.minWageOvertimeMinutes,
+          theory: c.baseRateOvertimePay,
+          paid: c.csvOvertime,
+          diff: c.diffCsvVsBaseRateOvertime,
+          shortfall: (c.diffCsvVsBaseRateOvertime ?? 0) < 0,
+        },
+    over37NoneReason: c.statutoryMinutes > 0 ? '(割増の基礎に入る支給が 0)' : '(法定内時間が 0)',
+    workDays: c.sysWorkDays,
+    overtimeHours: Math.round(c.sysOvertimeMinutes / 6) / 10,
+  }
+}

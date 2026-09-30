@@ -229,3 +229,44 @@ describe('diffSignClass (差の符号で文字色)', () => {
     expect(diffSignClass(null)).toBe('')
   })
 })
+
+import { salaryRowCells } from '~/utils/litigation-salary'
+import type { SalaryComparisonRow } from '~/utils/salary-compare'
+
+describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の組み立て)', () => {
+  const base = {
+    csvBase: 200000, sysBase: 190000, diffBase: 10000,
+    csvOvertime: 30000, sysOvertime: 15000, diffOvertime: 15000,
+    csvTotal: 250000, sysTotal: 205000, diffTotal: 45000,
+    overtimeFixed: false,
+    baseRateActual: 1333.3, baseRateOvertimePay: 16667, diffCsvVsBaseRateOvertime: 13333,
+    minWageOvertimeMinutes: 600, statutoryMinutes: 9000,
+    sysWorkDays: 20, sysOvertimeMinutes: 605,
+  } as unknown as SalaryComparisonRow
+
+  it('基本給・残業・総支給を 明細 / 計算 / 差 の順で返し、時間外は小数 1 桁の時間にする', () => {
+    const c = salaryRowCells(base)
+    expect(c.amounts).toEqual([
+      { key: 'base', csv: 200000, sys: 190000, diff: 10000 },
+      { key: 'overtime', csv: 30000, sys: 15000, diff: 15000 },
+      { key: 'total', csv: 250000, sys: 205000, diff: 45000 },
+    ])
+    expect(c.workDays).toBe(20)
+    expect(c.overtimeHours).toBe(10.1)
+    expect(c.overtimeFixed).toBe(false)
+  })
+
+  it('37条は理論値があれば 5 項目、差が負のときだけ shortfall', () => {
+    expect(salaryRowCells(base).over37).toEqual({ rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: 13333, shortfall: false })
+    expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: -1 }).over37!.shortfall).toBe(true)
+    expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: null }).over37!.shortfall).toBe(false)
+  })
+
+  it('37条が出せないときは null と理由 (法定内時間が 0 / 割増の基礎に入る支給が 0)', () => {
+    const none = { ...base, baseRateOvertimePay: null }
+    expect(salaryRowCells(none).over37).toBeNull()
+    expect(salaryRowCells({ ...none, statutoryMinutes: 0 } as SalaryComparisonRow).over37NoneReason).toBe('(法定内時間が 0)')
+    expect(salaryRowCells(none as SalaryComparisonRow).over37NoneReason).toBe('(割増の基礎に入る支給が 0)')
+    expect(salaryRowCells({ ...base, overtimeFixed: true }).overtimeFixed).toBe(true)
+  })
+})
