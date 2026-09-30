@@ -6,6 +6,7 @@ import {
   expandMonthRange,
   payrollToParsedSalary,
   fmtPayrollSync,
+  foldPayrollSync,
   summarizeSyncedMonths,
   type KyuyoPayrollRow,
   toStoredPayroll,
@@ -286,5 +287,29 @@ describe('payrollToParsedSalary', () => {
   it('半休の 0.5 が保たれる', () => {
     const out = payrollToParsedSalary([row({ attendance: { 有休日数: 0.5 } })], '0100')
     expect(out.rows[0]!.attendance!['有休日数']).toBe(0.5)
+  })
+})
+
+describe('foldPayrollSync', () => {
+  it('全社 cache なら cache、最も古い時刻を採る', () => {
+    expect(foldPayrollSync([
+      { source: 'cache', syncedAt: '2026-02-03T09:12:00Z' },
+      { source: 'cache', syncedAt: '2026-02-01T00:00:00Z' },
+    ])).toEqual({ source: 'cache', syncedAt: '2026-02-01T00:00:00Z' })
+  })
+  it('1 社でも live なら live', () => {
+    expect(foldPayrollSync([
+      { source: 'cache', syncedAt: '2026-02-03T09:12:00Z' },
+      { source: 'live', syncedAt: '2026-02-04T09:12:00Z' },
+    ]).source).toBe('live')
+  })
+  it('1 社でも syncedAt が無い / 読めなければ null', () => {
+    expect(foldPayrollSync([{ source: 'cache', syncedAt: '2026-02-03T09:12:00Z' }, { source: 'cache', syncedAt: null }]).syncedAt).toBeNull()
+    expect(foldPayrollSync([{ source: 'cache' }]).syncedAt).toBeNull()
+    expect(foldPayrollSync([{ source: 'cache', syncedAt: 'x' }]).syncedAt).toBeNull()
+  })
+  it('source が欠けた社があり live が無ければ undefined。空配列は null', () => {
+    expect(foldPayrollSync([{ source: 'cache' }, {}])).toEqual({ syncedAt: null })
+    expect(foldPayrollSync([])).toEqual({ syncedAt: null })
   })
 })

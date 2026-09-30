@@ -91,7 +91,7 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
         ? (payMonth === input.loadingPayMonth ? '明細: 読込中' : '明細: 未読込')
         : pay.ok ? '明細: 読込済み' : `明細: 読めない — ${pay.reason}`
       if (!wage) {
-        out.push({ ...base, payrollNote, state: 'pending', message: '拘束の材料が未取得 — エラータブで「検知を実行」' })
+        out.push({ ...base, payrollNote, state: 'pending', message: '拘束の材料が未取得 (9/29 以前の古い形の保存も含む) — 「拘束の材料を取る」' })
         continue
       }
       if (!wage.ok) {

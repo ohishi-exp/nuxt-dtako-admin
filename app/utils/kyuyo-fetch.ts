@@ -180,6 +180,25 @@ export function fmtPayrollSync(entry: { source?: 'cache' | 'live', syncedAt?: st
   return label ? `${ts} (${label})` : ts
 }
 
+/**
+ * 複数社の同期情報を 1 件に畳む (訴訟準備の給与比較: 1 か月 = 会社ぶんの明細)。
+ *
+ * - syncedAt: **最も古い**時刻。1 社でも欠けたら null (restraint-wage.vue `payrollSyncedAtForMonth` と同じ規約、#677)
+ * - source: 1 社でも `live` なら `live`、全社 `cache` なら `cache`、欠けがあれば `undefined`
+ */
+export function foldPayrollSync(
+  entries: readonly { source?: 'cache' | 'live', syncedAt?: string | null }[],
+): { source?: 'cache' | 'live', syncedAt: string | null } {
+  const source = entries.some(e => e.source === 'live')
+    ? 'live' as const
+    : entries.length > 0 && entries.every(e => e.source === 'cache') ? 'cache' as const : undefined
+  const times = entries.map(e => Date.parse(e.syncedAt ?? ''))
+  const syncedAt = entries.length === 0 || times.some(Number.isNaN)
+    ? null
+    : entries[times.indexOf(Math.min(...times))]!.syncedAt as string
+  return { ...(source === undefined ? {} : { source }), syncedAt }
+}
+
 // ── 給与比較への橋渡し (Refs #369 PR-B2) ─────────────────────
 
 /**

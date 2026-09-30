@@ -78,6 +78,11 @@ let febOnpremOpeNos: string[] = []
 let storedItems: unknown[] = []
 /** 給与大臣の payroll を 403 にする */
 let payrollForbidden = false
+/** 保存済みの結果の読み込み (GET litigation-checks) を失敗させる / 解けるまで待たせる */
+let storeGetFails = false
+let storeGetGate: Promise<void> | null = null
+/** wage-report の 2025-02 を 504 にする (既定 true。false なら材料が全部そろう) */
+let febWageFails = true
 /** `GET litigation-cases` が返す案件の updatedAt (保存で変わった状況を作る) */
 let caseUpdatedAt = CASE.updatedAt
 /** 立てておくと、給与大臣の payroll は勤務月 2025-02 (= 拘束の材料が取れていない月) だけ、この Promise が解けるまで返らない (読込中の表を見る) */
@@ -91,7 +96,10 @@ function stubDollarFetch() {
     const q = opts.query ?? {}
     calls.push({ via: '$fetch', method: opts.method ?? 'GET', url: `${url}?${new URLSearchParams(q).toString()}`, body: opts.body })
     if (url === '/restraint-api/litigation-checks') {
-      return opts.method === 'PUT' ? { saved: 1, checkedAt: '2026-09-29T03:04:00.000Z' } : { items: storedItems }
+      if (opts.method === 'PUT') return { saved: 1, checkedAt: '2026-09-29T03:04:00.000Z' }
+      if (storeGetGate) await storeGetGate
+      if (storeGetFails) throw Object.assign(new Error('store down'), { statusCode: 500 })
+      return { items: storedItems }
     }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, updatedAt: caseUpdatedAt }] }
@@ -100,7 +108,7 @@ function stubDollarFetch() {
       return { month: q.month, driver_cd: q.driver_cd, ope_nos: febOnpremOpeNos, truncated: false }
     }
     if (url === '/restraint-api/wage-report') {
-      if (q.month === '2025-02') throw Object.assign(new Error('boom'), { statusCode: 504 })
+      if (q.month === '2025-02' && febWageFails) throw Object.assign(new Error('boom'), { statusCode: 504 })
       return {
         month: q.month,
         restraint_source: 'gcp',
@@ -135,7 +143,9 @@ function stubDollarFetch() {
           base_rate: 10000, overtime_rate: 1500, totals: { soshikyu: 230000 },
         }],
         warnings: [],
-        source: 'cache',
+        // 勤務月 2025-01 は保存 (cache) から、2025-02 は給与大臣 (live) から読んだ
+        source: q.month === '2025-02' ? 'live' : 'cache',
+        synced_at: q.month === '2025-02' ? '2026-09-30T01:00:00Z' : '2026-09-20T01:00:00Z',
       }
     }
     throw new Error(`unexpected $fetch ${url}`)
@@ -201,6 +211,9 @@ beforeEach(() => {
   })
   storedItems = []
   payrollForbidden = false
+  storeGetFails = false
+  storeGetGate = null
+  febWageFails = true
   payrollGate = null
   caseUpdatedAt = CASE.updatedAt
   saved.length = 0
@@ -614,6 +627,105 @@ describe('給与比較タブ', () => {
     await buttonByText(w, '給与大臣から読み直す').trigger('click')
     await settle()
     expect(payrollCalls()).toHaveLength(2)
+    w.unmount()
+  })
+  it('★ 明細の出どころ: 行の支給月の下に 保存 / 給与大臣 を出し、集計行に数を出す (読んでいない月は出さない)', async () => {
+    const w = await openAfterChecks()
+    let release!: () => void
+    payrollGate = new Promise<void>((r) => { release = r })
+    await openSalaryTab(w)
+    expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-source]').text()).toContain('サーバー保存')
+    expect(w.find('[data-salary-row="1078|2025-02"] [data-salary-source]').exists()).toBe(false)
+    release()
+    await settle()
+    expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-source]').text()).toMatch(/2026\/09\/20.*\(サーバー保存\)/)
+    expect(w.find('[data-salary-row="1078|2025-02"] [data-salary-source]').text()).toMatch(/2026\/09\/30.*\(給与大臣から取得\)/)
+    expect(summary(w)).toContain('(サーバー保存 1・給与大臣から取得 1)')
+    w.unmount()
+  })
+
+  /** 検知を回さずに給与比較タブを開く (材料は未取得) */
+  async function openSalaryTabDirect(): Promise<VueWrapper> {
+    const w = mount(Page, {
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
+    })
+    await settle()
+    await buttonByText(w, '開く').trigger('click')
+    await openSalaryTab(w)
+    return w
+  }
+  const wageCalls = () => calls.filter(c => c.url.startsWith('/restraint-api/wage-report'))
+  const materialsBtn = (w: VueWrapper) => w.find('[data-testid="litigation-salary-materials-run"]')
+
+  it('★ 材料が未取得なら「拘束の材料を取る」を出し、タブを開いただけでは wage-report を呼ばない。押すと取れた月から比較済みになる', async () => {
+    febWageFails = false
+    const w = await openSalaryTabDirect()
+    expect(wageCalls()).toHaveLength(0)
+    expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('拘束の材料が未取得 (9/29 以前の古い形の保存も含む)')
+    expect(materialsBtn(w).exists()).toBe(true)
+    expect(materialsBtn(w).attributes('disabled')).toBeUndefined()
+    await materialsBtn(w).trigger('click')
+    await settle()
+    expect(wageCalls().length).toBeGreaterThan(0)
+    expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('比較済み')
+    // 全部そろったらボタンは消える
+    expect(materialsBtn(w).exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('★ 走っている間は進捗を給与比較タブにも出す', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const w = await openSalaryTabDirect()
+    const realStub = globalThis.$fetch
+    const orig = vi.mocked(realStub)
+    vi.stubGlobal('$fetch', vi.fn(async (url: string, opts: never) => {
+      if (url === '/restraint-api/wage-report') await gate
+      return (orig as unknown as (u: string, o: unknown) => Promise<unknown>)(url, opts)
+    }))
+    await materialsBtn(w).trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="litigation-salary-materials-progress"]').text()).toContain('検知を実行中')
+    release()
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-materials-progress"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('★ 保存済みの結果の読み込みに失敗したら、ボタンは disabled でその文を出す (全件取り直しが走らない)', async () => {
+    storeGetFails = true
+    const w = await openSalaryTabDirect()
+    expect(materialsBtn(w).attributes('disabled')).toBeDefined()
+    expect(w.find('[data-testid="litigation-salary-materials-error"]').text()).toContain('保存済みの検知結果を読めませんでした')
+    await materialsBtn(w).trigger('click')
+    await settle()
+    expect(wageCalls()).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('★ 保存済みの結果を読み込み中はボタンが disabled', async () => {
+    let release!: () => void
+    storeGetGate = new Promise<void>((r) => { release = r })
+    const w = mount(Page, {
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
+    })
+    await settle()
+    await buttonByText(w, '開く').trigger('click')
+    await openSalaryTab(w)
+    expect(materialsBtn(w).attributes('disabled')).toBeDefined()
+    await materialsBtn(w).trigger('click')
+    expect(wageCalls()).toHaveLength(0)
+    release()
+    await settle()
+    expect(materialsBtn(w).attributes('disabled')).toBeUndefined()
+    w.unmount()
+  })
+
+  it('★ 材料が全部そろっている案件ではボタンを出さない', async () => {
+    febWageFails = false
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    expect(materialsBtn(w).exists()).toBe(false)
     w.unmount()
   })
 })
