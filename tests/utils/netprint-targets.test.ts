@@ -27,10 +27,10 @@ describe('netprintDestinationValue', () => {
 describe('netprintRecipientOptions', () => {
   it('provider が lineworks の行だけを候補にする (LINE の人は送信時に落ちるので選ばせない)', () => {
     const options = netprintRecipientOptions([
-      { id: RCP_HONDA, name: '本多 優鷹', provider: 'lineworks' },
+      { id: RCP_HONDA, name: '甲野 一郎', provider: 'lineworks' },
       { id: RCP_LINE, name: 'LINE の人', provider: 'line' },
     ])
-    expect(options).toEqual([{ label: '本多 優鷹 (個人)', value: `recipient:${RCP_HONDA}` }])
+    expect(options).toEqual([{ label: '甲野 一郎 (個人)', value: `recipient:${RCP_HONDA}` }])
   })
 
   it('氏名が無い行は id を表示に使い、id が無い行は候補にしない', () => {
@@ -75,18 +75,18 @@ describe('netprintChannelOptions', () => {
 describe('netprintDestinationOptions', () => {
   it('個人とトークルームを 1 つの select に混ぜる ((個人)/(トークルーム) で区別できる)', () => {
     const options = netprintDestinationOptions(
-      [{ id: RCP_HONDA, name: '本多 優鷹', provider: 'lineworks' }],
+      [{ id: RCP_HONDA, name: '甲野 一郎', provider: 'lineworks' }],
       [{ id: CH_HONSHA, title: '本社トークルーム' }],
     )
     expect(options).toEqual([
-      { label: '本多 優鷹 (個人)', value: `recipient:${RCP_HONDA}` },
+      { label: '甲野 一郎 (個人)', value: `recipient:${RCP_HONDA}` },
       { label: '本社トークルーム (トークルーム)', value: `channel:${CH_HONSHA}` },
     ])
   })
 
   it('トークルームが 0 件でも個人だけで動く (Bot 招待前の実運用の形)', () => {
     const options = netprintDestinationOptions(
-      [{ id: RCP_HONDA, name: '本多 優鷹', provider: 'lineworks' }],
+      [{ id: RCP_HONDA, name: '甲野 一郎', provider: 'lineworks' }],
       [],
     )
     expect(options).toHaveLength(1)
@@ -176,7 +176,7 @@ describe('netprintTargetsPayload', () => {
 })
 
 describe('netprintUnknownDestinationNote', () => {
-  const options = [{ label: '本多 優鷹 (個人)', value: `recipient:${RCP_HONDA}` }]
+  const options = [{ label: '甲野 一郎 (個人)', value: `recipient:${RCP_HONDA}` }]
 
   it('候補一覧にある宛先には注記を出さない', () => {
     const row: NetprintTargetRow = { branchCd: '1', branchName: '', destination: `recipient:${RCP_HONDA}` }

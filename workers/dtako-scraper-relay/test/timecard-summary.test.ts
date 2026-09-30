@@ -38,7 +38,7 @@ function row(
   const last = sessions[sessions.length - 1]
   return {
     driver_id: 1670,
-    name: '松永　寿乃',
+    name: '戊野　花子',
     date,
     start: first?.start ?? null,
     end: last?.end ?? null,
@@ -129,7 +129,7 @@ describe('区間ユーティリティ', () => {
 })
 
 describe('summarizeTimecardDay — 休憩の導出', () => {
-  it('中抜けが昼をまたぐ日は二重控除しない (実データ: 松永 2026-06-11)', () => {
+  it('中抜けが昼をまたぐ日は二重控除しない (実データ: 戊野 2026-06-11)', () => {
     // 07:44:15 → 11:41:10 / 13:14:38 → 16:49:11、拘束 544 分
     const d = summarizeTimecardDay(
       row('2026-06-11', [['07:44:15', '11:41:10'], ['13:14:38', '16:49:11']]),
@@ -311,7 +311,7 @@ describe('summarizeTimecardMonth', () => {
 
   it('乗務員ごとに畳み、乗務員CD の数値順に並べる', () => {
     const rows = [
-      { ...row('2026-06-02', [['08:00:00', '17:00:00']]), driver_id: 1029, name: '冨田　竜' },
+      { ...row('2026-06-02', [['08:00:00', '17:00:00']]), driver_id: 1029, name: '己野　五郎' },
       row('2026-06-01', [['08:00:00', '17:00:00']]),
       row('2026-06-02', [['08:00:00', '19:00:00']]),
     ]
@@ -769,7 +769,7 @@ describe('countLeaves', () => {
 })
 
 describe('summarizeTimecardDay — 打刻エラー (日跨ぎ)', () => {
-  /** 実データ: 佐藤 泰弘 (1065、一般管理事務) 2026-06-08 07:14 → 06-09 18:52。 */
+  /** 実データ: 庚野 六郎 (1065、一般管理事務) 2026-06-08 07:14 → 06-09 18:52。 */
   const SATO = row('2026-06-08', [['07:14:08', '2026-06-09 18:52:15']])
 
   it('事務職・非夜勤の日跨ぎは打刻エラー — 実時間の代わりに所定労働時間で計上する', () => {
@@ -1070,7 +1070,7 @@ describe('summarizeTimecardMonth — 打刻エラーと休暇 (Refs #433)', () =
 
   it('休暇の行しか無い社員も summary に出る (公休の突合ができる)', () => {
     const { summaries } = summarizeTimecardMonth(
-      [{ ...row('2026-06-07', [], 'legal', { leaves: [{ detail: '公休' }] }), driver_id: 1048, name: '宮崎　康博' }],
+      [{ ...row('2026-06-07', [], 'legal', { leaves: [{ detail: '公休' }] }), driver_id: 1048, name: '辛野　七郎' }],
       monthOpts({ isClerical: () => true }),
     )
     expect(summaries.map(s => s.driverCd)).toEqual(['1048'])
@@ -1092,7 +1092,7 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
     ]
     return {
       driver_id: 1722,
-      name: '山下　寿裕',
+      name: '壬野　八郎',
       date,
       start: sessions[0]?.start ?? null,
       end: null,
@@ -1200,7 +1200,7 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
       [
         openRow('2026-06-16', ['07:41:00']),
         openRow('2026-06-17', ['07:45:00']),
-        { ...row('2026-06-23', [['07:38:00', '17:29:00']]), driver_id: 1722, name: '山下　寿裕' },
+        { ...row('2026-06-23', [['07:38:00', '17:29:00']]), driver_id: 1722, name: '壬野　八郎' },
       ],
       {
         yearMonth: '2026-06',
@@ -1215,7 +1215,7 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
     expect(s.workDays).toBe(3) // 退社打刻なしの 2 日も所定 480 分で計上する
     expect(s.workingMinutes).toBe(480 + 480 + 531) // 6/23 は 07:38-17:29 − 昼休憩
     expect(warnings).toEqual([
-      '乗務員 1722 (山下　寿裕): 退社打刻の無い日が 2 日あります (16, 17 日)'
+      '乗務員 1722 (壬野　八郎): 退社打刻の無い日が 2 日あります (16, 17 日)'
       + ' — 時間は所定労働時間で計上しています。打刻を直して取り込み直すと実測に置き換わります',
     ])
   })
@@ -1232,7 +1232,7 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
     )
     expect(summaries[0]!.workDays).toBe(0)
     expect(warnings).toEqual([
-      '乗務員 1722 (山下　寿裕): 退社打刻の無い日が 1 日あります (16 日)'
+      '乗務員 1722 (壬野　八郎): 退社打刻の無い日が 1 日あります (16 日)'
       + ' — うち 1 日は所定労働時間が引けないため賃金計算から外しています。打刻を直して取り込み直すと実測に置き換わります',
     ])
   })

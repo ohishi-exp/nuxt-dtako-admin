@@ -34,7 +34,7 @@ const CH_HONSHA = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
 const CH_OBIHIRO = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d'
 const CH_TEST = '00000000-0000-4000-8000-000000000001'
 // `recipient_id` は DB `notify_recipients` の行 id (個人宛)。実運用ではトークルームが
-// 1 件も登録されておらず、こちら (本多 優鷹) が通知先になる (Refs #874 の 10)。
+// 1 件も登録されておらず、こちら (甲野 一郎) が通知先になる (Refs #874 の 10)。
 const RCP_HONDA = 'e553efc9-4dff-4171-a06d-d3c127b14b94'
 
 const TARGET: NetprintTarget = { branch_cd: '1', channel_id: CH_HONSHA }
@@ -52,7 +52,7 @@ function row(
     operationNo: OPE_HAYASHIDA,
     branchCd,
     branchName,
-    driverName1: '林田 隆則',
+    driverName1: '乙野 二郎',
     vehicleName: '長崎100か3821',
     ...overrides,
   }
@@ -96,8 +96,8 @@ describe('normalizeBranchCd / 日付整形 / ファイル名', () => {
   })
 
   it('describeOperation は乗務員 / 車輌、取れなければ運行No で代用する', () => {
-    expect(describeOperation(row('1'))).toBe('林田 隆則 / 長崎100か3821')
-    expect(describeOperation(row('1', null, { vehicleName: null }))).toBe('林田 隆則')
+    expect(describeOperation(row('1'))).toBe('乙野 二郎 / 長崎100か3821')
+    expect(describeOperation(row('1', null, { vehicleName: null }))).toBe('乙野 二郎')
     expect(describeOperation(row('1', null, { driverName1: null }))).toBe('長崎100か3821')
     // どちらも無い行を無言の空欄にすると「誰の日報か分からない通知」になる。
     expect(describeOperation(row('1', null, { driverName1: null, vehicleName: null }))).toBe(
@@ -115,7 +115,7 @@ describe('通知文', () => {
     })
     expect(text).toBe(
       [
-        '【運転日報】林田 隆則 / 長崎100か3821',
+        '【運転日報】乙野 二郎 / 長崎100か3821',
         '本社営業所 2026/08/24分',
         'プリント予約番号: J5JZPEQJ',
         '有効期限: 2026/08/26 23:59',
@@ -128,14 +128,14 @@ describe('通知文', () => {
   it('運行ごとの失敗は 1 通にまとめ、誰の日報が出なかったかを名指しする', () => {
     expect(
       buildNetprintOperationFailureNotification('本社営業所', '2026-08-24', [
-        { label: '林田 隆則 / 長崎100か3821', detail: 'Error: netprint down' },
-        { label: '松尾 等 / 佐賀100あ6572', detail: 'Error: timeout' },
+        { label: '乙野 二郎 / 長崎100か3821', detail: 'Error: netprint down' },
+        { label: '丙野 三郎 / 佐賀100あ6572', detail: 'Error: timeout' },
       ]),
     ).toBe(
       [
         '【運転日報】本社営業所 2026/08/24分のうち 2 件を登録できませんでした',
-        '・林田 隆則 / 長崎100か3821: Error: netprint down',
-        '・松尾 等 / 佐賀100あ6572: Error: timeout',
+        '・乙野 二郎 / 長崎100か3821: Error: netprint down',
+        '・丙野 三郎 / 佐賀100あ6572: Error: timeout',
       ].join('\n'),
     )
   })
@@ -211,7 +211,7 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
 
   it('recipient_id が Uuid でなければ notify_recipients を名指しした error', () => {
     expect(
-      planNetprintRun({ branch_cd: '1', recipient_id: '本多 優鷹' }, CONFIGURED, '2026-08-24'),
+      planNetprintRun({ branch_cd: '1', recipient_id: '甲野 一郎' }, CONFIGURED, '2026-08-24'),
     ).toEqual({
       error: 'recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)',
     })
@@ -424,20 +424,20 @@ describe('summarizeOperations', () => {
   })
 
   it('全件成功なら件数のあとに予約番号を並べる', () => {
-    expect(summarizeOperations([ok('AAAA1111', '林田'), ok('BBBB2222', '松尾')])).toBe(
+    expect(summarizeOperations([ok('AAAA1111', '乙野'), ok('BBBB2222', '丙野')])).toBe(
       '成功 2 / 失敗 0 (全 2 運行) 予約番号 AAAA1111 / BBBB2222',
     )
   })
 
   it('失敗があれば予約番号より前に「誰が失敗したか」を出す', () => {
-    expect(summarizeOperations([ok('AAAA1111', '林田'), ng('松尾', 'Error: boom')])).toBe(
-      '成功 1 / 失敗 1 (全 2 運行) 失敗 松尾: Error: boom 予約番号 AAAA1111',
+    expect(summarizeOperations([ok('AAAA1111', '乙野'), ng('丙野', 'Error: boom')])).toBe(
+      '成功 1 / 失敗 1 (全 2 運行) 失敗 丙野: Error: boom 予約番号 AAAA1111',
     )
   })
 
   it('全件失敗なら予約番号の欄自体を出さない', () => {
-    expect(summarizeOperations([ng('松尾', 'Error: boom')])).toBe(
-      '成功 0 / 失敗 1 (全 1 運行) 失敗 松尾: Error: boom',
+    expect(summarizeOperations([ng('丙野', 'Error: boom')])).toBe(
+      '成功 0 / 失敗 1 (全 1 運行) 失敗 丙野: Error: boom',
     )
   })
 })
@@ -451,7 +451,7 @@ describe('runNetprintTargets: operation_no で 1 運行だけ (Refs #913)', () =
           row('1', '本社営業所'),
           row('1', '本社営業所', {
             operationNo: OPE_MATSUO,
-            driverName1: '松尾 一',
+            driverName1: '丙野 四郎',
             vehicleName: '長崎100か6572',
           }),
         ],
@@ -480,7 +480,7 @@ describe('runNetprintTargets: operation_no で 1 運行だけ (Refs #913)', () =
     const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', OPE_MATSUO)
     expect(pdfCalls).toEqual([OPE_MATSUO])
     expect(base.sent).toHaveLength(1)
-    expect(base.sent[0].text).toContain('松尾 一')
+    expect(base.sent[0].text).toContain('丙野 四郎')
     expect(results[0]).toMatchObject({
       ok: true,
       // 「全 N 運行」と揃う実処理件数を返す (営業所ぶん走ったように見せない)。
@@ -585,7 +585,7 @@ describe('runNetprintTargets', () => {
         operations: [
           {
             operation_no: OPE_HAYASHIDA,
-            label: '林田 隆則 / 長崎100か3821',
+            label: '乙野 二郎 / 長崎100か3821',
             ok: true,
             print_id: 'J5JZPEQJ',
             detail: '',
@@ -597,7 +597,7 @@ describe('runNetprintTargets', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0].destination).toEqual({ kind: 'channel', id: CH_HONSHA })
     expect(sent[0].text).toContain('プリント予約番号: J5JZPEQJ')
-    expect(sent[0].text).toContain('林田 隆則 / 長崎100か3821')
+    expect(sent[0].text).toContain('乙野 二郎 / 長崎100か3821')
   })
 
   it('運行が複数なら運行ごとに登録して通知も 1 通ずつ出す', async () => {
@@ -608,7 +608,7 @@ describe('runNetprintTargets', () => {
           row('1', '本社営業所'),
           row('1', '本社営業所', {
             operationNo: OPE_MATSUO,
-            driverName1: '松尾　等',
+            driverName1: '丙野　三郎',
             vehicleName: '佐賀100あ6572',
           }),
         ],
@@ -627,8 +627,8 @@ describe('runNetprintTargets', () => {
     expect(results[0]).toMatchObject({ ok: true, rows: 2 })
     expect(results[0].detail).toBe('成功 2 / 失敗 0 (全 2 運行) 予約番号 J5JZPEQ1 / J5JZPEQ2')
     expect(sent).toHaveLength(2)
-    expect(sent[0].text).toContain('林田 隆則')
-    expect(sent[1].text).toContain('松尾　等')
+    expect(sent[0].text).toContain('乙野 二郎')
+    expect(sent[1].text).toContain('丙野　三郎')
     expect(sent[1].text).toContain('プリント予約番号: J5JZPEQ2')
   })
 
@@ -669,7 +669,7 @@ describe('runNetprintTargets', () => {
       fetchReport: async () => ({
         rows: [
           row('1', '本社営業所'),
-          row('1', '本社営業所', { operationNo: OPE_MATSUO, driverName1: '松尾　等' }),
+          row('1', '本社営業所', { operationNo: OPE_MATSUO, driverName1: '丙野　三郎' }),
         ],
       }),
       generatePdf: async () => {
@@ -683,13 +683,13 @@ describe('runNetprintTargets', () => {
     expect(results[0].ok).toBe(true)
     expect(results[0].operations.map((o) => o.ok)).toEqual([false, true])
     expect(results[0].detail).toBe(
-      '成功 1 / 失敗 1 (全 2 運行) 失敗 林田 隆則 / 長崎100か3821: Error: theearth preview timeout 予約番号 J5JZPEQJ',
+      '成功 1 / 失敗 1 (全 2 運行) 失敗 乙野 二郎 / 長崎100か3821: Error: theearth preview timeout 予約番号 J5JZPEQJ',
     )
     // 成功ぶんの通知 1 通 + 失敗のまとめ 1 通 (失敗の数だけは送らない)。
     expect(sent).toHaveLength(2)
     expect(sent[0].text).toContain('プリント予約番号: J5JZPEQJ')
     expect(sent[1].text).toContain('1 件を登録できませんでした')
-    expect(sent[1].text).toContain('林田 隆則 / 長崎100か3821: Error: theearth preview timeout')
+    expect(sent[1].text).toContain('乙野 二郎 / 長崎100か3821: Error: theearth preview timeout')
   })
 
   it('全運行が失敗したら target を ok: false にする', async () => {

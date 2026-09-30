@@ -85,7 +85,7 @@ function listPage(
 </form></body></html>`
 }
 
-const DRIVERS = [{ cd: '1009', name: '大石 一郎', issued: '2021/04/01', expires: '2026/05/20' }]
+const DRIVERS = [{ cd: '1009', name: '丁野 一郎', issued: '2021/04/01', expires: '2026/05/20' }]
 
 function html(body: string): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
@@ -169,7 +169,7 @@ describe('DtakoScraperRelayDO#runDriverMasterSync', () => {
     expect(sent.items).toEqual([
       {
         code: '1009',
-        name: '大石 一郎',
+        name: '丁野 一郎',
         nfc_id: '2021040120260520',
         license_issue_date: '2021-04-01',
         license_expiry_date: '2026-05-20',

@@ -217,11 +217,11 @@ describe('viewNetprintRunResult', () => {
       ok: false,
       detail: detail(502, {
         ok: false,
-        results: [{ detail: '成功 0 / 失敗 1 (全 1 運行) 失敗 林田 隆則: Error: boom' }],
+        results: [{ detail: '成功 0 / 失敗 1 (全 1 運行) 失敗 乙野 二郎: Error: boom' }],
       }),
     })
     expect(view.printIds).toEqual([])
-    expect(view.message).toContain('失敗 林田 隆則')
+    expect(view.message).toContain('失敗 乙野 二郎')
   })
 
   it('複数営業所ぶんの結果が 1 つの detail に入っていれば全部の予約番号を出す', () => {

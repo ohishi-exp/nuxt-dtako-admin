@@ -1669,7 +1669,7 @@ describe('api', () => {
   // 通知先の候補 (alc の tenant API)。`/api/proxy` 経由なので `request()` を通る。
   describe('getNotifyRecipients / getLineworksChannels', () => {
     it('個人の候補は backend の /api/notify/recipients を叩く', async () => {
-      stubOk([{ id: 'r-1', name: '本多 優鷹', provider: 'lineworks' }])
+      stubOk([{ id: 'r-1', name: '甲野 一郎', provider: 'lineworks' }])
       await callApi(() => getNotifyRecipients())
       assertMock(() => {
         expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}/api/notify/recipients`)

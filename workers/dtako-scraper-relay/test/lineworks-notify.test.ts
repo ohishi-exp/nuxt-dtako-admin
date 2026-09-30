@@ -9,7 +9,7 @@ import {
 } from '../src/lineworks-notify'
 
 const CHANNEL = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
-/** 実運用の通知先 (recipient「本多 優鷹」、Refs #874 の 10)。 */
+/** 実運用の通知先 (recipient「甲野 一郎」、Refs #874 の 10)。 */
 const RECIPIENT = 'e553efc9-4dff-4171-a06d-d3c127b14b94'
 const TO_CHANNEL: LineworksDestination = { kind: 'channel', id: CHANNEL }
 const TO_RECIPIENT: LineworksDestination = { kind: 'recipient', id: RECIPIENT }
