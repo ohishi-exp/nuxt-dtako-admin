@@ -82,7 +82,7 @@ import {
   splitDateRangeByMaxDays,
   type LitigationChangeRow,
 } from '~/utils/litigation-changes'
-import { fmtYen, monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
+import { fmtYen, monthRange, nextYm, type WageReportResponse } from '~/utils/restraint-wage-view'
 import {
   buildLitigationSalaryRows,
   LITIGATION_SALARY_STATE_LABELS,
@@ -772,6 +772,7 @@ const salaryConfig = ref<SalaryItemConfig>({ items: {} })
 const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
 const salaryLoading = ref(false)
 const salaryProgress = ref('')
+const salaryLoadingPayMonth = ref<string | null>(null)
 const salaryError = ref('')
 let salaryEpoch = 0
 const SALARY_RETRY = '「給与大臣から読み込む」を押してやり直してください'
@@ -780,6 +781,7 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value
   salaryEpoch++
   salaryPayroll.value = new Map()
   salaryLoading.value = false
+  salaryLoadingPayMonth.value = null
   salaryProgress.value = ''
   salaryError.value = ''
 })
@@ -791,7 +793,10 @@ const salaryRows = computed(() => buildLitigationSalaryRows({
   payroll: salaryPayroll.value,
   config: salaryConfig.value,
   cdMap: salaryCdMap.value,
+  loadingPayMonth: salaryLoadingPayMonth.value,
 }))
+const salaryPayrollLoaded = computed(() =>
+  caseMonths.value.filter(m => salaryPayroll.value.get(nextYm(m))?.ok).length)
 const salaryCounts = computed(() => {
   const c: Record<LitigationSalaryState, number> = { ok: 0, pending: 0, unknown: 0, noPayroll: 0 }
   for (const r of salaryRows.value) c[r.state]++
@@ -827,6 +832,7 @@ async function loadSalaryPayroll() {
     }
     const targets = litigationPayrollMonths(caseMonths.value)
     for (const [i, { workMonth, payMonth }] of targets.entries()) {
+      salaryLoadingPayMonth.value = payMonth
       const rows: SalaryCsvRow[] = []
       let failure: string | null = null
       for (const company of companies) {
@@ -862,7 +868,10 @@ async function loadSalaryPayroll() {
     if (epoch === salaryEpoch) salaryError.value = describeCaughtError(e, SALARY_RETRY)
   }
   finally {
-    if (epoch === salaryEpoch) salaryLoading.value = false
+    if (epoch === salaryEpoch) {
+      salaryLoading.value = false
+      salaryLoadingPayMonth.value = null
+    }
   }
 }
 
@@ -1478,6 +1487,7 @@ function fmtDateTime(iso: string): string {
           <div v-if="salaryError" class="text-sm text-red-600 dark:text-red-400" data-testid="litigation-salary-error">{{ salaryError }}</div>
           <div class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-summary">
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
+            / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月
           </div>
 
           <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
@@ -1505,6 +1515,7 @@ function fmtDateTime(iso: string): string {
                   <td class="px-3 py-2 min-w-40">
                     <span class="text-xs rounded px-2 py-0.5 whitespace-nowrap" :class="SALARY_STATE_CLASS[row.state]">{{ LITIGATION_SALARY_STATE_LABELS[row.state] }}</span>
                     <div v-if="row.message" class="text-xs text-gray-600 dark:text-gray-400 mt-1">{{ row.message }}</div>
+                    <div v-if="row.payrollNote" class="text-xs text-gray-600 dark:text-gray-400 mt-1" data-salary-payroll>{{ row.payrollNote }}</div>
                   </td>
                   <template v-if="row.compared">
                     <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ fmtYen(row.compared.csvBase) }} / {{ fmtYen(row.compared.sysBase) }} / {{ fmtDiff(row.compared.diffBase) }}</td>

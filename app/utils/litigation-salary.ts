@@ -37,6 +37,9 @@ export interface LitigationSalaryRow {
   payMonth: string
   state: LitigationSalaryState
   message: string
+  /** 拘束の材料の段階で止まった行だけ、その行の支給月の明細の状況 (それ以外は message が言うので '')。
+   * 状態 (バッジ) は変えない — 明細を何か月読んでも表に出ない、を避けるための 1 行 */
+  payrollNote: string
   /** `state === 'ok'` のときだけ */
   compared: SalaryComparisonRow | null
 }
@@ -51,6 +54,8 @@ export interface LitigationSalaryInput {
   payroll: ReadonlyMap<string, LitigationFetched<SalaryCsvRow[]>>
   config: SalaryItemConfig
   cdMap: SalaryCdMap
+  /** いま読んでいる支給月 (読んでいなければ null) */
+  loadingPayMonth: string | null
 }
 
 const sameCd = (a: string, b: string) => String(Number(a)) === String(Number(b))
@@ -79,19 +84,22 @@ export function buildLitigationSalaryRows(input: LitigationSalaryInput): Litigat
   for (const driverCd of input.driverCds) {
     for (const month of input.months) {
       const payMonth = nextYm(month)
-      const base = { driverCd, month, payMonth, compared: null }
+      const base = { driverCd, month, payMonth, compared: null, payrollNote: '' }
       const wage = input.wageReports.get(litigationDriverMonthKey(driverCd, month))
       const pay = input.payroll.get(payMonth)
+      const payrollNote = !pay
+        ? (payMonth === input.loadingPayMonth ? '明細: 読込中' : '明細: 未読込')
+        : pay.ok ? '明細: 読込済み' : `明細: 読めない — ${pay.reason}`
       if (!wage) {
-        out.push({ ...base, state: 'pending', message: '拘束の材料が未取得 — エラータブで「検知を実行」' })
+        out.push({ ...base, payrollNote, state: 'pending', message: '拘束の材料が未取得 — エラータブで「検知を実行」' })
         continue
       }
       if (!wage.ok) {
-        out.push({ ...base, state: 'unknown', message: `拘束の材料が取れていない: ${wage.reason}` })
+        out.push({ ...base, payrollNote, state: 'unknown', message: `拘束の材料が取れていない: ${wage.reason}` })
         continue
       }
       if (!wage.value.rows.some(r => sameCd(r.summary.driverCd, driverCd))) {
-        out.push({ ...base, state: 'unknown', message: 'この月の賃金計算にこの乗務員の行が無い' })
+        out.push({ ...base, payrollNote, state: 'unknown', message: 'この月の賃金計算にこの乗務員の行が無い' })
         continue
       }
       if (!pay) {

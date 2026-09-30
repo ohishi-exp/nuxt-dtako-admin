@@ -78,6 +78,8 @@ let febOnpremOpeNos: string[] = []
 let storedItems: unknown[] = []
 /** 給与大臣の payroll を 403 にする */
 let payrollForbidden = false
+/** 立てておくと、給与大臣の payroll は勤務月 2025-02 (= 拘束の材料が取れていない月) だけ、この Promise が解けるまで返らない (読込中の表を見る) */
+let payrollGate: Promise<void> | null = null
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -119,6 +121,7 @@ function stubDollarFetch() {
     if (url === '/restraint-api/salary-item-config') return { exists: true, data: { items: { 基本給: 'base', 残業手当: 'overtime' } } }
     if (url === '/api/kyuyo/payroll') {
       if (payrollForbidden) throw Object.assign(new Error('forbidden'), { statusCode: 403 })
+      if (payrollGate && q.month === '2025-02') await payrollGate
       // 勤務月 q.month の翌月に支給 (pay_date が支給月)
       const [y, m] = (q.month as string).split('-').map(Number) as [number, number]
       const pay = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`
@@ -196,6 +199,7 @@ beforeEach(() => {
   })
   storedItems = []
   payrollForbidden = false
+  payrollGate = null
   saved.length = 0
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -519,6 +523,52 @@ describe('給与比較タブ', () => {
     expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('拘束の材料が取れていない')
     // 給与の書き込み口 (sync) は叩かない
     expect(calls.filter(c => c.url.includes('/api/kyuyo/sync'))).toHaveLength(0)
+    w.unmount()
+  })
+
+  const payrollNote = (w: VueWrapper, row: string) => w.find(`[data-salary-row="${row}"] [data-salary-payroll]`)
+
+  it('★ 明細の状況を行ごとに出す: 材料が取れていない行でも 未読込 → 読込中 → 読込済み と変わり、集計行に 読込済み N / M か月', async () => {
+    const w = await openSalaryAfterChecks()
+    // 2 月は wage-report が 504 (材料が取れていない) — それでも明細の状況は出る
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 未読込')
+    expect(w.find('[data-testid="litigation-salary-summary"]').text()).toContain('明細 読込済み 0 / 2 か月')
+    let release!: () => void
+    payrollGate = new Promise<void>((r) => { release = r })
+    await buttonByText(w, '給与大臣から読み込む').trigger('click')
+    await settle()
+    // 2 か月目 (2025-03 支給) を読んでいる最中。1 か月目 (材料が有る行) は message が「読めた」を言う
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 読込中')
+    expect(payrollNote(w, '1078|2025-01').exists()).toBe(false)
+    expect(w.find('[data-testid="litigation-salary-summary"]').text()).toContain('明細 読込済み 1 / 2 か月')
+    expect(w.find('[data-testid="litigation-salary-progress"]').text()).toContain('2 / 2')
+    release()
+    await settle()
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 読込済み')
+    // 材料が有って明細まで進んだ行は message 側が言うので、この 1 行は出さない
+    expect(payrollNote(w, '1078|2025-01').exists()).toBe(false)
+    expect(w.find('[data-testid="litigation-salary-summary"]').text()).toContain('明細 読込済み 2 / 2 か月')
+    // 読み終えたら 読込中 は残らない
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中')
+    w.unmount()
+  })
+
+  it('★ 読んでいる最中に案件を閉じて開き直しても、読込中は残らない (epoch 切替)', async () => {
+    const w = await openSalaryAfterChecks()
+    let release!: () => void
+    payrollGate = new Promise<void>((r) => { release = r })
+    await buttonByText(w, '給与大臣から読み込む').trigger('click')
+    await settle()
+    expect(payrollNote(w, '1078|2025-02').text()).toBe('明細: 読込中')
+    await buttonByText(w, '閉じる').trigger('click')
+    await buttonByText(w, '開く').trigger('click')
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中')
+    release()
+    await settle()
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('読込中')
+    expect(w.find('[data-testid="litigation-salary-summary"]').text()).toContain('明細 読込済み 0 / 2 か月')
     w.unmount()
   })
 

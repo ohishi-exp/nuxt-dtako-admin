@@ -46,6 +46,7 @@ function input(over: Partial<LitigationSalaryInput> = {}): LitigationSalaryInput
     payroll: new Map([['2023-07', { ok: true, value: [pay('1590', '髙浪 久典', '2023-07')] }]]),
     config,
     cdMap: { entries: {} },
+    loadingPayMonth: null,
     ...over,
   }
 }
@@ -89,6 +90,26 @@ describe('buildLitigationSalaryRows', () => {
   it('給与明細: 未読込 / 読めない を言い分ける', () => {
     expect(buildLitigationSalaryRows(input({ payroll: new Map() }))[0]).toMatchObject({ state: 'pending', message: '給与明細が未読込 — 「給与大臣から読み込む」' })
     expect(buildLitigationSalaryRows(input({ payroll: new Map([['2023-07', { ok: false, reason: '403 権限なし' }]]) }))[0]).toMatchObject({ state: 'unknown', message: '給与明細が読めない: 403 権限なし' })
+  })
+
+  it('★ payrollNote: 拘束の材料で止まった行でも、その支給月の明細の状況 (未読込 / 読込中 / 読めない / 読込済み) を言う', () => {
+    const noWage = { wageReports: new Map() }
+    const note = (over: Partial<LitigationSalaryInput>) => buildLitigationSalaryRows(input({ ...noWage, ...over }))[0]!
+    expect(note({ payroll: new Map() }).payrollNote).toBe('明細: 未読込')
+    expect(note({ payroll: new Map(), loadingPayMonth: '2023-07' }).payrollNote).toBe('明細: 読込中')
+    expect(note({ payroll: new Map(), loadingPayMonth: '2023-08' }).payrollNote).toBe('明細: 未読込')
+    expect(note({ payroll: new Map([['2023-07', { ok: false, reason: '403 権限なし' }]]) }).payrollNote).toBe('明細: 読めない — 403 権限なし')
+    const loaded = note({})
+    expect(loaded).toMatchObject({ state: 'pending', payrollNote: '明細: 読込済み' })
+    // 材料が取れていない / 賃金計算に行が無い でも同じ
+    expect(buildLitigationSalaryRows(input({ wageReports: new Map([['1590|2023-06', { ok: false, reason: '504' }]]) }))[0]!.payrollNote).toBe('明細: 読込済み')
+    expect(buildLitigationSalaryRows(input({ wageReports: new Map([['1590|2023-06', wage([])]]) }))[0]!.payrollNote).toBe('明細: 読込済み')
+  })
+
+  it('★ 材料が有って先へ進んだ行は payrollNote を出さない (message が明細の状況を言っている)', () => {
+    expect(buildLitigationSalaryRows(input())[0]!.payrollNote).toBe('')
+    expect(buildLitigationSalaryRows(input({ payroll: new Map() }))[0]).toMatchObject({ message: expect.stringContaining('未読込'), payrollNote: '' })
+    expect(buildLitigationSalaryRows(input({ payroll: new Map([['2023-07', { ok: false, reason: 'x' }]]) }))[0]!.payrollNote).toBe('')
   })
 
   it('★ 氏名の違う給与行が同じ乗務員に引き当たったら比較せず「比較できない」', () => {
