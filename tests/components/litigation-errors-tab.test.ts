@@ -88,7 +88,10 @@ let caseUpdatedAt = CASE.updatedAt
 /** 立てておくと、給与大臣の payroll は勤務月 2025-02 (= 拘束の材料が取れていない月) だけ、この Promise が解けるまで返らない (読込中の表を見る) */
 let payrollGate: Promise<void> | null = null
 /** `GET /restraint-api/employee-master` が返す社員マスタ (PUT が成功すると足される) */
-let employeeMaster: { company: string, payrollCd: string, name: string, driverCd: string | null }[] = []
+let employeeMaster: { company: string, payrollCd: string, name: string, driverCd: string | null, attrs?: Record<string, unknown>[] }[] = []
+/** `GET /api/kyuyo/employees` (給与大臣の社員一覧) が返す行。空にすると「その年度に居ない」 */
+let kyuyoEmployeeRows: Record<string, unknown>[] = []
+let kyuyoEmployeesFails = false
 /** 社員マスタの PUT を 500 にする */
 let employeePutFails = false
 let calls: Call[] = []
@@ -134,10 +137,19 @@ function stubDollarFetch() {
     if (url === '/restraint-api/employee-master') {
       if (opts.method === 'PUT') {
         if (employeePutFails) throw Object.assign(new Error('d1 down'), { statusCode: 500 })
-        employeeMaster = [...employeeMaster, ...(opts.body as { employees: typeof employeeMaster }).employees]
+        const body = opts.body as { employees: typeof employeeMaster, attrs: (Record<string, unknown> & { company: string, payrollCd: string })[] }
+        employeeMaster = [...employeeMaster, ...body.employees]
+        employeeMaster = employeeMaster.map(e => ({
+          ...e,
+          attrs: [...(e.attrs ?? []), ...body.attrs.filter(a => a.company === e.company && a.payrollCd === e.payrollCd)],
+        }))
         return { ok: true }
       }
-      return { employees: employeeMaster }
+      return { employees: employeeMaster.map(e => ({ attrs: [], ...e })) }
+    }
+    if (url === '/api/kyuyo/employees') {
+      if (kyuyoEmployeesFails) throw Object.assign(new Error('kyuyo down'), { statusCode: 502 })
+      return { company: q.company, company_name: 'テスト運輸', month: q.month, database: 'KYDATA0200_125C', employees: kyuyoEmployeeRows, warnings: [] }
     }
     if (url === '/restraint-api/salary-item-config') return { exists: true, data: { items: { 基本給: 'base', 残業手当: 'overtime' } } }
     if (url === '/api/kyuyo/payroll') {
@@ -228,6 +240,12 @@ beforeEach(() => {
   payrollGate = null
   employeeMaster = [{ company: '0200', payrollCd: '747', name: '甲野 太郎', driverCd: '1078' }]
   employeePutFails = false
+  kyuyoEmployeesFails = false
+  // 給与大臣の同じ会社に、登録対象の 747 (日給) と別人が居る
+  kyuyoEmployeeRows = [
+    { employee_code: '0747', employee_code_key: '747', employee_name: '甲野太郎', department: '本社', department_code: 3, branch_name: '本社営業所', job_name: '乗務員', taikei: 1, kkubun: 2, hire_date: null, retire_date: null, retired: false },
+    { employee_code: '0748', employee_code_key: '748', employee_name: '乙山次郎', department: '本社', taikei: 1, kkubun: 1, retired: false },
+  ]
   caseUpdatedAt = CASE.updatedAt
   saved.length = 0
   localStorage.clear()
@@ -768,7 +786,7 @@ describe('給与比較タブ', () => {
       expect(puts).toHaveLength(1)
       expect(puts[0]!.body).toEqual({
         employees: [{ company: '0200', payrollCd: '747', name: '甲野太郎', driverCd: '1078', hireDate: null, retireDate: null }],
-        attrs: [],
+        attrs: [{ company: '0200', payrollCd: '747', effectiveFrom: '2025-01-01', branch: '本社', payScheme: '体系1', branchCode: 3, branchName: '本社営業所', jobName: '乗務員', payKubun: 2 }],
         deleteAttrs: [],
         deleteEmployees: [],
       })
@@ -776,7 +794,7 @@ describe('給与比較タブ', () => {
       expect(payrollCalls()).toHaveLength(payrollBefore)
       expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('比較済み')
       expect(w.find('[data-salary-row="1078|2025-02"]').text()).toContain('比較済み')
-      expect(message(w)).toBe('社員マスタに登録しました: 747 甲野太郎 (会社 0200) → 乗務員 1078')
+      expect(message(w)).toBe('社員マスタに登録しました: 747 甲野太郎 (会社 0200) → 乗務員 1078 — 区分を入れました。基本給の計算に反映するには拘束の材料を取り直してください')
       // 「明細なし」が無くなればボタンも消える
       expect(w.find('[data-testid="litigation-salary-register"]').exists()).toBe(false)
       w.unmount()
@@ -816,6 +834,147 @@ describe('給与比較タブ', () => {
       expect(employeeCalls().map(c => c.method)).toEqual(['PUT'])
       expect(w.find('[data-salary-row="1078|2025-01"]').text()).toContain('明細なし')
       expect(registerBtns(w)[0]!.attributes('disabled')).toBeUndefined()
+      w.unmount()
+    })
+  })
+
+  describe('社員マスタに属性 (給与区分) も入れ、拘束の材料を取り直す', () => {
+    const registerBtns = (w: VueWrapper) => w.findAll('[data-testid="litigation-salary-register-button"]')
+    const attrsBtns = (w: VueWrapper) => w.findAll('[data-testid="litigation-salary-attrs-button"]')
+    const retakeBtn = (w: VueWrapper) => w.find('[data-testid="litigation-salary-materials-retake"]')
+    const message = (w: VueWrapper) => w.find('[data-testid="litigation-salary-register-message"]').text()
+    const employeeCalls = () => calls.filter(c => c.url.startsWith('/restraint-api/employee-master'))
+    const kyuyoCalls = () => calls.filter(c => c.url.startsWith('/api/kyuyo/employees'))
+    const puts = () => employeeCalls().filter(c => c.method === 'PUT')
+
+    beforeEach(() => {
+      // 給与コード 747 (明細) と乗務員CD 1078 の対応が社員マスタに無い
+      employeeMaster = []
+      febWageFails = false
+    })
+
+    it('★ 登録: 給与大臣の社員一覧を 1 回 (会社と案件の最初の月で) 読み、その 1 人の属性を案件の最初の月の 1 日付けで PUT する。旧ラベルの削除は送らない', async () => {
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      calls = []
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      expect(kyuyoCalls().map(c => c.url)).toEqual(['/api/kyuyo/employees?company=0200&month=2025-01'])
+      expect(puts()).toHaveLength(1)
+      const body = puts()[0]!.body as { employees: unknown[], attrs: { payrollCd: string, effectiveFrom: string, payKubun: number }[], deleteAttrs: unknown[], deleteEmployees: unknown[] }
+      expect(body.employees).toHaveLength(1)
+      // 同じ会社の別人 (748) の属性は載らない
+      expect(body.attrs.map(a => [a.payrollCd, a.effectiveFrom, a.payKubun])).toEqual([['747', '2025-01-01', 2]])
+      expect(body.deleteAttrs).toEqual([])
+      expect(body.deleteEmployees).toEqual([])
+      expect(retakeBtn(w).text()).toBe('拘束の材料を取り直す (2 か月)')
+      w.unmount()
+    })
+
+    it('★ 「拘束の材料を取り直す」は wage-report だけを月の数だけ直列に取り直す (alc の運行・オンプレ突き合わせは呼ばない)。開いただけ・登録しただけでは走らない', async () => {
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      calls = []
+      api.getOperations.mockClear()
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      expect(calls.filter(c => c.url.startsWith('/restraint-api/wage-report'))).toHaveLength(0)
+      await retakeBtn(w).trigger('click')
+      await settle()
+      expect(calls.filter(c => c.url.startsWith('/restraint-api/wage-report')).map(c => c.url)).toEqual([
+        '/restraint-api/wage-report?month=2025-01&source=gcp',
+        '/restraint-api/wage-report?month=2025-02&source=gcp',
+      ])
+      expect(calls.filter(c => c.url.startsWith('/restraint-api/kintai/onprem-month-operations'))).toHaveLength(0)
+      expect(api.getOperations).not.toHaveBeenCalled()
+      // 取り直し終わったらボタンは消える
+      expect(retakeBtn(w).exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('★ 給与大臣のその年度に居ないときは属性なしで登録し、その旨を出す (取り直しボタンは出さない)', async () => {
+      kyuyoEmployeeRows = []
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      const body = puts()[0]!.body as { employees: unknown[], attrs: unknown[] }
+      expect(body.employees).toHaveLength(1)
+      expect(body.attrs).toEqual([])
+      expect(message(w)).toContain('給与区分が取れませんでした (給与大臣の 2025-01 の年度に居ない) — 拘束×賃金の社員マスタタブで区分を入れてください')
+      expect(retakeBtn(w).exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('★ 給与大臣を読めなかったときも登録は通し、読めなかった旨を出す', async () => {
+      kyuyoEmployeesFails = true
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      expect((puts()[0]!.body as { attrs: unknown[] }).attrs).toEqual([])
+      expect(message(w)).toContain('社員マスタに登録しました')
+      expect(message(w)).toContain('給与区分が取れませんでした')
+      w.unmount()
+    })
+
+    it('★ 給与区分が 0 (給与大臣に無い) の社員は、成功文ではなく基本給は計算できない旨を出し、取り直しを促さない', async () => {
+      kyuyoEmployeeRows = [{ employee_code: '0747', employee_code_key: '747', employee_name: '甲野太郎', department: '本社', taikei: 1, kkubun: 0, retired: false }]
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      await registerBtns(w)[0]!.trigger('click')
+      await settle()
+      expect(message(w)).toContain('給与区分が給与大臣に無いので基本給は計算できません')
+      expect(message(w)).not.toContain('区分を入れました')
+      expect(retakeBtn(w).exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('★ 登録済みで属性が空の人には「属性を入れる」を出し、押すと employees: [] で attrs だけ PUT する (氏名・乗務員CD を上書きしない)', async () => {
+      employeeMaster = [{ company: '0200', payrollCd: '747', name: '古い写し', driverCd: '1078' }]
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(registerBtns(w)).toHaveLength(0)
+      expect(attrsBtns(w).map(b => b.text())).toEqual(['属性を入れる: 747 古い写し (会社 0200) — 給与大臣の区分・所属を 2025-01 付けで入れる'])
+      calls = []
+      await attrsBtns(w)[0]!.trigger('click')
+      await settle()
+      expect(kyuyoCalls()).toHaveLength(1)
+      expect(puts()).toHaveLength(1)
+      const body = puts()[0]!.body as { employees: unknown[], attrs: { payrollCd: string, payKubun: number }[], deleteAttrs: unknown[], deleteEmployees: unknown[] }
+      expect(body.employees).toEqual([])
+      expect(body.attrs.map(a => [a.payrollCd, a.payKubun])).toEqual([['747', 2]])
+      expect(body.deleteAttrs).toEqual([])
+      expect(body.deleteEmployees).toEqual([])
+      expect(message(w)).toContain('属性を入れました: 747 古い写し (会社 0200) → 乗務員 1078')
+      // 入れたら候補から消え、取り直しが出る
+      expect(attrsBtns(w)).toHaveLength(0)
+      expect(retakeBtn(w).exists()).toBe(true)
+      w.unmount()
+    })
+
+    it('★ 属性が 1 行でも在る人、乗務員CD が無い人、案件の外の人には「属性を入れる」を出さない', async () => {
+      employeeMaster = [
+        { company: '0200', payrollCd: '747', name: '甲野太郎', driverCd: '1078', attrs: [{ effectiveFrom: '2024-04-01', payKubun: 1 }] },
+        { company: '0200', payrollCd: '748', name: '乙山次郎', driverCd: null },
+        { company: '0200', payrollCd: '749', name: '丙川三郎', driverCd: '2222' },
+      ]
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      expect(w.find('[data-testid="litigation-salary-attrs"]').exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('★ 属性を入れるとき給与大臣のその年度に居なければ PUT しない', async () => {
+      employeeMaster = [{ company: '0200', payrollCd: '747', name: '甲野太郎', driverCd: '1078' }]
+      kyuyoEmployeeRows = []
+      const w = await openAfterChecks()
+      await openSalaryTab(w)
+      calls = []
+      await attrsBtns(w)[0]!.trigger('click')
+      await settle()
+      expect(puts()).toHaveLength(0)
+      expect(message(w)).toContain('属性を入れられませんでした')
       w.unmount()
     })
   })

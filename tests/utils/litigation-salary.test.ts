@@ -5,7 +5,7 @@
  * - 材料が取れていない・明細に居ない・引き当てが衝突 を「比較済み」と同じ見た目にしない
  */
 import { describe, it, expect } from 'vitest'
-import { buildLitigationSalaryRows, litigationPayrollMonths, litigationRegisterCandidates, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
+import { buildLitigationSalaryRows, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
 import type { SalaryCsvRow } from '~/utils/salary-compare'
 import type { WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
 import type { LitigationFetched } from '~/utils/litigation-errors'
@@ -163,5 +163,36 @@ describe('litigationRegisterCandidates', () => {
   it('同じ乗務員に 2 件以上の給与コードが提案されたら、その乗務員の候補は全部出さない', () => {
     const payrollRows = [pay('9001', '山田 太郎', '2023-07'), pay('9001', '山田 太郎', '2023-07', { company: '0300' })]
     expect(litigationRegisterCandidates(reg({ payrollRows }))).toEqual([])
+  })
+})
+
+describe('litigationAttrsCandidates / narrowKyuyoEmployees (属性を入れる)', () => {
+  const emp = (over: Partial<{ company: string, payrollCd: string, name: string, driverCd: string | null, attrs: { effectiveFrom: string }[] }> = {}) => ({
+    company: '0200', payrollCd: '9001', name: '山田太郎', driverCd: '9101', attrs: [], ...over,
+  }) as never
+
+  it('乗務員CD が案件の乗務員で、属性が空の社員だけ挙げる', () => {
+    expect(litigationAttrsCandidates({ employees: [emp()], caseDriverCds: ['9101'] }))
+      .toEqual([{ company: '0200', payrollCd: '9001', name: '山田太郎', driverCd: '9101' }])
+    // 乗務員CD の前ゼロは同じ乗務員
+    expect(litigationAttrsCandidates({ employees: [emp({ driverCd: '09101' })], caseDriverCds: ['9101'] })).toHaveLength(1)
+  })
+
+  it('属性が 1 行でも在る・乗務員CD が無い・案件の外は挙げない', () => {
+    const employees = [
+      emp({ attrs: [{ effectiveFrom: '2023-04-01' }] }),
+      emp({ payrollCd: '9002', driverCd: null }),
+      emp({ payrollCd: '9003', driverCd: '9999' }),
+    ]
+    expect(litigationAttrsCandidates({ employees, caseDriverCds: ['9101'] })).toEqual([])
+  })
+
+  it('給与大臣の一覧を給与コードが一致する 1 人に絞る (前ゼロは同じ社員、他の欄はそのまま)', () => {
+    const row = (key: string) => ({ employee_code: key, employee_code_key: key, employee_name: key, department: '', taikei: 0, retired: false })
+    const res = { company: '0200', company_name: '架空運輸', month: '2023-06', database: 'x', employees: [row('9001'), row('9002')], warnings: [] }
+    const out = narrowKyuyoEmployees(res, '09001')
+    expect(out.employees.map(r => r.employee_code_key)).toEqual(['9001'])
+    expect(out.company).toBe('0200')
+    expect(narrowKyuyoEmployees(res, '9999').employees).toEqual([])
   })
 })
