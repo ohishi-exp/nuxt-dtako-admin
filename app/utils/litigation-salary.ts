@@ -319,8 +319,8 @@ export function minWageBasisLabel(b: { minWageRate: number, minWagePrefecture: s
  * 黙って一致扱いにしない。
  */
 export function rateBasisStatus(b: SalaryRateBasis): { status: RateBasisStatus, message: string } {
-  if (b.hourlyRate === null) return { status: 'unknown', message: '判定できない: 単価マスタに単価が無い' }
-  if (b.minWageRate === null) return { status: 'unknown', message: '判定できない: この月の最低賃金が引けない' }
+  if (b.hourlyRate === null) return { status: 'unknown', message: '判定できない: 単価マスタに単価が無い (上の『直し方』の手順で単価を入れる)' }
+  if (b.minWageRate === null) return { status: 'unknown', message: '判定できない: この月の最低賃金が引けない (上の『直し方』で取り込み → 取り直し)' }
   if (b.hourlyRate === b.minWageRate) return { status: 'ok', message: '最低賃金と一致' }
   return { status: 'mismatch', message: `最低賃金 ${minWageBasisLabel({ ...b, minWageRate: b.minWageRate })} と違う` }
 }
@@ -376,4 +376,45 @@ export function rateBasisPeriods(rows: readonly LitigationSalaryRow[]): RateBasi
     }
   }
   return out
+}
+
+/** 「判定できない」の直し方 1 種類ぶん: 該当の行数と月の範囲 (`YYYY-MM`、両端を含む)。 */
+export interface RateBasisFixGroup {
+  count: number
+  from: string
+  to: string
+}
+
+export interface RateBasisFixes {
+  /** 最低賃金が引けない月のうち、所属から県は引けている (最低賃金マスタに無い = 取り込めば引ける) */
+  minWageMissing: RateBasisFixGroup | null
+  /** 最低賃金が引けない月のうち、所属から県が引けない (県を設定するまで取り込んでも引けない) */
+  prefectureMissing: RateBasisFixGroup | null
+  /** 単価マスタに単価が無い月 (最低賃金が引けない月と重なることがある — 両方の手当てが要る) */
+  rateMissing: RateBasisFixGroup | null
+}
+
+/**
+ * 給与比較の「判定できない」月を、直し方ごとに数える。**最低賃金がマスタにあるかは判定しない**
+ * (月の引き当ては relay の `minWageForBranch` が正本)。引けなかった結果 (`minWageRate` が null) と、
+ * 県が引けているか (`minWagePrefecture`) だけを見る。`mapped: false` でも県が非 null なら県は引けている扱い。
+ */
+export function rateBasisFixes(rows: readonly LitigationSalaryRow[]): RateBasisFixes {
+  const acc = { minWageMissing: [] as string[], prefectureMissing: [] as string[], rateMissing: [] as string[] }
+  for (const row of rows) {
+    const b = row.compared?.rateBasis
+    if (!b) continue
+    if (b.hourlyRate === null) acc.rateMissing.push(row.month)
+    if (b.minWageRate === null) (b.minWagePrefecture === null ? acc.prefectureMissing : acc.minWageMissing).push(row.month)
+  }
+  const group = (months: string[]): RateBasisFixGroup | null => {
+    if (months.length === 0) return null
+    const sorted = [...months].sort()
+    return { count: months.length, from: sorted[0]!, to: sorted[sorted.length - 1]! }
+  }
+  return {
+    minWageMissing: group(acc.minWageMissing),
+    prefectureMissing: group(acc.prefectureMissing),
+    rateMissing: group(acc.rateMissing),
+  }
 }

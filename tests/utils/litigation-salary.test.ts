@@ -5,7 +5,7 @@
  * - 材料が取れていない・明細に居ない・引き当てが衝突 を「比較済み」と同じ見た目にしない
  */
 import { describe, it, expect } from 'vitest'
-import { buildLitigationSalaryRows, diffSignClass, minWageBasisLabel, rateBasisLabel, rateBasisPeriods, rateBasisStatus, type LitigationSalaryRow, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
+import { buildLitigationSalaryRows, diffSignClass, minWageBasisLabel, rateBasisLabel, rateBasisFixes, rateBasisPeriods, rateBasisStatus, type LitigationSalaryRow, litigationPayrollMonths, litigationAttrsCandidates, litigationRegisterCandidates, narrowKyuyoEmployees, type LitigationRegisterInput, type LitigationSalaryInput } from '~/utils/litigation-salary'
 import type { SalaryCsvRow, SalaryRateBasis } from '~/utils/salary-compare'
 import type { WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
 import type { LitigationFetched } from '~/utils/litigation-errors'
@@ -290,9 +290,9 @@ describe('rateBasisStatus / rateBasisLabel (計算に使った単価と最低賃
 
   it('★ どちらかが無ければ unknown (一致扱いにしない): 単価なし / 最低賃金が引けない', () => {
     expect(rateBasisStatus(basis({ hourlyRate: null })).status).toBe('unknown')
-    expect(rateBasisStatus(basis({ hourlyRate: null })).message).toContain('単価マスタに単価が無い')
+    expect(rateBasisStatus(basis({ hourlyRate: null })).message).toBe('判定できない: 単価マスタに単価が無い (上の『直し方』の手順で単価を入れる)')
     expect(rateBasisStatus(basis({ minWageRate: null })).status).toBe('unknown')
-    expect(rateBasisStatus(basis({ minWageRate: null })).message).toContain('最低賃金が引けない')
+    expect(rateBasisStatus(basis({ minWageRate: null })).message).toBe('判定できない: この月の最低賃金が引けない (上の『直し方』で取り込み → 取り直し)')
   })
 
   it('単価の表示: 適用年月・県つき / 県なし / 適用開始なし (古い保存物) / 単価なし', () => {
@@ -354,5 +354,41 @@ describe('rateBasisPeriods (紙面の「計算に使った単価」一覧)', () 
   it('単価なしの月は unknown として期間に入る (hourlyRate null)', () => {
     const ps = rateBasisPeriods([row('9001', '2025-01', b({ hourlyRate: null, effectiveFrom: null, prefecture: null }))])
     expect(ps[0]).toMatchObject({ hourlyRate: null, unknownMonths: 1, mismatchMonths: 0 })
+  })
+})
+
+describe('rateBasisFixes (判定できない月の直し方)', () => {
+  const b = (over: Partial<SalaryRateBasis> = {}): SalaryRateBasis => ({
+    hourlyRate: 1000, effectiveFrom: '2024-10-05', prefecture: '架空県',
+    minWageRate: 1000, minWagePrefecture: '架空県', minWageEffectiveFrom: '2024-10-01', ...over,
+  })
+  const row = (month: string, basis: SalaryRateBasis | null, driverCd = '9001'): LitigationSalaryRow => ({
+    driverCd, month, payMonth: month, state: basis ? 'ok' : 'unknown', message: '', payrollNote: '',
+    compared: basis ? ({ rateBasis: basis } as unknown as SalaryComparisonRow) : null,
+  })
+  const none = { minWageMissing: null, prefectureMissing: null, rateMissing: null }
+
+  it('判定できない月が無ければ全部 null (比較できていない月・一致・違う月は数えない)', () => {
+    expect(rateBasisFixes([])).toEqual(none)
+    expect(rateBasisFixes([row('2025-01', null), row('2025-02', b()), row('2025-03', b({ hourlyRate: 1100 }))])).toEqual(none)
+  })
+
+  it('★ 最低賃金が引けない月は、県が引けている (prefecture 非 null) なら取り込み対象。件数と月の範囲 (順不同でも最小〜最大)', () => {
+    const f = rateBasisFixes([row('2025-03', b({ minWageRate: null })), row('2025-01', b({ minWageRate: null })), row('2025-02', b()), row('2025-01', b({ minWageRate: null }), '9002')])
+    expect(f.minWageMissing).toEqual({ count: 3, from: '2025-01', to: '2025-03' })
+    expect(f.prefectureMissing).toBeNull()
+    expect(f.rateMissing).toBeNull()
+  })
+
+  it('★ 最低賃金が引けず県も null の月は「県を設定する」側に分ける (取り込み対象にしない)', () => {
+    const f = rateBasisFixes([row('2025-01', b({ minWageRate: null, minWagePrefecture: null })), row('2025-02', b({ minWageRate: null }))])
+    expect(f.prefectureMissing).toEqual({ count: 1, from: '2025-01', to: '2025-01' })
+    expect(f.minWageMissing).toEqual({ count: 1, from: '2025-02', to: '2025-02' })
+  })
+
+  it('★ 単価マスタに単価が無い月は別に数える。最低賃金も引けない月は両方に入る (両方の手当てが要る)', () => {
+    const f = rateBasisFixes([row('2025-01', b({ hourlyRate: null })), row('2025-02', b({ hourlyRate: null, minWageRate: null }))])
+    expect(f.rateMissing).toEqual({ count: 2, from: '2025-01', to: '2025-02' })
+    expect(f.minWageMissing).toEqual({ count: 1, from: '2025-02', to: '2025-02' })
   })
 })
