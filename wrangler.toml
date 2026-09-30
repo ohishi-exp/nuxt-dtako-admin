@@ -119,6 +119,8 @@ NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 # CF Access Service Token の client_id (公開識別子なので secret ではなく var、
 # nuxt-ichibanboshi/wrangler.toml の NUXT_CF_ACCESS_CLIENT_ID と同値・同トークン共用)。
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
+# 給与大臣の上流: onprem / shadow / worker (server/utils/kyuyo-upstream.ts)。本番だけ shadow で並走比較中
+NUXT_KYUYO_UPSTREAM = "shadow"
 
 # secret-verify (frontend-ci) 用の明示宣言。**必ず空 `[]` にする**。
 # `secrets.required` は CI secret-verify の監査対象であると同時に **wrangler が
