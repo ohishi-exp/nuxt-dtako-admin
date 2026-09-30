@@ -329,7 +329,7 @@ describe('joinDriverAttr', () => {
 describe('planIchibanMatch', () => {
   // 実データ形状: 社員R が表示名、社員N が氏名。両方をキーにする。
   const ichiban = [
-    { employee_code: '1018', employee_name: '金原　敏雄', employee_r: '金原敏雄' },
+    { employee_code: '1018', employee_name: '架空　太郎', employee_r: '架空太郎' },
     { employee_code: '1729', employee_name: '石坂　彰', employee_r: '石坂　彰' },
     { employee_code: '1101', employee_name: '大石　勉', employee_r: '大石　勉' },
     { employee_code: '9989', employee_name: '大石　勉', employee_r: '大石　勉' },
@@ -338,11 +338,11 @@ describe('planIchibanMatch', () => {
   it('氏名が一意なら社員C を提案する (前ゼロは除去)', () => {
     const plan = planIchibanMatch(
       [...ichiban, { employee_code: '0249', employee_name: '植木信彦', employee_r: '植木信彦' }],
-      [entry({ company: '有', payrollCd: '222', name: '金原 敏雄', driverCd: null }),
+      [entry({ company: '有', payrollCd: '222', name: '架空 太郎', driverCd: null }),
         entry({ company: '有', payrollCd: '900', name: '植木 信彦', driverCd: null })],
     )
     expect(plan.matched).toEqual([
-      { company: '有', payrollCd: '222', name: '金原 敏雄', personCd: '1018' },
+      { company: '有', payrollCd: '222', name: '架空 太郎', personCd: '1018' },
       { company: '有', payrollCd: '900', name: '植木 信彦', personCd: '249' },
     ])
     expect(plan.ambiguous).toEqual([])
@@ -375,12 +375,12 @@ describe('planIchibanMatch', () => {
       // 社員R だけに × が付く
       { employee_code: '9909', employee_name: '松本俊之', employee_r: '×松本' },
       // 両方
-      { employee_code: '1137', employee_name: '×大石和也', employee_r: '×大石' },
+      { employee_code: '1137', employee_name: '×丑野十一郎', employee_r: '×丑野' },
     ]
     const plan = planIchibanMatch(voided, [
       entry({ company: '有', payrollCd: '1', name: '松江 隆', driverCd: null }),
       entry({ company: '有', payrollCd: '2', name: '松本 俊之', driverCd: null }),
-      entry({ company: '有', payrollCd: '3', name: '大石 和也', driverCd: null }),
+      entry({ company: '有', payrollCd: '3', name: '丑野 十一郎', driverCd: null }),
     ])
     expect(plan.matched).toEqual([])
     expect(plan.notFound).toHaveLength(3)
@@ -405,7 +405,7 @@ describe('planIchibanMatch', () => {
   it('氏名が空の一番星行はキーにしない', () => {
     const plan = planIchibanMatch(
       [{ employee_code: '5000', employee_name: '', employee_r: '' }],
-      [entry({ company: '有', payrollCd: '1', name: '金原 敏雄', driverCd: null })],
+      [entry({ company: '有', payrollCd: '1', name: '架空 太郎', driverCd: null })],
     )
     expect(plan.notFound).toHaveLength(1)
   })
@@ -414,14 +414,14 @@ describe('planIchibanMatch', () => {
     // コードポイント順 (有 U+6709 < 株 U+682A)。同一会社内は給与コードの数値順。
     const employees = [
       entry({ company: '株', payrollCd: '9', name: '石坂 彰', driverCd: null }),
-      entry({ company: '有', payrollCd: '10', name: '金原 敏雄', driverCd: null }),
-      entry({ company: '株', payrollCd: '2', name: '大石 和也', driverCd: null }),
+      entry({ company: '有', payrollCd: '10', name: '架空 太郎', driverCd: null }),
+      entry({ company: '株', payrollCd: '2', name: '丑野 十一郎', driverCd: null }),
     ]
     const forward = planIchibanMatch(ichiban, employees)
     const reversed = planIchibanMatch(ichiban, [...employees].reverse())
     expect(forward).toEqual(reversed)
     expect(forward.matched.map(m => `${m.company}|${m.payrollCd}`)).toEqual(['有|10', '株|9'])
-    // 大石 和也 は一番星に居ないので notFound。同一会社内の数値順を確認する
+    // 丑野 十一郎 は一番星に居ないので notFound。同一会社内の数値順を確認する
     expect(forward.notFound.map(n => `${n.company}|${n.payrollCd}`)).toEqual(['株|2'])
   })
 })

@@ -98,7 +98,7 @@ describe('buildTimecardTable', () => {
     expect(rows[1]).toMatchObject({ day: 2, in1: null, out1: null, in2: null, out2: null, note: '' })
   })
 
-  it('中抜けは 出勤2/退社2 に入る (実データ: 松永 2026-06-11)', () => {
+  it('中抜けは 出勤2/退社2 に入る (実データ: 戊野 2026-06-11)', () => {
     const rows = buildTimecardTable([day({
       day: 11,
       sessions: [
@@ -166,7 +166,7 @@ describe('buildTimecardTable', () => {
   })
 
   it('日跨ぎ勤務 (乗務員・夜勤) の退社は押された日の行に出る', () => {
-    // 実データ: 冨田 竜 (乗務員) 2026-06-01 23:52 → 06-02 13:51
+    // 実データ: 己野 五郎 (乗務員) 2026-06-01 23:52 → 06-02 13:51
     const rows = buildTimecardTable([day({
       day: 1,
       sessions: [{ start: '2026-06-01 23:52:33', end: '2026-06-02 13:51:00' }],
@@ -234,7 +234,7 @@ describe('countWorkKinds', () => {
 
 describe('打刻エラーの表示 (Refs #433)', () => {
   it('打刻エラーの日は出勤だけ残し、ずれ込んだ退勤は出さない', () => {
-    // 実データ: 佐藤 泰弘 2026-06-08 07:14 → 06-09 18:52。
+    // 実データ: 庚野 六郎 2026-06-08 07:14 → 06-09 18:52。
     // 「翌 18:52」は**翌日に押された退勤**でこの日の退社ではないので出さない
     const rows = buildTimecardTable([day({
       day: 8,

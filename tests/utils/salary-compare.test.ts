@@ -921,13 +921,13 @@ describe('compareSalaryMonth', () => {
 
   it('給与コードが乗務員CDと偶然数字一致しただけ (氏名不一致) の行は衝突にせず、単なる未突合にする (Refs #253)', () => {
     // kabu 社の 0222 = 城田秀幸 (乗務員CD 222 と数字・氏名の両方一致 = 本当の直接一致)、
-    // yuu 社の 0222 = 別人の金原敏雄 (会社が違うので社員コードが偶然一致しただけ、氏名は不一致)。
-    // 金原敏雄はまだ誰にも確認されていないので、衝突として人に聞くのではなく
+    // yuu 社の 0222 = 別人の架空太郎 (会社が違うので社員コードが偶然一致しただけ、氏名は不一致)。
+    // 架空太郎はまだ誰にも確認されていないので、衝突として人に聞くのではなく
     // 普通の未突合として扱う — 相手が見つからないだけの行を衝突扱いしない。
     const out = compareSalaryMonth(
       [
         csvRow({ company: '株式会社', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
-        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' }),
+        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '架空 太郎' }),
       ],
       [reportRow('222', '城田 秀幸')],
       config,
@@ -936,7 +936,7 @@ describe('compareSalaryMonth', () => {
     expect(out.conflicts).toEqual([])
     expect(out.rows).toHaveLength(1)
     expect(out.rows[0]!.driverName).toBe('城田 秀幸')
-    expect(out.csvOnly).toEqual([{ driverCd: '0222', driverName: '金原 敏雄', company: '有限会社' }])
+    expect(out.csvOnly).toEqual([{ driverCd: '0222', driverName: '架空 太郎', company: '有限会社' }])
     expect(out.reportOnly).toEqual([])
   })
 
@@ -989,20 +989,20 @@ describe('compareSalaryMonth', () => {
   })
 
   it('突合マスタで会社ごとに引き当て直せば conflicts は解消される', () => {
-    const cdMap: SalaryCdMap = { entries: { '有限会社|222|金原敏雄': '1601' } }
+    const cdMap: SalaryCdMap = { entries: { '有限会社|222|架空太郎': '1601' } }
     const out = compareSalaryMonth(
       [
         csvRow({ company: '株式会社', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
-        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' }),
+        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '架空 太郎' }),
       ],
-      [reportRow('222', '城田 秀幸'), reportRow('1601', '金原 敏雄')],
+      [reportRow('222', '城田 秀幸'), reportRow('1601', '架空 太郎')],
       config,
       '2023-04',
       cdMap,
     )
     expect(out.conflicts).toEqual([])
     expect(out.rows).toHaveLength(2)
-    expect(out.rows.map(r => r.driverName).sort()).toEqual(['城田 秀幸', '金原 敏雄'])
+    expect(out.rows.map(r => r.driverName).sort()).toEqual(['城田 秀幸', '架空 太郎'])
   })
 })
 
@@ -1101,18 +1101,18 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
   it('3 社ぶんも合算する (実データの社員C 1132 相当)', () => {
     const out = compareSalaryMonth(
       [
-        csvRow({ company: '有限会社', driverCd: '1202', cdKey: '1202', driverName: '大石 和也', amounts: { 基本給: 100 } }),
-        csvRow({ company: '大石運輸倉庫', driverCd: '1202', cdKey: '1202', driverName: '大石 和也', amounts: { 基本給: 200 } }),
-        csvRow({ company: '佐賀大石', driverCd: '41', cdKey: '41', driverName: '大石 和也', amounts: { 基本給: 400 } }),
+        csvRow({ company: '有限会社', driverCd: '1202', cdKey: '1202', driverName: '丑野 十一郎', amounts: { 基本給: 100 } }),
+        csvRow({ company: '大石運輸倉庫', driverCd: '1202', cdKey: '1202', driverName: '丑野 十一郎', amounts: { 基本給: 200 } }),
+        csvRow({ company: '佐賀大石', driverCd: '41', cdKey: '41', driverName: '丑野 十一郎', amounts: { 基本給: 400 } }),
       ],
-      [reportRow('1132', '大石 和也')],
+      [reportRow('1132', '丑野 十一郎')],
       config,
       '2023-04',
       {
         entries: {
-          '有限会社|1202|大石和也': '1132',
-          '大石運輸倉庫|1202|大石和也': '1132',
-          '佐賀大石|41|大石和也': '1132',
+          '有限会社|1202|丑野十一郎': '1132',
+          '大石運輸倉庫|1202|丑野十一郎': '1132',
+          '佐賀大石|41|丑野十一郎': '1132',
         },
       },
     )
@@ -1123,8 +1123,8 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
 
   it('単一会社の行は mergedFrom が null (従来の挙動)', () => {
     const out = compareSalaryMonth(
-      [csvRow({ driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' })],
-      [reportRow('222', '金原 敏雄')],
+      [csvRow({ driverCd: '0222', cdKey: '222', driverName: '架空 太郎' })],
+      [reportRow('222', '架空 太郎')],
       config,
       '2023-04',
     )
@@ -1181,7 +1181,7 @@ describe('parseSalaryCsv — 【 勤怠 】セクション (Refs #433)', () => {
   const HEADER = '社員コード,社員名,給与・賞与名,【 勤怠 】,出勤日数,公休日数,有休日数,欠勤日数,【 支給 】,基本給,支給合計額,【 補助 】,基本単価'
 
   it('勤怠の日数を項目名つきで取り込み、支給項目には混ぜない', () => {
-    const parsed = parseSalaryCsv(`${HEADER}\n1065,佐藤　泰弘,2026年 7月,,21,5,0,0,,220000,220000,,11000`)
+    const parsed = parseSalaryCsv(`${HEADER}\n1065,庚野　六郎,2026年 7月,,21,5,0,0,,220000,220000,,11000`)
     expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 21, 公休日数: 5, 有休日数: 0, 欠勤日数: 0 })
     expect(parsed.itemLabels).toEqual(['基本給'])
   })
@@ -1192,7 +1192,7 @@ describe('parseSalaryCsv — 【 勤怠 】セクション (Refs #433)', () => {
   })
 
   it('数値でない欄は載せない (「0 日」と「欄が無い」を混同しない)', () => {
-    const parsed = parseSalaryCsv(`${HEADER}\n1065,佐藤　泰弘,2026年 7月,,21,,-,0,,220000,220000,,11000`)
+    const parsed = parseSalaryCsv(`${HEADER}\n1065,庚野　六郎,2026年 7月,,21,,-,0,,220000,220000,,11000`)
     const a = parsed.rows[0]!.attendance!
     expect(a['出勤日数']).toBe(21)
     // 空欄は 0 として読む (給与明細の「0 日」と同じ扱い)
@@ -1203,7 +1203,7 @@ describe('parseSalaryCsv — 【 勤怠 】セクション (Refs #433)', () => {
 
   it('【 勤怠 】セクションが無い様式でも壊れない (空オブジェクト)', () => {
     const parsed = parseSalaryCsv(
-      '社員コード,社員名,給与・賞与名,【 支給 】,基本給,支給合計額\n1065,佐藤　泰弘,2026年 7月,,220000,220000',
+      '社員コード,社員名,給与・賞与名,【 支給 】,基本給,支給合計額\n1065,庚野　六郎,2026年 7月,,220000,220000',
     )
     expect(parsed.rows[0]!.attendance).toEqual({})
   })
@@ -1211,7 +1211,7 @@ describe('parseSalaryCsv — 【 勤怠 】セクション (Refs #433)', () => {
   it('勤怠の空セル (様式のパディング) は項目にしない', () => {
     const parsed = parseSalaryCsv([
       '社員コード,社員名,給与・賞与名,【 勤怠 】,出勤日数,,【 支給 】,基本給,支給合計額',
-      '1065,佐藤　泰弘,2026年 7月,,21,,,220000,220000',
+      '1065,庚野　六郎,2026年 7月,,21,,,220000,220000',
     ].join('\n'))
     expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 21 })
   })
@@ -1219,7 +1219,7 @@ describe('parseSalaryCsv — 【 勤怠 】セクション (Refs #433)', () => {
   it('行が勤怠列より短くても落ちない (欠けた欄は 0)', () => {
     const parsed = parseSalaryCsv([
       '社員コード,社員名,給与・賞与名,【 勤怠 】,出勤日数,公休日数,【 支給 】,基本給,支給合計額',
-      '1065,佐藤　泰弘,2026年 7月,,21',
+      '1065,庚野　六郎,2026年 7月,,21',
     ].join('\n'))
     expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 21, 公休日数: 0 })
   })
@@ -1236,10 +1236,10 @@ describe('compareSalaryMonth — 勤怠日数の突合 (Refs #433)', () => {
       [csvRow({
         cdKey: '1065',
         driverCd: '1065',
-        driverName: '佐藤 泰弘',
+        driverName: '庚野 六郎',
         attendance: { 出勤日数: 22, 公休日数: 5, 欠勤日数: 0 },
       })],
-      [reportRow('1065', '佐藤 泰弘', {
+      [reportRow('1065', '庚野 六郎', {
         workDays: 21,
         leaveCounts: { publicHoliday: 5, paidLeave: 1.5, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
         punchErrorDays: 2,
@@ -1255,8 +1255,8 @@ describe('compareSalaryMonth — 勤怠日数の突合 (Refs #433)', () => {
 
   it('デジタコ由来の行 (leaveCounts なし) は休暇 0・打刻エラー 0', () => {
     const result = compareSalaryMonth(
-      [csvRow({ cdKey: '1029', driverCd: '1029', driverName: '冨田 竜' })],
-      [reportRow('1029', '冨田 竜', { workDays: 18 })],
+      [csvRow({ cdKey: '1029', driverCd: '1029', driverName: '己野 五郎' })],
+      [reportRow('1029', '己野 五郎', { workDays: 18 })],
       { items: {} },
       '2023-04',
     )
@@ -1267,16 +1267,16 @@ describe('compareSalaryMonth — 勤怠日数の突合 (Refs #433)', () => {
   })
 
   it('給与DB 由来 (attendance 未設定) でも落ちない', () => {
-    const row = csvRow({ cdKey: '1065', driverCd: '1065', driverName: '佐藤 泰弘' })
+    const row = csvRow({ cdKey: '1065', driverCd: '1065', driverName: '庚野 六郎' })
     delete (row as { attendance?: unknown }).attendance
-    const result = compareSalaryMonth([row], [reportRow('1065', '佐藤 泰弘', { workDays: 21 })], { items: {} }, '2023-04')
+    const result = compareSalaryMonth([row], [reportRow('1065', '庚野 六郎', { workDays: 21 })], { items: {} }, '2023-04')
     expect(result.rows[0]!.attendanceDays.csv).toEqual({})
   })
 
   it('給与明細に無い軸だけが欠ける (出勤だけある様式)', () => {
     const result = compareSalaryMonth(
-      [csvRow({ cdKey: '1065', driverCd: '1065', driverName: '佐藤 泰弘', attendance: { 出勤日数: 22 } })],
-      [reportRow('1065', '佐藤 泰弘', { workDays: 21 })],
+      [csvRow({ cdKey: '1065', driverCd: '1065', driverName: '庚野 六郎', attendance: { 出勤日数: 22 } })],
+      [reportRow('1065', '庚野 六郎', { workDays: 21 })],
       { items: {} },
       '2023-04',
     )

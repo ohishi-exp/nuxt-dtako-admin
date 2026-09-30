@@ -1173,7 +1173,7 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("none");
   });
 
-  it("紙が控除しきれない運行の頭は負の実額で説明する (1026 一瀬 03-12 の形)", () => {
+  it("紙が控除しきれない運行の頭は負の実額で説明する (1026 架空 03-12 の形)", () => {
     // 朝の頭 8 + 夕の頭 3、紙の minus_unko は 3 のみ → 紙が 8 分前後大きい。
     // diff +7 (丸め差 1) が run-head で収まる
     const d = compareTimecardMonth({
@@ -1616,7 +1616,7 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("unknown");
   });
 
-  it("フェリー控除は日別マップを優先する (1026 一瀬 05-01 の形)", () => {
+  it("フェリー控除は日別マップを優先する (1026 架空 05-01 の形)", () => {
     // 前月に始業した勤務だけが覆う日 — 勤務への貼り付け (ours.ferryMinusMinutes) は
     // 無いが、上流の ferry_minus_by_date (rust#181) には居る
     const r = compareTimecardMonth({
