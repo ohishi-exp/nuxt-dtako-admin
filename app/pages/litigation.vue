@@ -92,7 +92,6 @@ import {
   litigationRegisterCandidates,
   narrowKyuyoEmployees,
   rateBasisLabel,
-  rateBasisFixes,
   rateBasisPeriods,
   rateBasisStatus,
   salaryRowCells,
@@ -102,6 +101,7 @@ import {
   type LitigationSalaryState,
   type RateBasisStatus,
 } from '~/utils/litigation-salary'
+import type { MinWageFixInput } from '~/utils/min-wage-fix'
 import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
 import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, summarizeSyncedMonths, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
 import { buildCdMapEntries, planPayrollDbImport, type EmployeeMasterEntry, type EmployeeMasterGetResponse, type KyuyoEmployeesResponse } from '~/utils/employee-master'
@@ -797,9 +797,6 @@ const salaryProgress = ref('')
 const salaryLoadingPayMonth = ref<string | ReadonlySet<string> | null>(null)
 const salaryError = ref('')
 const salaryRegistering = ref(false)
-/** 「直し方」の最低賃金の過去分取り込み (厚労省の改定状況 xlsx)。結果は件数で見せる */
-const minWageImporting = ref(false)
-const minWageImportMessage = ref('')
 const salaryRegisterMessage = ref('')
 /** 属性 (給与区分) を入れた後、拘束の材料をまだ取り直していない */
 const salaryAttrsWritten = ref(false)
@@ -812,7 +809,6 @@ const SALARY_PAYROLL_CONCURRENCY = 6
 watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
   salaryEpoch++
   salaryAttrsWritten.value = false
-  minWageImportMessage.value = ''
   salaryPayroll.value = new Map()
   salaryPayrollSync.value = new Map()
   salaryLoading.value = false
@@ -870,14 +866,10 @@ const salaryRateBasisCounts = computed(() => {
   return { mismatch, unknown }
 })
 const salaryRatePeriods = computed(() => rateBasisPeriods(salaryRows.value))
-// 「判定できない」月の直し方 (理由ごとの件数と月の範囲)。最低賃金がマスタにあるかは front で判定しない (relay が正本)
-const salaryFixes = computed(() => rateBasisFixes(salaryRows.value))
-const salaryFixesShown = computed(() => salaryAttrsWritten.value
-  || salaryFixes.value.minWageMissing !== null
-  || salaryFixes.value.prefectureMissing !== null
-  || salaryFixes.value.rateMissing !== null)
-const fmtFixGroup = (g: { count: number, from: string, to: string }) =>
-  `${g.count} 件 (${g.from === g.to ? g.from : `${g.from}〜${g.to}`})`
+// 「判定できない」月の直し方パネル (MinWageFixesPanel) の材料。比較できた行の単価・最低賃金だけ
+const salaryFixRows = computed<MinWageFixInput[]>(() => salaryRows.value.flatMap(r => r.compared
+  ? [{ driverCd: r.driverCd, month: r.month, hourlyRate: r.compared.rateBasis.hourlyRate, minWageRate: r.compared.rateBasis.minWageRate, minWagePrefecture: r.compared.rateBasis.minWagePrefecture }]
+  : []))
 const RATE_BASIS_CLASS: Record<RateBasisStatus, string> = {
   ok: '',
   mismatch: 'font-bold text-red-600 dark:text-red-400',
@@ -1112,32 +1104,6 @@ async function retakeWageReports() {
   if (!target) return
   await runErrorSteps(caseMonths.value.map(m => wageReportStep(m, target.driverCds)))
   salaryAttrsWritten.value = false
-}
-
-/** 最低賃金の過去分 (平成14年度〜) を取り込む。取り込みは冪等 (変化なしなら「改定なし」)。
- * マスタの書き換えは relay の既存の口 (restraint-wage の「過去の改定も取り込む」と同じ)。
- * **その月にあるかは判定しない** — 押して、続けて材料を取り直せば relay が引き当てる */
-async function importMinWageHistory() {
-  if (minWageImporting.value) return
-  minWageImporting.value = true
-  minWageImportMessage.value = ''
-  try {
-    const res = await $fetch<{ changed: boolean, prefectures: number, added: number, updated: number, years?: { from: string, to: string } }>(
-      '/restraint-api/min-wage/import-mhlw',
-      { method: 'POST', headers: authHeaders(), body: { source: 'history' } },
-    )
-    const range = res.years ? ` (${res.years.from}〜${res.years.to})` : ''
-    minWageImportMessage.value = (res.changed
-      ? `厚労省から ${res.prefectures} 件を取り込みました${range} (新規 ${res.added} / 更新 ${res.updated})`
-      : `厚労省から ${res.prefectures} 件を確認しました${range} (改定なし)`)
-      + ' — 続けて「拘束の材料を取り直す」を押してください'
-  }
-  catch (e) {
-    minWageImportMessage.value = `最低賃金を取り込めませんでした: ${describeCaughtError(e, 'もう一度押してください')}`
-  }
-  finally {
-    minWageImporting.value = false
-  }
 }
 
 const SALARY_STATE_CLASS: Record<LitigationSalaryState, string> = {
@@ -1773,44 +1739,22 @@ function fmtDateTime(iso: string): string {
             / <span data-testid="litigation-salary-rate-unknown">単価 判定できない {{ salaryRateBasisCounts.unknown }} 件</span>
             / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
           </div>
-          <div v-if="salaryFixesShown" class="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-3 space-y-2 text-xs text-gray-700 dark:text-gray-300" data-testid="litigation-salary-fixes">
-            <div class="text-sm font-bold text-amber-800 dark:text-amber-300">直し方 (上から順に)</div>
+          <MinWageFixesPanel
+            v-if="openCase"
+            :rows="salaryFixRows"
+            :from="caseMonths[0] ?? openCase.fromMonth"
+            :to="caseMonths[caseMonths.length - 1] ?? openCase.toMonth"
+            :headers="authHeaders"
+            :retake-label="`拘束の材料を取り直す (${caseMonths.length} か月)`"
+            :retake-note="`1 か月 15〜64 秒 × ${caseMonths.length} か月。終わるまでこのタブを閉じない`"
+            :retaking="errorsRunning"
+            :retake-disabled="errorsStoreLoading || !!errorsStoreError || importingKey !== null || salaryRegistering"
+            :force-show="salaryAttrsWritten"
+            :driver-label="cd => `${driverLabel(cd)} (${cd})`"
+            @retake="retakeWageReports"
+          >
             <div v-if="salaryAttrsWritten" data-testid="litigation-salary-fix-attrs">属性を入れました。基本給の計算に反映するには下の「拘束の材料を取り直す」を押してください。</div>
-            <div v-if="salaryFixes.minWageMissing" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-fix-minwage">
-              <span>① 最低賃金が引けない月 {{ fmtFixGroup(salaryFixes.minWageMissing) }}:</span>
-              <UButton
-                size="xs"
-                icon="i-lucide-download"
-                label="厚労省から過去の最低賃金を取り込む"
-                :loading="minWageImporting"
-                :disabled="minWageImporting || errorsRunning"
-                data-testid="litigation-salary-fix-minwage-import"
-                @click="importMinWageHistory"
-              />
-              <span>→ 取り込んだら下の ③ を押す</span>
-            </div>
-            <div v-if="minWageImportMessage" data-testid="litigation-salary-fix-minwage-message">{{ minWageImportMessage }}</div>
-            <div v-if="salaryFixes.prefectureMissing" data-testid="litigation-salary-fix-prefecture">
-              ① 所属から県が引けない月 {{ fmtFixGroup(salaryFixes.prefectureMissing) }}: 拘束×賃金 → 最低賃金チェック → ▸ 最低賃金 で拠点の県を設定してから、下の ③ を押す
-              <NuxtLink to="/restraint-wage" class="underline text-primary-600 dark:text-primary-400">拘束×賃金を開く</NuxtLink>
-            </div>
-            <div v-if="salaryFixes.rateMissing" data-testid="litigation-salary-fix-rate">
-              ② 単価マスタに単価が無い月 {{ fmtFixGroup(salaryFixes.rateMissing) }}: 拘束×賃金 → 単価マスタ で乗務員CD ({{ (openCase?.driverCds ?? []).join('・') }}) を追加し、一括変更 (乗務員を選んで単価と適用開始日) で単価を入れる。この画面からは単価マスタを書き換えない。入れたら下の ③ を押す
-              <NuxtLink to="/restraint-wage" class="underline text-primary-600 dark:text-primary-400">拘束×賃金を開く</NuxtLink>
-            </div>
-            <div class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-fix-retake">
-              <UButton
-                size="xs"
-                icon="i-lucide-refresh-cw"
-                :label="`拘束の材料を取り直す (${caseMonths.length} か月)`"
-                :loading="errorsRunning"
-                :disabled="errorsRunning || errorsStoreLoading || !!errorsStoreError || importingKey !== null || salaryRegistering"
-                data-testid="litigation-salary-materials-retake"
-                @click="retakeWageReports"
-              />
-              <span>③ 1 か月 15〜64 秒 × {{ caseMonths.length }} か月。終わるまでこのタブを閉じない</span>
-            </div>
-          </div>
+          </MinWageFixesPanel>
           <div v-if="salaryCounts.noPayroll > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-register">
             <template v-if="salaryRegisterCandidates.length > 0">
               <span class="text-xs text-gray-600 dark:text-gray-400">明細の氏名から乗務員に一意に引き当たりました (社員マスタに未登録):</span>

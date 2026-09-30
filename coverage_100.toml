@@ -1334,3 +1334,7 @@ branches = true
 [[files]]
 path = "app/utils/litigation-salary.ts"
 branches = true
+
+[[files]]
+path = "app/utils/min-wage-fix.ts"
+branches = true
