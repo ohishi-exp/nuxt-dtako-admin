@@ -18,6 +18,7 @@ import type { WageReportResponse, WageReportRow } from './restraint-wage-view'
 import { compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig } from './salary-compare'
 import { splitCdMapKey } from './employee-master'
+import type { EmployeeMasterEntry, KyuyoEmployeesResponse } from './employee-master'
 import type { LitigationFetched } from './litigation-errors'
 import { litigationDriverMonthKey } from './litigation-errors'
 
@@ -169,4 +170,25 @@ export function litigationRegisterCandidates(input: LitigationRegisterInput): Li
     .filter(c => input.caseDriverCds.some(cd => sameCd(cd, c.driverCd))
       && !known.has(registeredKey(c.company, c.payrollCd)))
   return candidates.filter(c => candidates.filter(o => sameCd(o.driverCd, c.driverCd)).length === 1)
+}
+
+/**
+ * 社員マスタに乗務員CD が入っているのに属性 (給与区分・所属) が 1 行も無い、案件の乗務員の社員。
+ * 属性が空だと relay の wage-report に `pay_kubun` が付かず、給与比較の基本給の計算が出ない。
+ * **属性が 1 行でも在る人は出さない** (入れ直すと既存の履歴と食い違うため)。
+ */
+export function litigationAttrsCandidates(input: {
+  employees: readonly EmployeeMasterEntry[]
+  caseDriverCds: readonly string[]
+}): LitigationRegisterCandidate[] {
+  return input.employees
+    .filter(e => e.driverCd && e.attrs.length === 0 && input.caseDriverCds.some(cd => sameCd(cd, e.driverCd!)))
+    .map(e => ({ company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd! }))
+}
+
+/** 給与大臣の社員一覧を、給与コードが一致する 1 人だけに絞る (前ゼロは同じ社員として見る)。
+ * 絞った結果を `planPayrollDbImport` に渡すと、その 1 人ぶんの属性だけの計画になる。 */
+export function narrowKyuyoEmployees(res: KyuyoEmployeesResponse, payrollCd: string): KyuyoEmployeesResponse {
+  const key = (v: string) => String(Number(v.trim()))
+  return { ...res, employees: res.employees.filter(r => key(r.employee_code_key) === key(payrollCd)) }
 }

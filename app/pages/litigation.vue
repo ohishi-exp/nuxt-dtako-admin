@@ -86,14 +86,16 @@ import { fmtYen, monthRange, nextYm, type WageReportResponse } from '~/utils/res
 import {
   buildLitigationSalaryRows,
   LITIGATION_SALARY_STATE_LABELS,
+  litigationAttrsCandidates,
   litigationPayrollMonths,
   litigationRegisterCandidates,
+  narrowKyuyoEmployees,
   type LitigationRegisterCandidate,
   type LitigationSalaryState,
 } from '~/utils/litigation-salary'
 import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
 import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
-import { buildCdMapEntries, type EmployeeMasterEntry, type EmployeeMasterGetResponse } from '~/utils/employee-master'
+import { buildCdMapEntries, planPayrollDbImport, type EmployeeMasterEntry, type EmployeeMasterGetResponse, type KyuyoEmployeesResponse } from '~/utils/employee-master'
 import { parseCompMap } from '~/utils/dtako-comps'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import { dtakoCompDisplay, pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
@@ -670,11 +672,15 @@ function buildErrorSteps(onlyMissing: boolean): ErrorCheckStep[] {
       }))),
     ...months
       .filter(m => target.driverCds.some(cd => need(errWageReports.value.get(key(cd, m)))))
-      .map(m => ({
-        label: `最低賃金の不変条件 ${m} (1 か月 15〜64 秒)`,
-        run: (epoch: number) => loadWageReport(epoch, m, target.driverCds),
-      })),
+      .map(m => wageReportStep(m, target.driverCds)),
   ]
+}
+
+function wageReportStep(m: string, driverCds: readonly string[]): ErrorCheckStep {
+  return {
+    label: `最低賃金の不変条件 ${m} (1 か月 15〜64 秒)`,
+    run: (epoch: number) => loadWageReport(epoch, m, driverCds),
+  }
 }
 
 /** 保存時刻の表示 (JST の「M/D HH:mm」) */
@@ -685,13 +691,12 @@ function fmtCheckedAt(iso: string): string {
 /** 「続きから」で回すステップ数 (ボタンに出す) */
 const missingErrorSteps = computed(() => buildErrorSteps(true).length)
 
-/** 4 つの検知を**直列に**回す (wage-report は 1 か月 15〜64 秒かかり、同じ DO を奪い合わせない)。
+/** 検知のステップを**直列に**回す (wage-report は 1 か月 15〜64 秒かかり、同じ DO を奪い合わせない)。
  * 取れたステップから保存するので、途中で止めても「続きから」で残りだけ回せる。
  * 全部やり直すときも前回の結果は消さず、取れた順に上書きする (止めても前回分が残る)。 */
-async function runErrorChecks(onlyMissing: boolean) {
+async function runErrorSteps(steps: ErrorCheckStep[]) {
   if (!openCase.value || errorsRunning.value || errorsStoreLoading.value) return
   const epoch = ++errorsEpoch
-  const steps = buildErrorSteps(onlyMissing)
   errorsStoreError.value = ''
   errorsRunning.value = true
   errorsFinished.value = false
@@ -711,6 +716,8 @@ async function runErrorChecks(onlyMissing: boolean) {
     }
   }
 }
+
+const runErrorChecks = (onlyMissing: boolean) => runErrorSteps(buildErrorSteps(onlyMissing))
 
 // --- 取り込みボタン (alc に運行が 0 件の月): theearth から乗務員 × 期間で取り込み直す ---
 /** 走行中の行 (キー `乗務員CD|YYYY-MM`)。**同時に 1 行だけ** (theearth のセッションロック) */
@@ -782,11 +789,14 @@ const salaryLoadingPayMonth = ref<string | null>(null)
 const salaryError = ref('')
 const salaryRegistering = ref(false)
 const salaryRegisterMessage = ref('')
+/** 属性 (給与区分) を入れた後、拘束の材料をまだ取り直していない */
+const salaryAttrsWritten = ref(false)
 let salaryEpoch = 0
 const SALARY_RETRY = '「給与大臣から読み直す」を押してやり直してください'
 
 watch(() => [openCase.value?.caseId, openCase.value?.updatedAt, viewerComp.value], () => {
   salaryEpoch++
+  salaryAttrsWritten.value = false
   salaryPayroll.value = new Map()
   salaryPayrollSync.value = new Map()
   salaryLoading.value = false
@@ -920,8 +930,25 @@ const salaryRegisterCandidates = computed(() => litigationRegisterCandidates({
   caseDriverCds: openCase.value?.driverCds ?? [],
 }))
 
-/** 1 人だけ PUT する (金額は送らない)。成功したら社員マスタを読み直して引き当てを作り直す — 明細は読み直さない */
-async function registerSalaryEmployee(c: LitigationRegisterCandidate) {
+/** 給与大臣のその 1 人の属性 (給与区分・所属) を、案件の最初の月付けで作る。
+ * 拘束×賃金の「給与DBから読み込み」と同じ `planPayrollDbImport` を、その 1 人に絞って使う。
+ * `legacyLabel = null` なので旧ラベル行の統合 (deleteEmployees) は起きない。
+ * `found = false` は 給与大臣のその年度に居ない。 */
+async function planSalaryAttrs(c: LitigationRegisterCandidate) {
+  const month = caseMonths.value[0]!
+  const res = await $fetch<KyuyoEmployeesResponse>('/api/kyuyo/employees', { query: { company: c.company, month } })
+  const plan = planPayrollDbImport(narrowKyuyoEmployees(res, c.payrollCd), salaryEmployees.value, month, null)
+  return { month, found: plan.employees.length > 0, entry: plan.employees[0], attrs: plan.attrs }
+}
+
+const SALARY_KUBUN_HINT = '拘束×賃金の社員マスタタブで区分を入れてください'
+
+/**
+ * 社員マスタに 1 人 PUT する (金額は送らない)。成功したら社員マスタを読み直して引き当てを作り直す — 明細は読み直さない。
+ * - `register`: 社員の行も送る。属性が取れなかったら、属性なしで登録して理由を出す
+ * - 属性だけ (`register = false`): `employees: []` で attrs だけ送る — 古い写しで name / driver_cd を上書きしないため
+ */
+async function saveSalaryEmployee(c: LitigationRegisterCandidate, register: boolean) {
   if (salaryRegistering.value) return
   const epoch = salaryEpoch
   salaryRegistering.value = true
@@ -929,32 +956,69 @@ async function registerSalaryEmployee(c: LitigationRegisterCandidate) {
   const label = `${c.payrollCd} ${c.name} (会社 ${c.company}) → 乗務員 ${c.driverCd}`
   let saved = false
   try {
+    let entry = { company: c.company, payrollCd: c.payrollCd, name: c.name, driverCd: c.driverCd, hireDate: null as string | null, retireDate: null as string | null }
+    let attrs: Awaited<ReturnType<typeof planSalaryAttrs>>['attrs'] = []
+    let attrsNote = ''
+    try {
+      const planned = await planSalaryAttrs(c)
+      if (planned.found) {
+        entry = { ...planned.entry!, driverCd: c.driverCd }
+        attrs = planned.attrs
+        if (attrs.length === 0 || attrs[0]!.payKubun === null) attrsNote = `給与区分が給与大臣に無いので基本給は計算できません — ${SALARY_KUBUN_HINT}`
+      }
+      else {
+        attrsNote = `給与区分が取れませんでした (給与大臣の ${planned.month} の年度に居ない) — ${SALARY_KUBUN_HINT}`
+      }
+    }
+    catch (e) {
+      attrsNote = `給与区分が取れませんでした (${describeCaughtError(e, 'もう一度押してください')}) — ${SALARY_KUBUN_HINT}`
+    }
+    if (epoch !== salaryEpoch) return
+    if (!register && attrs.length === 0) {
+      salaryRegisterMessage.value = `属性を入れられませんでした (${label}): ${attrsNote}`
+      return
+    }
     await $fetch('/restraint-api/employee-master', {
       method: 'PUT',
       headers: authHeaders(),
-      body: {
-        employees: [{ company: c.company, payrollCd: c.payrollCd, name: c.name, driverCd: c.driverCd, hireDate: null, retireDate: null }],
-        attrs: [],
-        deleteAttrs: [],
-        deleteEmployees: [],
-      },
+      body: { employees: register ? [entry] : [], attrs, deleteAttrs: [], deleteEmployees: [] },
     })
     saved = true
     const employees = await $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', { headers: authHeaders() })
     if (epoch !== salaryEpoch) return
     salaryEmployees.value = employees.employees ?? []
     salaryCdMap.value = buildCdMapEntries(salaryEmployees.value)
-    salaryRegisterMessage.value = `社員マスタに登録しました: ${label}`
+    const wrote = attrs[0]?.payKubun != null
+    if (wrote) salaryAttrsWritten.value = true
+    salaryRegisterMessage.value = `${register ? '社員マスタに登録しました' : '属性を入れました'}: ${label}`
+      + (wrote ? ' — 区分を入れました。基本給の計算に反映するには拘束の材料を取り直してください' : ` — ${attrsNote}`)
   }
   catch (e) {
     if (epoch !== salaryEpoch) return
     salaryRegisterMessage.value = saved
-      ? `社員マスタに登録しましたが、読み直せませんでした: ${describeCaughtError(e, SALARY_RETRY)}`
-      : `社員マスタに登録できませんでした (${label}): ${describeCaughtError(e, 'もう一度押してください')}`
+      ? `${register ? '社員マスタに登録' : '属性を入れ'}ましたが、読み直せませんでした: ${describeCaughtError(e, SALARY_RETRY)}`
+      : `${register ? '社員マスタに登録' : '属性を入れ'}できませんでした (${label}): ${describeCaughtError(e, 'もう一度押してください')}`
   }
   finally {
     salaryRegistering.value = false
   }
+}
+
+const registerSalaryEmployee = (c: LitigationRegisterCandidate) => saveSalaryEmployee(c, true)
+
+/** 社員マスタに居るのに属性が空の、案件の乗務員 */
+const salaryAttrsCandidates = computed(() => litigationAttrsCandidates({
+  employees: salaryEmployees.value,
+  caseDriverCds: openCase.value?.driverCds ?? [],
+}))
+
+/** 属性を入れた後、wage-report **だけ**を案件の月ごとに直列で取り直す (alc の運行・オンプレ突き合わせはやり直さない)。
+ * 自動では走らせない (36 か月で 9〜38 分) */
+async function retakeWageReports() {
+  const target = openCase.value
+  if (!target) return
+  await runErrorSteps(caseMonths.value.map(m => wageReportStep(m, target.driverCds)))
+  salaryAttrsWritten.value = false
 }
 
 const SALARY_STATE_CLASS: Record<LitigationSalaryState, string> = {
@@ -1607,6 +1671,28 @@ function fmtDateTime(iso: string): string {
             </span>
           </div>
           <div v-if="salaryRegisterMessage" class="text-xs text-gray-700 dark:text-gray-300" data-testid="litigation-salary-register-message">{{ salaryRegisterMessage }}</div>
+          <div v-if="salaryAttrsCandidates.length > 0 || salaryAttrsWritten" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-attrs">
+            <UButton
+              v-for="c in salaryAttrsCandidates"
+              :key="`${c.company}|${c.payrollCd}`"
+              size="xs"
+              icon="i-lucide-list-plus"
+              :label="`属性を入れる: ${c.payrollCd} ${c.name} (会社 ${c.company}) — 給与大臣の区分・所属を ${caseMonths[0]} 付けで入れる`"
+              :loading="salaryRegistering"
+              :disabled="salaryRegistering || salaryLoading"
+              data-testid="litigation-salary-attrs-button"
+              @click="saveSalaryEmployee(c, false)"
+            />
+            <UButton
+              v-if="salaryAttrsWritten"
+              icon="i-lucide-refresh-cw"
+              :label="`拘束の材料を取り直す (${caseMonths.length} か月)`"
+              :loading="errorsRunning"
+              :disabled="errorsRunning || errorsStoreLoading || !!errorsStoreError || importingKey !== null || salaryRegistering"
+              data-testid="litigation-salary-materials-retake"
+              @click="retakeWageReports"
+            />
+          </div>
 
           <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
             <table class="w-full text-sm" data-testid="litigation-salary-table">
