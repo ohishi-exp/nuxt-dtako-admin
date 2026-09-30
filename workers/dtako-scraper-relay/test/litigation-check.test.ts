@@ -12,15 +12,15 @@ import {
 
 const COMP = '27324455'
 const NOW = '2026-09-29T00:00:00.000Z'
-const item = (over: Record<string, unknown> = {}) => ({ kind: 'unkoGaps', key: '1590|2023-06', payload: { ok: true, value: { a: 1 } }, ...over })
+const item = (over: Record<string, unknown> = {}) => ({ kind: 'unkoGaps', key: '9101|2023-06', payload: { ok: true, value: { a: 1 } }, ...over })
 
 describe('normalizeLitigationCheckPut', () => {
   it('正常系: payload は JSON 文字列にして持つ', () => {
     expect(normalizeLitigationCheckPut({ caseId: ' c1 ', items: [item(), item({ kind: 'wageReport', payload: null })] })).toEqual({
       caseId: 'c1',
       items: [
-        { kind: 'unkoGaps', key: '1590|2023-06', payload: '{"ok":true,"value":{"a":1}}' },
-        { kind: 'wageReport', key: '1590|2023-06', payload: 'null' },
+        { kind: 'unkoGaps', key: '9101|2023-06', payload: '{"ok":true,"value":{"a":1}}' },
+        { kind: 'wageReport', key: '9101|2023-06', payload: 'null' },
       ],
     })
   })
@@ -36,9 +36,9 @@ describe('normalizeLitigationCheckPut', () => {
     ['kind が不正', { caseId: 'c1', items: [item({ kind: 'yTime' })] }],
     ['item が null', { caseId: 'c1', items: [null] }],
     ['key の形が違う', { caseId: 'c1', items: [item({ key: '2023-06' })] }],
-    ['key の月が 13', { caseId: 'c1', items: [item({ key: '1590|2023-13' })] }],
+    ['key の月が 13', { caseId: 'c1', items: [item({ key: '9101|2023-13' })] }],
     ['key が文字列でない', { caseId: 'c1', items: [item({ key: 1 })] }],
-    ['payload が無い', { caseId: 'c1', items: [{ kind: 'alcOps', key: '1590|2023-06' }] }],
+    ['payload が無い', { caseId: 'c1', items: [{ kind: 'alcOps', key: '9101|2023-06' }] }],
     ['payload が大きすぎる', { caseId: 'c1', items: [item({ payload: 'x'.repeat(LITIGATION_CHECK_MAX_PAYLOAD_CHARS) })] }],
   ])('400 にする: %s', (_label, raw) => {
     expect(() => normalizeLitigationCheckPut(raw)).toThrow(LitigationCaseError)
@@ -47,10 +47,10 @@ describe('normalizeLitigationCheckPut', () => {
 
 describe('D1 文', () => {
   it('upsert は comp/case/kind/key で 1 行に上書きし、時刻も更新する', () => {
-    const s = buildLitigationCheckUpsertStatement(COMP, 'c1', { kind: 'alcOps', key: '1590|2023-06', payload: '{}' }, NOW)
+    const s = buildLitigationCheckUpsertStatement(COMP, 'c1', { kind: 'alcOps', key: '9101|2023-06', payload: '{}' }, NOW)
     expect(s.sql).toContain('ON CONFLICT(comp_id, case_id, kind, item_key) DO UPDATE')
     expect(s.sql).toContain('checked_at = excluded.checked_at')
-    expect(s.params).toEqual([COMP, 'c1', 'alcOps', '1590|2023-06', '{}', NOW])
+    expect(s.params).toEqual([COMP, 'c1', 'alcOps', '9101|2023-06', '{}', NOW])
   })
 
   it('一覧と削除は comp と case で絞る', () => {
@@ -64,9 +64,9 @@ describe('D1 文', () => {
 describe('buildLitigationCheckListResponse', () => {
   it('payload を JSON に戻し、種類が不明な行・JSON でない行は落とす', () => {
     expect(buildLitigationCheckListResponse([
-      { kind: 'unkoGaps', item_key: '1590|2023-06', payload: '{"ok":true}', checked_at: NOW },
-      { kind: 'yTime', item_key: '1590|2023-06', payload: '{}', checked_at: NOW },
-      { kind: 'alcOps', item_key: '1590|2023-07', payload: '{broken', checked_at: NOW },
-    ])).toEqual([{ kind: 'unkoGaps', key: '1590|2023-06', payload: { ok: true }, checkedAt: NOW }])
+      { kind: 'unkoGaps', item_key: '9101|2023-06', payload: '{"ok":true}', checked_at: NOW },
+      { kind: 'yTime', item_key: '9101|2023-06', payload: '{}', checked_at: NOW },
+      { kind: 'alcOps', item_key: '9101|2023-07', payload: '{broken', checked_at: NOW },
+    ])).toEqual([{ kind: 'unkoGaps', key: '9101|2023-06', payload: { ok: true }, checkedAt: NOW }])
   })
 })

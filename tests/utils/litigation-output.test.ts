@@ -177,21 +177,21 @@ describe('countLitigationResults', () => {
 
 describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
   const chunks = [
-    { driverCd: '1590', from: '2022-12-01', to: '2023-11-30', label: '2022-12〜2023-11', filename: '1590_2022-12-2023-11.xlsx' },
-    { driverCd: '1590', from: '2023-12-01', to: '2024-11-30', label: '2023-12〜2024-11', filename: '1590_2023-12-2024-11.xlsx' },
-    { driverCd: '1590', from: '2024-12-01', to: '2025-11-30', label: '2024-12〜2025-11', filename: '1590_2024-12-2025-11.xlsx' },
+    { driverCd: '9101', from: '2022-12-01', to: '2023-11-30', label: '2022-12〜2023-11', filename: '9101_2022-12-2023-11.xlsx' },
+    { driverCd: '9101', from: '2023-12-01', to: '2024-11-30', label: '2023-12〜2024-11', filename: '9101_2023-12-2024-11.xlsx' },
+    { driverCd: '9101', from: '2024-12-01', to: '2025-11-30', label: '2024-12〜2025-11', filename: '9101_2024-12-2025-11.xlsx' },
   ]
   const base = {
     changesCsv: { filename: '変更記録.csv', finished: false, rows: 0 },
   }
   const res = (over: Record<string, unknown>) => ({
-    driverCd: '1590', from: '', to: '', status: 'ok', rows: 250, missingDates: [], missingCount: 0, warnings: [], warningsCount: 0, message: '', ...over,
+    driverCd: '9101', from: '', to: '', status: 'ok', rows: 250, missingDates: [], missingCount: 0, warnings: [], warningsCount: 0, message: '', ...over,
   }) as never
 
   it('★ 作る前は Excel を「まだ」、変更記録.csv は中身の要点つきで並べる', () => {
     const s = buildLitigationZipSummary({ chunks, results: [null, null, null], ...base })
     expect(s.map(i => `${i.state} ${i.filename}`)).toEqual([
-      'pending 1590_2022-12-2023-11.xlsx', 'pending 1590_2023-12-2024-11.xlsx', 'pending 1590_2024-12-2025-11.xlsx',
+      'pending 9101_2022-12-2023-11.xlsx', 'pending 9101_2023-12-2024-11.xlsx', 'pending 9101_2024-12-2025-11.xlsx',
       'included 変更記録.csv',
     ])
     expect(s).toHaveLength(4)
@@ -205,9 +205,9 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
       ...base,
       changesCsv: { filename: '変更記録.csv', finished: true, rows: 5 },
     })
-    expect(s[0]).toEqual({ filename: '1590_2022-12-2023-11.xlsx', state: 'included', detail: '2022-12〜2023-11 (乗務員 1590) — 250 行' })
-    expect(s[1]!.detail).toBe('2023-12〜2024-11 (乗務員 1590) — テンプレに書けなかった日 2 日 / 警告 3 件')
-    expect(s[2]).toMatchObject({ state: 'excluded', detail: '2024-12〜2025-11 (乗務員 1590) — 入らない: この期間に運行が 0 件' })
+    expect(s[0]).toEqual({ filename: '9101_2022-12-2023-11.xlsx', state: 'included', detail: '2022-12〜2023-11 (乗務員 9101) — 250 行' })
+    expect(s[1]!.detail).toBe('2023-12〜2024-11 (乗務員 9101) — テンプレに書けなかった日 2 日 / 警告 3 件')
+    expect(s[2]).toMatchObject({ state: 'excluded', detail: '2024-12〜2025-11 (乗務員 9101) — 入らない: この期間に運行が 0 件' })
     expect(s[3]!.detail).toBe('変更 5 件')
   })
 })

@@ -247,7 +247,7 @@ describe('/litigation 案件フォームの乗務員 (検索付きの一覧)', (
 
   it('★ 選択肢は「CD 氏名」を CD 順に並べ、選んだ時点で 1 名に決まる (選び直すと置き換わる)', async () => {
     api.getDrivers.mockResolvedValue([
-      { id: 'a', driver_cd: '1078', driver_name: '金原　敏雄' },
+      { id: 'a', driver_cd: '1078', driver_name: '鈴木　一郎' },
       { id: 'b', driver_cd: '201', driver_name: '山田　太郎' },
     ])
     localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -257,12 +257,12 @@ describe('/litigation 案件フォームの乗務員 (検索付きの一覧)', (
     await settle()
 
     const menu = w.find('[data-testid=driver-menu]')
-    expect(menu.findAll('option').map(o => o.text())).toEqual(['201 山田　太郎', '1078 金原　敏雄'])
+    expect(menu.findAll('option').map(o => o.text())).toEqual(['201 山田　太郎', '1078 鈴木　一郎'])
 
     await menu.setValue('1078')
     await settle()
     const chips = () => w.findAll('span.rounded-full').map(s => s.text().trim())
-    expect(chips()).toEqual(['金原　敏雄 (1078)'])
+    expect(chips()).toEqual(['鈴木　一郎 (1078)'])
 
     await menu.setValue('201')
     await settle()
