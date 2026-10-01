@@ -47,20 +47,20 @@ describe('SalaryAmountCell', () => {
 describe('SalaryOver37Cell', () => {
   const over37 = {
     rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: -1, shortfall: true,
-    rateBasis: '割増基礎 200,000 円 ÷ 法定時間内 150h00m', floored: false,
+    rateBasis: '割増基礎 200,000 円 ÷ 150h00m', floored: false,
   }
 
   it('基礎単価の次に根拠を積み、5 段。差が負のときだけ太字', () => {
     const w = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
     expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
-    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ 150h00m')
     expect(w.find('[data-salary-line="diff37"]').classes()).toContain('font-bold')
     const ok = mount(SalaryOver37Cell, { props: { over37: { ...over37, diff: 5, shortfall: false }, noneReason: '', compact: true } })
     expect(ok.find('[data-salary-line="diff37"]').classes()).not.toContain('font-bold')
   })
 
   it('★ 逆算が最低賃金を下回り最低賃金を採用した月: 根拠の行だけ赤 (太字にしない)。基礎単価の行は通常の色で、専用のエラー行は出ない (画面も紙面も)', () => {
-    const basis = '最低賃金 1,000 円/h (割増基礎 200,000 円 ÷ 法定時間内 250h00m = 800 円/h は最低賃金を下回る)'
+    const basis = '最低賃金 (逆算 800 円/h)'
     for (const compact of [false, true]) {
       const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, rate: 1000, rateBasis: basis, floored: true }, noneReason: '', compact } })
       expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])

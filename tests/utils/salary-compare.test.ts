@@ -898,7 +898,7 @@ describe('compareSalaryMonth', () => {
       expect(r.baseRateBasis).toEqual({ kind: 'days', reverse: 800, floored: false, hourlyRate: null, none: null })
       expect(r.baseRateOvertimePay).toBe(Math.round(SYS_OVERTIME * 800 / MIN_WAGE))
       expect(r.diffCsvVsBaseRateOvertime).toBe(30000 - Math.round(SYS_OVERTIME * 800 / MIN_WAGE))
-      expect(baseRateBasisText(r)).toBe('割増基礎 80,000 円 ÷ 法定時間内 100h00m')
+      expect(baseRateBasisText(r)).toBe('割増基礎 80,000 円 ÷ 100h00m')
     })
 
     it('★ 逆算が最低賃金を下回る月: 最低賃金を採用。理論値 = 残業(計算) そのもの、差 = 残業の差 (diffOvertime) と一致', () => {
@@ -907,7 +907,7 @@ describe('compareSalaryMonth', () => {
       expect(r.baseRateBasis).toEqual({ kind: 'days', reverse: 500, floored: true, hourlyRate: null, none: null })
       expect(r.baseRateOvertimePay).toBe(r.sysOvertime)
       expect(r.diffCsvVsBaseRateOvertime).toBe(r.diffOvertime)
-      expect(baseRateBasisText(r)).toBe('最低賃金 700 円/h (割増基礎 80,000 円 ÷ 法定時間内 160h00m = 500 円/h は最低賃金を下回る)')
+      expect(baseRateBasisText(r)).toBe('最低賃金 (逆算 500 円/h)')
     })
 
     it('境界: 逆算が最低賃金とちょうど同じなら下限は効かない (下回るときだけ採用)', () => {
@@ -950,12 +950,12 @@ describe('compareSalaryMonth', () => {
       expect(high.baseRateActual).toBe(1200)
       expect(high.baseRateBasis).toEqual({ kind: 'hours', reverse: 1200, floored: false, hourlyRate: 1200, none: null })
       expect(high.baseRateOvertimePay).toBe(Math.round(SYS_OVERTIME * 1200 / MIN_WAGE))
-      expect(baseRateBasisText(high)).toBe('明細の時給 1,200 円/h')
+      expect(baseRateBasisText(high)).toBe('明細の時給')
       const low = base({ payKubun: 3 }, { rates: { base: 600, overtime: null } })
       expect(low.baseRateActual).toBe(MIN_WAGE)
       expect(low.baseRateBasis).toMatchObject({ kind: 'hours', reverse: 600, floored: true })
       expect(low.baseRateOvertimePay).toBe(SYS_OVERTIME)
-      expect(baseRateBasisText(low)).toBe('最低賃金 700 円/h (明細の時給 600 円/h は最低賃金を下回る)')
+      expect(baseRateBasisText(low)).toBe('最低賃金 (明細の時給 600 円/h)')
     })
 
     it('時給でも割増基礎が 0 の月は null (割増基礎 0 は区分に依らず算出不可。区分設定の見直しの合図)', () => {
@@ -1035,15 +1035,14 @@ describe('compareSalaryMonth', () => {
         return baseRateBasisText({
           csvPremiumBase: premium,
           statutoryMinutes: statutory,
-          rateBasis: { minWageRate: minWage } as SalaryComparisonRow['rateBasis'],
           baseRateBasis: computeBaseRate(payKubun, premium, statutory, over.hourly ?? null, minWage, over.sysOvertime === undefined ? SYS_OVERTIME : over.sysOvertime).basis,
         })
       }
-      expect(text(2)).toBe('割増基礎 200,000 円 ÷ 法定時間内 100h30m')
-      expect(text(1)).toBe('割増基礎 200,000 円 ÷ 法定時間内 100h30m')
-      expect(text(2, { statutory: 300 * 60 })).toBe('最低賃金 700 円/h (割増基礎 200,000 円 ÷ 法定時間内 300h00m = 667 円/h は最低賃金を下回る)')
-      expect(text(3, { hourly: 1200 })).toBe('明細の時給 1,200 円/h')
-      expect(text(3, { hourly: 650 })).toBe('最低賃金 700 円/h (明細の時給 650 円/h は最低賃金を下回る)')
+      expect(text(2)).toBe('割増基礎 200,000 円 ÷ 100h30m')
+      expect(text(1)).toBe('割増基礎 200,000 円 ÷ 100h30m')
+      expect(text(2, { statutory: 300 * 60 })).toBe('最低賃金 (逆算 667 円/h)')
+      expect(text(3, { hourly: 1200 })).toBe('明細の時給')
+      expect(text(3, { hourly: 650 })).toBe('最低賃金 (明細の時給 650 円/h)')
       // 出せない行 (区分不明 / 時給の単価なし / 割増基礎 0 / 法定時間内 0 / 最低賃金なし / 欠測) は空 — 理由は BASE_RATE_NONE_LABELS が出す
       expect(text(null)).toBe('')
       expect(text(3, { hourly: null })).toBe('')

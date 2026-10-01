@@ -648,7 +648,7 @@ describe('給与比較タブ', () => {
     // 基本給 200,000 ÷ wage report の法定時間内 150h = 1,333 円/h (最低賃金 1,000 を上回るので逆算を採用)。
     // 理論値 = 残業(計算) 15,000 × 1,333.3 ÷ 1,000 = 20,000。明細の残業 30,000 は上回る
     expect(line('1078|2025-01', 'rate').text()).toContain('1,333')
-    expect(line('1078|2025-01', 'rate-basis').text()).toBe('= 割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(line('1078|2025-01', 'rate-basis').text()).toBe('= 割増基礎 200,000 円 ÷ 150h00m')
     expect(line('1078|2025-01', 'minutes').text()).toContain('10h00m')
     expect(line('1078|2025-01', 'theory').text()).toContain('20,000')
     expect(line('1078|2025-01', 'paid').text()).toContain('30,000')
@@ -692,14 +692,14 @@ describe('給与比較タブ', () => {
       return out
     }
     const ref = await over37({ 出勤日数: 19, 有休日数: 1 })
-    expect(ref.basis).toBe('= 割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(ref.basis).toBe('= 割増基礎 200,000 円 ÷ 150h00m')
     // 勤怠欄の日数が違っても、勤怠欄が無くても同じ (日数 × 所定では割らない)
     expect(await over37({ 出勤日数: 22, 有休日数: 2 })).toEqual(ref)
     expect(await over37(undefined)).toEqual(ref)
     // 法定時間内 100h → 割増基礎 200,000 ÷ 100h = 2,000 円/h、理論値 = 15,000 × 2,000 ÷ 1,000
     expect(await over37({ 出勤日数: 19, 有休日数: 1 }, 6000)).toEqual({
       rate: expect.stringContaining('2,000'),
-      basis: '= 割増基礎 200,000 円 ÷ 法定時間内 100h00m',
+      basis: '= 割増基礎 200,000 円 ÷ 100h00m',
       theory: expect.stringContaining('30,000'),
     })
   })
@@ -735,7 +735,7 @@ describe('給与比較タブ', () => {
     expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('37条の分母')
     // 時間は根拠に出る (基本給 = 法定時間内、残業 = 残業時間、37条の分母は 37条のセルの根拠)
     expect(row.find('[data-salary-cell="overtime"] [data-salary-line="basis"]').text()).toBe('最低賃金ベース × 残業時間 10h00m')
-    expect(row.find('[data-salary-cell="over37"] [data-salary-line="rate-basis"]').text()).toContain('法定時間内 150h00m')
+    expect(row.find('[data-salary-cell="over37"] [data-salary-line="rate-basis"]').text()).toContain('÷ 150h00m')
     w.unmount()
   })
 
@@ -786,7 +786,7 @@ describe('給与比較タブ', () => {
     const cell = (k: string) => w.find(`[data-salary-row="1078|2025-01"] [data-salary-cell="over37"] [data-salary-line="${k}"]`)
     expect(cell('rate').text()).toContain('1,300')
     expect(cell('rate').classes()).not.toContain('text-red-600')
-    expect(cell('rate-basis').text()).toBe('= 最低賃金 1,300 円/h (割増基礎 200,000 円 ÷ 法定時間内 200h00m = 1,000 円/h は最低賃金を下回る)')
+    expect(cell('rate-basis').text()).toBe('= 最低賃金 (逆算 1,000 円/h)')
     expect(cell('rate-basis').classes()).toContain('text-red-600')
     expect(cell('rate-basis').classes()).not.toContain('font-bold')
     // 理論値 = 残業(計算) (14,000 + 深夜 1,000)
@@ -1569,7 +1569,7 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     expect(janRow.find('[data-salary-line="basis"]').text()).toBe('単価なし (単価マスタに単価が無い)')
     expect(janRow.findAll('[data-salary-line="basis"]').at(1)!.text()).toBe('最低賃金ベース × 残業時間 10h00m')
     // 37条の基礎単価の根拠も紙面に出る (画面と同じ文字列)
-    expect(janRow.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(janRow.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ 150h00m')
     // 比べられない行は状態と理由だけ (金額の列は空)
     const feb = salary.find('[data-print-salary-row="1078|2025-02"]')
     expect(feb.text()).toContain('拘束の材料が取れていない')
@@ -1602,7 +1602,7 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     await settle()
     const salary = sheet(w).find('[data-testid="litigation-print-salary"]')
     const basis = salary.find('[data-print-salary-row="1078|2025-01"] [data-salary-line="rate-basis"]')
-    expect(basis.text()).toBe('= 最低賃金 1,300 円/h (割増基礎 200,000 円 ÷ 法定時間内 200h00m = 1,000 円/h は最低賃金を下回る)')
+    expect(basis.text()).toBe('= 最低賃金 (逆算 1,000 円/h)')
     expect(basis.classes()).toContain('text-red-600')
     expect(basis.classes()).not.toContain('font-bold')
     expect(salary.text()).toContain('逆算の基礎単価が最低賃金を下回り最低賃金で計算した月 1 件')
