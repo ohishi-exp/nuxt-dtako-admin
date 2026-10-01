@@ -74,6 +74,7 @@ import {
   buildKintaiChangeRows,
   KINTAI_CHANGE_LOG_FORBIDDEN_NOTICE,
   kintaiRecordingSinceNotice,
+  fmtJstDateTime,
   LITIGATION_CHANGE_LOG_MAX_DAYS,
   litigationCaseDateBounds,
   LITIGATION_CHANGES_CSV_FILENAME,
@@ -115,11 +116,15 @@ import {
   emptyLitigationCaseForm,
   LITIGATION_CASE_MAX_MONTHS,
   litigationCaseMonthCount,
+  deletedCaseExpiryDate,
+  LITIGATION_CASE_RESTORE_DAYS,
   litigationCaseToForm,
   removeDriverCd,
+  restoreRetryLabel,
   validateLitigationCaseForm,
   type LitigationCaseFormError,
   type LitigationCaseFormInput,
+  type DeletedLitigationCaseRecord,
   type LitigationCaseRecord,
 } from '~/utils/litigation-case-form'
 
@@ -153,6 +158,8 @@ function changeViewer() {
   pageError.value = ''
   cases.value = []
   casesLoaded.value = false
+  deletedCases.value = []
+  deletedError.value = ''
   openCaseId.value = null
 }
 
@@ -174,6 +181,7 @@ const casesLoading = ref(false)
 async function loadCases() {
   if (!viewerComp.value) return
   casesLoading.value = true
+  const deletedLoad = loadDeletedCases()
   try {
     const res = await $fetch<{ cases: LitigationCaseRecord[] }>('/restraint-api/litigation-cases', {
       headers: authHeaders(),
@@ -188,6 +196,48 @@ async function loadCases() {
   finally {
     casesLoading.value = false
   }
+  await deletedLoad
+}
+
+// 削除した案件 (削除から 30 日間は復活できる)。admin / payroll 以外は 403 — 役割の無い人には節を出さない
+// (front は役割を知らないので、403 を「その人には関係ない」として黙る)。案件の一覧の成否 (pageError) とは分ける。
+const deletedCases = ref<DeletedLitigationCaseRecord[]>([])
+const deletedError = ref('')
+
+async function loadDeletedCases() {
+  try {
+    const res = await $fetch<{ cases: DeletedLitigationCaseRecord[] }>('/restraint-api/litigation-cases/deleted', {
+      headers: authHeaders(),
+    })
+    deletedCases.value = res.cases
+    deletedError.value = ''
+  }
+  catch (e) {
+    deletedCases.value = []
+    deletedError.value = caughtErrorStatus(e) === 403 ? '' : describeCaughtError(e, 'ページを読み込み直してください')
+  }
+}
+
+const restoring = ref<string | null>(null)
+
+async function restoreCase(entry: DeletedLitigationCaseRecord) {
+  restoring.value = entry.case.caseId
+  pageError.value = ''
+  let failure = ''
+  try {
+    await $fetch('/restraint-api/litigation-cases/restore', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { caseId: entry.case.caseId },
+    })
+  }
+  catch (e) {
+    failure = describeCaughtError(e, restoreRetryLabel(caughtErrorStatus(e)))
+  }
+  // 失敗でも読み直す (30 日を過ぎて消えた / 既に復活済みの行を残さない)。読み直しは pageError を空にするので文は後に入れる
+  await loadCases()
+  if (failure) pageError.value = failure
+  restoring.value = null
 }
 
 // --- 乗務員一覧 (y-time-export.vue と同じ取り方) ---
@@ -309,7 +359,13 @@ async function saveCase() {
     await loadCases()
   }
   catch (e) {
-    pageError.value = describeCaughtError(e, '「保存」を押してやり直してください')
+    // 削除された案件への保存 (404) は押し直しても直らない。読み直してから、一覧へ戻る案内を出す
+    const gone = caughtErrorStatus(e) === 404
+    const message = describeCaughtError(e, gone
+      ? '一覧に戻ってください。admin / payroll は「削除した案件」から復活できます'
+      : '「保存」を押してやり直してください')
+    if (gone) await loadCases()
+    pageError.value = message
   }
   finally {
     saving.value = false
@@ -319,7 +375,7 @@ async function saveCase() {
 const deleting = ref<string | null>(null)
 
 async function deleteCase(entry: LitigationCaseRecord) {
-  if (!confirm(`案件「${entry.name}」を削除しますか？この操作は取り消せません。`)) return
+  if (!confirm(`案件「${entry.name}」を削除しますか？削除から ${LITIGATION_CASE_RESTORE_DAYS} 日間は「削除した案件」から復活できます。`)) return
   deleting.value = entry.caseId
   pageError.value = ''
   try {
@@ -1462,6 +1518,47 @@ function fmtDateTime(iso: string): string {
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- 削除した案件 (削除から 30 日間は復活できる。403 / 0 件なら出さない) -->
+      <div v-if="deletedError" class="mt-4 print:hidden" data-testid="litigation-deleted-error">
+        <UAlert color="error" :title="deletedError" />
+      </div>
+      <div v-else-if="deletedCases.length > 0" class="mt-4 print:hidden" data-testid="litigation-deleted">
+        <h3 class="text-sm font-medium mb-2">削除した案件 (削除から {{ LITIGATION_CASE_RESTORE_DAYS }} 日間)</h3>
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
+                <th class="text-left px-4 py-3 font-medium">名前</th>
+                <th class="text-left px-4 py-3 font-medium">期間</th>
+                <th class="text-left px-4 py-3 font-medium">削除した日時</th>
+                <th class="text-left px-4 py-3 font-medium">削除した人</th>
+                <th class="text-left px-4 py-3 font-medium">消える日</th>
+                <th class="text-left px-4 py-3 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="entry in deletedCases"
+                :key="entry.case.caseId"
+                class="border-b border-gray-100 dark:border-gray-800"
+              >
+                <td class="px-4 py-3 font-medium">{{ entry.case.name }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ entry.case.fromMonth }} 〜 {{ entry.case.toMonth }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ fmtJstDateTime(entry.deletedAt) }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ entry.deletedBy }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ deletedCaseExpiryDate(entry.deletedAt) }}</td>
+                <td class="px-4 py-3 text-right whitespace-nowrap">
+                  <UButton
+                    icon="i-lucide-undo-2" label="復活" variant="soft" size="xs"
+                    :loading="restoring === entry.case.caseId" @click="restoreCase(entry)"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <!-- 開いた案件の詳細 (タブ) -->

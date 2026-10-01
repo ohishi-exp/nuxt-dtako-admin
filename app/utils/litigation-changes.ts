@@ -256,7 +256,7 @@ export interface LitigationChangeRow {
 /** ISO 文字列 (UTC) を JST の `YYYY-MM-DD HH:mm` にする。パースできなければ元の文字列。
  * (`kintai-diff-view.ts` の `fmtKintaiDiffLastVerified` と同じ JST 変換の作法 — 壁時計を
  * UTC getter で読む。ここでは日付も出すので桁数が違う。) */
-function fmtJstDateTime(iso: string): string {
+export function fmtJstDateTime(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   const jst = new Date(d.getTime() + 9 * 3600 * 1000)

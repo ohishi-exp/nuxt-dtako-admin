@@ -741,6 +741,14 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   - 案件: `DELETE /restraint-api/litigation-cases?case_id=` (**物理削除でなく `litigation_deleted_cases` への移動**。
     検知結果と版は消さない) / `GET …/litigation-cases/deleted` (30 日以内) / `POST …/litigation-cases/restore` `{caseId}`
     (無い・期限切れ 404、同じ案件が在れば 409)。案件の `PUT` は caseId が在って案件が無ければ 404 (役割は見ない)
+  - **画面 (`/litigation`、#c1133-33)**: 案件の一覧の下に「削除した案件 (削除から 30 日間)」の節 (`litigation.vue` の template に直書き。
+    部品に分けると `next-step-retry-labels.test.ts` が引用名を探せなくなる)。`loadCases` が `…/deleted` も一緒に読み、
+    **403 (役割が無い) と 0 件は節を出さず警告も出さない** (front は役割を知らない)、403 以外の失敗は節の位置の警告 (`pageError` と分ける)。
+    「復活」= `POST …/restore` → 成功も失敗も 2 つの一覧を読み直し、**失敗の文は読み直しの後に入れる** (`loadCases` の成功が `pageError` を空にする)。
+    retry は `restoreRetryLabel` (404 = 読み直した一覧を確認 / 409 = 案件の一覧を確認 / 他 =「復活」を押し直す)。
+    削除済みの案件への保存 (PUT 404) も押し直しでは直らないので「一覧に戻ってください。admin / payroll は「削除した案件」から復活できます」。
+    消える日は `deletedCaseExpiryDate` (削除の 30 日後の JST の日付)。テストは `tests/components/litigation-deleted-cases.test.ts`
+    (mount する他のテストは `…/deleted` の stub を既定 403 にして節を出さない)
   - 出力: `POST …/litigation-outputs` `{caseId, results}` → `{versionId, createdAt}` / `PUT …/litigation-outputs/file?case_id=&version_id=&name=&label=`
     (body = バイト列。1 通信 1 ファイル、20MB・1 版 300 個まで。sha256 を刻む) / `GET …/litigation-outputs?case_id=` (新しい順 50、results なし)
     / `GET …/litigation-outputs?case_id=&version_id=` (results つき) / `GET …/litigation-outputs/file?case_id=&version_id=&name=`。

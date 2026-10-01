@@ -164,3 +164,33 @@ export function buildLitigationCaseSavePayload(input: LitigationCaseFormInput, c
 export function litigationCaseMonthCount(fromMonth: string, toMonth: string): number {
   return monthRange(fromMonth, toMonth, LITIGATION_CASE_MAX_MONTHS + 1).length
 }
+
+/** 削除した案件を復活できる日数 (relay の `GET …/litigation-cases/deleted` の窓と同一)。 */
+export const LITIGATION_CASE_RESTORE_DAYS = 30
+
+/** `GET /restraint-api/litigation-cases/deleted` の 1 件 (`case` は案件の一覧と同じ形)。 */
+export interface DeletedLitigationCaseRecord {
+  case: LitigationCaseRecord
+  deletedAt: string
+  deletedBy: string
+}
+
+/** 削除から復活できなくなる日 (削除の `LITIGATION_CASE_RESTORE_DAYS` 日後の JST の日付 `YYYY-MM-DD`)。読めなければ空文字。 */
+export function deletedCaseExpiryDate(deletedAt: string): string {
+  const d = new Date(deletedAt)
+  if (Number.isNaN(d.getTime())) return ''
+  const jst = new Date(d.getTime() + (LITIGATION_CASE_RESTORE_DAYS * 24 + 9) * 3600 * 1000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${jst.getUTCFullYear()}-${p(jst.getUTCMonth() + 1)}-${p(jst.getUTCDate())}`
+}
+
+/**
+ * 復活の失敗 (`POST …/litigation-cases/restore`) の `describeCaughtError` に渡す retry。
+ * 404 は 30 日を過ぎて消えた、409 は同じ案件が既に在る — どちらも「復活」を押し直しても直らないので、
+ * 読み直した一覧を見るよう案内する (合成後の文が嘘にならない形)。
+ */
+export function restoreRetryLabel(status: number | null): string {
+  if (status === 404) return '読み直した一覧を確認してください'
+  if (status === 409) return '案件の一覧を確認してください'
+  return '「復活」を押してやり直してください'
+}
