@@ -398,8 +398,30 @@ fail することが本番で発覚 → revert。
 |---|---|
 | `app/pages/y-time-export.vue` | UI、`fetch('/api/y-time-export')` で server route 呼び出し |
 | `server/api/y-time-export.post.ts` | backend GET → R2 テンプレ → JSZip xlsx 生成 |
-| `app/utils/y-time-xlsx.ts` | JSZip single-pass writer (PR #30) |
+| `app/utils/y-time-xlsx.ts` | JSZip single-pass writer (PR #30)。`yTimeRowInputCells` (1 行が入力列 F〜O のどのセルに何を書くか) と `readSheetCells` (シートのセルを型つきで読む) もここ |
+| `app/utils/y-kingaku.ts` | **Y金額 シートの時間の行**を Excel を開かずに出す pure ロジック (Refs #1133 c1133-31、100% gate)。テンプレの Y時間 / Y金額 の式を列ごとに写したもの |
 | `app/utils/api.ts` | `getYTimePreview()` (preview ボタン用、sync GET) |
+
+### Y金額 の時間の行 (訴訟準備の出力タブ、Refs #1133 c1133-31)
+
+このシステムは Y時間 シートの入力列 (C・F〜O) を書くだけで、**式は Excel が開いたときに計算する**。
+訴訟準備 (`/litigation`) の出力タブは、Y金額 シートの時間の行 (賃金月度ごとの 法内残業 / 法外残業 /
+月60h超 / 休日労働 / 深夜労働 / 総労働時間) を冊ごとの表にして画面と紙面に出すので、
+`app/utils/y-kingaku.ts` が**テンプレの式を列ごとに写して**計算する。
+
+- **正本はテンプレの式。** 式を変えたテンプレを PUT したら `y-kingaku.ts` も写し直す。
+  relay の賃金計算 (`restraint-wage.ts`) は規則が違う (締め日が無い・週の超過の計上月が違う) ので使わない
+- 届け方は `POST /api/y-time-export` の応答ヘッダ `x-y-time-kingaku` (月度の配列の JSON を URI encode)。
+  **`period_rewrite: true` のときだけ**付く。新しい route も追加の通信も無い
+- 入力は「シートに実際に書いた値」(`writeYTimeRows` の `inputDays`)。上流の行そのままではない
+  (テンプレに行が無い日は入らず、同じ日付の行はセルごとに後勝ち)。xlsx に書くセルと同じ
+  `yTimeRowInputCells` から作る
+- 設定 (法定休日の曜日・週の制限時間・週の起算曜日・曜日ごとの所定・締め日・月 60h 規制の適用) は
+  テンプレの `要素` シートから**セルの型で**読む。読めない・想定外の値は既定値で計算せず、
+  `x-y-time-kingaku-error` に理由を載せて画面は「集計なし: …」と出す
+- **1 冊 = 1 ブック**: 週の累計は冊の初日から数え直し、冊の期間の外の日は月度に入らない (Excel と同じ)。
+  締め日が月の途中だと冊の最初と最後の月度が欠けるので、画面は ※ を付けて断る
+- 金額の行 (賃金単価・既払額は Excel で手入力)、`/y-time-export` 画面への表示、X金額 / J金額 は出していない
 
 ## NET780 ビューア (`/net780` ページ)
 
