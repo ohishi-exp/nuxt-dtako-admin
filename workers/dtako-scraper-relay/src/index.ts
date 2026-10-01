@@ -8,10 +8,13 @@ export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
 import {
   buildDeps,
+  judgeKintaiGate,
+  judgeYTimeShiftsRequest,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
   relayKintaiShiftOverlaps,
   relayKintaiWindow,
+  relayKintaiYTimeShifts,
   tenantForCompId,
 } from "./kintai-relay";
 import {
@@ -177,6 +180,12 @@ export default {
       // 同じ乗務員の勤務の時間帯の重なり (kintai.shifts の自己結合、Refs #1123)。
       // day-summaries と同じ関門・同じ読むだけの口 (GET だけ)
       return handleKintaiShiftOverlaps(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/y-time-shifts" && request.method === "POST") {
+      // Y時間 の Excel の入力にする勤務 (始業・終業・実働でない区間) を、勤怠から読んで束ねる
+      // (Refs #1133)。読むだけ。関門は day-summaries と同じ
+      return handleKintaiYTimeShifts(request, env);
     }
 
     if (url.pathname === "/kintai-relay/operation-zip" && request.method === "POST") {
@@ -621,36 +630,73 @@ async function handleKintaiShiftOverlaps(
 }
 
 /**
- * GCP (`/ichibanboshi-proxy` 経由) を**読むだけ**の口の共通の関門と応答。
- * day-summaries / shift-overlaps が共有する — 関門を写すと片方だけ直す事故になるため。
- * 上流の失敗は 502 (古い値に倒さない)。
+ * `POST /kintai-relay/y-time-shifts` — body `{driver_cd, from, to, tenant_id}`。乗務員 1 人の
+ * `from`〜`to` に掛かる勤務 (始業・終業・実働でない区間) を、勤怠の `shift-days` から読んで
+ * `{tenant_id, shifts: [{start, end, non_working, note: null}], missing_months}` で返す
+ * (Refs #1133)。呼び手は front worker の Y時間 の Excel の route で、`shifts` をそのまま
+ * 上流の `POST /api/dtako/y-time-rows` へ渡す。**ここでは行を作らない・時間を計算しない。**
+ *
+ * 関門は day-summaries と同じ (`passKintaiGcpGate`)。503 の本文に `reason` を出すのは
+ * この口だけ (呼び手が「勤怠の設定を置いていない環境」を見分けるため。secret を通した
+ * 呼び手にしか届かない — `judgeKintaiGate`)。
+ *
+ * **★ body の `tenant_id` は認可ではない。** 違えば 403 `kintai_out_of_scope` を返すが、
+ * それは上流を読まずに済ますための絞り込みで、認可は呼び手が応答の `tenant_id`
+ * (relay が `KINTAI_COMP_ID` から引いた値) を認証済みの身元と突き合わせて行う
+ * (`judgeYTimeShiftsRequest` の doc)。検証は 400、上流の失敗・形の合わない応答は 502
+ * (読めた月だけで返さない)。
  */
-async function handleKintaiGcpRead(
+async function handleKintaiYTimeShifts(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const logKey = "kintai_y_time_shifts";
+  const gate = await passKintaiGcpGate(request, env, logKey);
+  if (!gate.ok) return kintaiGcpFail(gate.status, gate.error, gate.reason);
+  const verdict = judgeYTimeShiftsRequest(await request.text(), gate.tenantId);
+  if (!verdict.ok) return kintaiGcpFail(verdict.status, verdict.error);
+  return respondKintaiGcpRead(logKey, () =>
+    relayKintaiYTimeShifts(gate.deps, verdict.input, gate.tenantId),
+  );
+}
+
+/** GCP を読むだけの口の失敗の応答。`reason` は渡したときだけ本文に載る。 */
+function kintaiGcpFail(status: number, error: string, reason?: string): Response {
+  return new Response(JSON.stringify({ error, reason }), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * GCP (`/ichibanboshi-proxy` 経由) を**読むだけ**の口の共通の関門。
+ * day-summaries / shift-overlaps / y-time-shifts が共有する — 関門を写すと片方だけ直す
+ * 事故になるため。順序 (secret の解決 → secret の比較 → 残りの配線) の判定は
+ * `judgeKintaiGate`、そのあと tenant を KV `dtako_accounts` から `KINTAI_COMP_ID` で引く。
+ */
+async function passKintaiGcpGate(
   request: Request,
   env: RelayWorkerEnv,
   logKey: string,
-  read: (deps: ReturnType<typeof buildDeps>, url: URL) => Promise<unknown>,
-): Promise<Response> {
-  const fail = (status: number, error: string) =>
-    new Response(JSON.stringify({ error }), {
-      status,
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-    });
-
-  const authWorker = env.AUTH_WORKER;
-  const compId = (env.KINTAI_COMP_ID ?? "").trim();
-  const origin = (env.NUXT_ICHIBAN_API_URL ?? "").trim();
-  const cfId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+): Promise<
+  | { ok: true; deps: ReturnType<typeof buildDeps>; tenantId: string }
+  | { ok: false; status: number; error: string; reason?: string }
+> {
   const [proxySecret, cfSecret] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
     resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
   ]);
-  if (!authWorker || !compId || !origin || !cfId || !proxySecret || !cfSecret) {
-    return fail(503, "kintai-relay not configured");
-  }
-
-  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
-  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+  const verdict = judgeKintaiGate(
+    {
+      authWorker: env.AUTH_WORKER,
+      compId: (env.KINTAI_COMP_ID ?? "").trim(),
+      origin: (env.NUXT_ICHIBAN_API_URL ?? "").trim(),
+      cfId: (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim(),
+      cfSecret,
+      proxySecret,
+    },
+    request.headers.get("X-Alc-Proxy-Secret") ?? "",
+    constantTimeEquals,
+  );
+  if (!verdict.ok) return verdict;
+  const { authWorker, compId, origin, cfId } = verdict.config;
 
   const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
   let accounts: unknown = null;
@@ -662,10 +708,8 @@ async function handleKintaiGcpRead(
   const tenantId = tenantForCompId(accounts, compId);
   if (!tenantId) {
     console.error(JSON.stringify({ [logKey]: "tenant not resolved", comp_id: compId }));
-    return fail(503, "tenant not resolved from dtako_accounts");
+    return { ok: false, status: 503, error: "tenant not resolved from dtako_accounts" };
   }
-
-  const url = new URL(request.url);
   const deps = buildDeps({
     ichibanOrigin: origin,
     cfAccessClientId: cfId,
@@ -674,8 +718,13 @@ async function handleKintaiGcpRead(
     proxySecret,
     tenantId,
   });
+  return { ok: true, deps, tenantId };
+}
+
+/** 関門を通ったあとの読み出しと応答。上流の失敗は 502 (古い値に倒さない)。 */
+async function respondKintaiGcpRead(logKey: string, read: () => Promise<unknown>): Promise<Response> {
   try {
-    const body = await read(deps, url);
+    const body = await read();
     console.log(JSON.stringify({ [logKey]: "ok" }));
     return new Response(JSON.stringify(body), {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -683,8 +732,22 @@ async function handleKintaiGcpRead(
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(JSON.stringify({ [logKey]: "failed", message }));
-    return fail(502, message);
+    return kintaiGcpFail(502, message);
   }
+}
+
+/** day-summaries / shift-overlaps の関門と応答 (`passKintaiGcpGate` → `read`)。
+ * この 2 つの口は 503 の本文に `reason` を出さない (応答の形を変えない)。 */
+async function handleKintaiGcpRead(
+  request: Request,
+  env: RelayWorkerEnv,
+  logKey: string,
+  read: (deps: ReturnType<typeof buildDeps>, url: URL) => Promise<unknown>,
+): Promise<Response> {
+  const gate = await passKintaiGcpGate(request, env, logKey);
+  if (!gate.ok) return kintaiGcpFail(gate.status, gate.error);
+  const url = new URL(request.url);
+  return respondKintaiGcpRead(logKey, () => read(gate.deps, url));
 }
 
 /** 定数時間比較 (auth-worker の alc-internal-proxy.ts と同実装)。 */

@@ -4,6 +4,7 @@ import {
   gcpPartsFor,
   overlayGcpDayTimes,
   parseGcpDaySummaries,
+  parseGcpShiftDays,
   parseGcpShiftOverlaps,
   type GcpDayPart,
 } from "../src/gcp-day-summaries";
@@ -394,5 +395,69 @@ describe("gcpOnlyBaseSummaries (元行が無く GCP にだけ勤務がある乗�
     expect(missing).toBe(false);
     expect(summary.restraintMinutes).toBe(1440);
     expect(summary.days.map((d) => d.day)).toEqual([6, 7]);
+  });
+});
+
+describe("parseGcpShiftDays (勤務ごとの始業・終業・実働でない区間、Refs #1133 c1133-40)", () => {
+  const item = (over: Record<string, unknown> = {}) => ({
+    start_at: "2026-04-03 22:10:00",
+    end_at: "2026-04-04 09:05:00",
+    shift_source: "timecard",
+    summary: { restraint_minutes: 655, working_minutes: 595 },
+    non_working: [{ start: "2026-04-04 02:00:00", end: "2026-04-04 03:00:00", kind: "break_event" }],
+    parts: [{ date: "2026-04-03", restraint_minutes: 110 }],
+    ...over,
+  });
+  const body = (...items: unknown[]) => ({ month: "2026-04", driver_cd: 9001, items });
+
+  it("始業・終業・実働でない区間を応答の値のまま取り出す (kind も落とさない)", () => {
+    expect(parseGcpShiftDays(body(item()))).toEqual([
+      {
+        start: "2026-04-03 22:10:00",
+        end: "2026-04-04 09:05:00",
+        nonWorking: [{ start: "2026-04-04 02:00:00", end: "2026-04-04 03:00:00", kind: "break_event" }],
+      },
+    ]);
+  });
+
+  it("non_working の [] (区間なし) と null (まだ畳み直していない) を区別して残す", () => {
+    const got = parseGcpShiftDays(
+      body(item({ non_working: [] }), item({ start_at: "2026-04-05 08:00:00", end_at: "2026-04-05 17:00:00", non_working: null })),
+    );
+    expect(got?.map((s) => s.nonWorking)).toEqual([[], null]);
+  });
+
+  it("上流の並びのまま返す (並べ替えない)。items が空なら空の配列", () => {
+    const later = item({ start_at: "2026-04-09 08:00:00", end_at: "2026-04-09 17:00:00" });
+    expect(parseGcpShiftDays(body(later, item()))?.map((s) => s.start)).toEqual([
+      "2026-04-09 08:00:00",
+      "2026-04-03 22:10:00",
+    ]);
+    expect(parseGcpShiftDays(body())).toEqual([]);
+  });
+
+  it.each([
+    ["応答が object でない", "boom"],
+    ["応答が null", null],
+    ["items が無い", { month: "2026-04" }],
+    ["items が配列でない", { items: {} }],
+    ["要素が object でない", body("x")],
+    ["要素が null", body(null)],
+    ["start_at が無い", body(item({ start_at: undefined }))],
+    ["start_at の形が違う", body(item({ start_at: "2026-04-03T22:10:00" }))],
+    ["end_at が文字列でない", body(item({ end_at: 5 }))],
+    ["end_at の形が違う", body(item({ end_at: "2026-04-04" }))],
+    ["non_working が無い (null でも配列でもない)", body(item({ non_working: undefined }))],
+    ["non_working が配列でない", body(item({ non_working: "none" }))],
+    ["non_working の要素が object でない", body(item({ non_working: ["x"] }))],
+    ["non_working の要素が null", body(item({ non_working: [null] }))],
+    ["non_working の要素の start が無い", body(item({ non_working: [{ end: "2026-04-04 03:00:00" }] }))],
+    ["non_working の要素の end の形が違う", body(item({ non_working: [{ start: "2026-04-04 02:00:00", end: "03:00" }] }))],
+  ])("形の合わない応答は null (行を捨てて続けない): %s", (_label, raw) => {
+    expect(parseGcpShiftDays(raw)).toBeNull();
+  });
+
+  it("形の合わない勤務が 1 本でも在れば、ほかが正しくても null", () => {
+    expect(parseGcpShiftDays(body(item(), item({ end_at: "" })))).toBeNull();
   });
 });

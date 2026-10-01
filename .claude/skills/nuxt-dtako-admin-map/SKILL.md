@@ -422,6 +422,32 @@ fail することが本番で発覚 → revert。
   (`litigation-output-version.ts` の `parseResult`)
 - Excel の中の式の結果とは一致しないことが在る (Excel に書く行の作り方が別。統一は別の作業)
 
+### Y時間 の Excel の入力にする勤務を relay が読む口 (Refs #1133 c1133-40)
+
+relay の機械用の口 `POST /kintai-relay/y-time-shifts` — body `{driver_cd, from, to, tenant_id}` →
+`{tenant_id, shifts: [{start, end, non_working, note: null}], missing_months}`。勤怠の
+`GET /api/kintai/shift-days` (乗務員 1 人・1 か月) を **`from` の月の前月 〜 `to` の月ぶん並列**で読んで束ねる。
+**読んで渡すだけ** — 行の規則・休憩の配り方・時間の計算は上流 (`POST /api/dtako/y-time-rows`) が持つ。
+この PR の時点で呼び手は居ない (front の route が呼ぶのは次の PR)。
+
+- 置き場: 判定は全部 100% gate の内 — `src/kintai-relay.ts` (`judgeKintaiGate` / `judgeYTimeShiftsRequest` /
+  `bundleYTimeShifts` / `relayKintaiYTimeShifts`) と `src/gcp-day-summaries.ts` (`parseGcpShiftDays`)。
+  `src/index.ts` (gate の外) は振り分けと関門の呼び出しだけ (`handleKintaiYTimeShifts`)
+- **関門は `passKintaiGcpGate` 1 つ** (`day-summaries`・`shift-overlaps`・`y-time-shifts` が共有)。順序は
+  共有 secret の解決 (503) → secret の比較 (401) → 残りの配線 (503) → tenant を KV から引く (503)。
+  これらの口は front の公開ホストから素通しで届く (`worker/index.ts`) ので、**secret を通していない呼び手に
+  設定の様子を教えない**。503 の本文の `reason: "kintai_comp_id_unset"` は **`y-time-shifts` だけ**が出し、
+  `KINTAI_COMP_ID` が空のときに限る (ほかの欠落には付けない)。`/kintai-relay/run`・`recalc` の関門は別の写しのまま
+- **body の `tenant_id` は認可ではない。** relay が `KINTAI_COMP_ID` から引いた tenant と違えば
+  403 `{error: "kintai_out_of_scope"}` を返すが、上流を読まずに済ますための絞り込み。**認可は呼び手が、
+  応答の `tenant_id` (relay が引いた値。body の写しではない) を認証済みの身元と突き合わせて行う**
+- 検証は 400 (`kintaiChangeLogInputError` をそのまま使う。期間は 400 日以内)。**1 つの月でも読めない・
+  形が合わない応答は 502** (`parseGcpShiftDays` が `null` を返す。行を捨てて続けない)
+- 前月の勤務は**終業が `from` の 0:00 より後のものだけ**渡す (期間に掛からない前月の勤務を、上流が
+  「行を作れなかった勤務」に数えないように)。`missing_months` は `from`〜`to` の月だけを見る
+- 手元の確認: relay を `wrangler dev --local` で起こし、`AUTH_WORKER` を `/ichibanboshi-proxy/api/kintai/shift-days`
+  を返すスタブの worker へ向けて curl する (`dev-login-local-verify` の relay の行)
+
 ## NET780 ビューア (`/net780` ページ)
 
 NET780 デジタコの運行単位生データ ZIP (.inf/.spd/.dsd/.gpd/.evd 同梱) を、アップロード

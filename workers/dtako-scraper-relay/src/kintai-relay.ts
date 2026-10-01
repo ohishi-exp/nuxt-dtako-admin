@@ -45,6 +45,8 @@
  * やり直せば同じ状態に収束する。
  */
 
+import { parseGcpShiftDays, type GcpNonWorking, type GcpShiftDay } from "./gcp-day-summaries";
+
 /** service binding の最小形 (`cloudflare:workers` の型に依存しないための構造的型)。 */
 export interface FetcherLike {
   fetch(input: string, init?: RequestInit): Promise<Response>;
@@ -84,6 +86,11 @@ const UNKO_GAPS_PATH = "/api/kintai/unko-gaps";
  * 置かれている想定 — 呼ぶだけのこの中継はどこに置かれても影響を受けない。
  */
 const CHANGE_LOG_PATH = "/api/kintai/change-log";
+/**
+ * 勤務ごとの始業・終業・実働でない区間を読む口 (rust-ichibanboshi `src/routes/shift_days.rs`、
+ * Refs #1133)。乗務員 1 人・1 か月ぶん。**始業がその月に入る勤務**だけを返す。
+ */
+const SHIFT_DAYS_PATH = "/api/kintai/shift-days";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -325,6 +332,59 @@ export function buildDeps(opts: {
       });
     },
   };
+}
+
+/** [`judgeKintaiGate`] に渡す配線。値は呼び手が env から引いて trim 済みのもの。 */
+export interface KintaiGateConfig<F> {
+  /** auth-worker の service binding (無ければ undefined)。 */
+  authWorker: F | undefined;
+  /** `KINTAI_COMP_ID`。 */
+  compId: string;
+  /** オンプレの URL。 */
+  origin: string;
+  /** CF Access の client id / secret。 */
+  cfId: string;
+  cfSecret: string;
+  /** 共有 secret (`X-Alc-Proxy-Secret` と比べる側)。 */
+  proxySecret: string;
+}
+
+/** 503 の本文の `reason`。**`KINTAI_COMP_ID` が空のときだけ**付く (ほかの欠落には付けない)。 */
+export const KINTAI_COMP_ID_UNSET = "kintai_comp_id_unset";
+
+export type KintaiGateVerdict<F> =
+  | { ok: true; config: KintaiGateConfig<F> & { authWorker: F } }
+  | { ok: false; status: 401 | 503; error: string; reason?: typeof KINTAI_COMP_ID_UNSET };
+
+/**
+ * GCP を読むだけの口 (`/kintai-relay/day-summaries`・`shift-overlaps`・`y-time-shifts`) の
+ * 関門の判定。**順序に意味がある**:
+ *
+ * 1. 共有 secret を解決できない → 503 (`reason` なし)
+ * 2. 呼び手の secret が一致しない → 401
+ * 3. 残りの配線が欠けている → 503。`KINTAI_COMP_ID` が空のときだけ `reason` を付ける
+ *
+ * これらの口は front の公開ホストから素通しで届く (front の `worker/index.ts`)。
+ * **secret を通していない呼び手に、設定の様子 (どれが欠けているか) を教えない** ために
+ * 2 を 3 より前に置く。`reason` を `KINTAI_COMP_ID` の空に限るのは、本番で secret が
+ * 1 つ欠けたのを呼び手が「勤怠の設定を置いていない環境」と読まないようにするため。
+ *
+ * 比較の関数は呼び手が渡す (定数時間の比較を 2 つ持たない)。
+ */
+export function judgeKintaiGate<F>(
+  config: KintaiGateConfig<F>,
+  callerSecret: string,
+  secretsEqual: (a: string, b: string) => boolean,
+): KintaiGateVerdict<F> {
+  const notConfigured = { ok: false, status: 503, error: "kintai-relay not configured" } as const;
+  if (!config.proxySecret) return notConfigured;
+  if (!secretsEqual(callerSecret, config.proxySecret)) {
+    return { ok: false, status: 401, error: "Unauthorized" };
+  }
+  if (!config.compId) return { ...notConfigured, reason: KINTAI_COMP_ID_UNSET };
+  const { authWorker } = config;
+  if (!authWorker || !config.origin || !config.cfId || !config.cfSecret) return notConfigured;
+  return { ok: true, config: { ...config, authWorker } };
 }
 
 export interface KintaiRecalcInput {
@@ -852,6 +912,155 @@ export async function relayKintaiChangeLog(
   if (inputError) throw new KintaiRelayError(inputError);
   const q = new URLSearchParams({ driver: input.driver, from: input.from, to: input.to });
   return readJson<unknown>(await deps.gcp(`${CHANGE_LOG_PATH}?${q}`), "gcp kintai change-log");
+}
+
+// ---------------------------------------------------------------------------
+// Y時間 の Excel の入力にする勤務 (Refs #1133 c1133-40)
+// ---------------------------------------------------------------------------
+// 訴訟準備の Y時間 の Excel を、wage report と同じ元 (勤怠の勤務の記録) から作るための
+// 読み出し。**読んで束ねて渡すだけ** — 行の規則・休憩の配り方・時間の計算は上流
+// (rust-alc-api の `POST /api/dtako/y-time-rows`) が持ち、ここには 1 行も書かない。
+
+/** 403 の本文の `error`。body の `tenant_id` が、relay の読む tenant と違う。 */
+export const KINTAI_OUT_OF_SCOPE = "kintai_out_of_scope";
+
+export interface YTimeShiftsInput {
+  /** 乗務員CD (数字の文字列)。 */
+  driverCd: string;
+  /** `YYYY-MM-DD` */
+  from: string;
+  /** `YYYY-MM-DD` */
+  to: string;
+}
+
+export type YTimeShiftsRequestVerdict =
+  | { ok: true; input: YTimeShiftsInput }
+  | { ok: false; status: 400 | 403; error: string };
+
+/**
+ * `POST /kintai-relay/y-time-shifts` の body `{driver_cd, from, to, tenant_id}` を検証する。
+ *
+ * - 形・期間の誤りは 400。`driver_cd` / `from` / `to` と期間の上限は
+ *   [`kintaiChangeLogInputError`] の判定そのまま (同じ検証を 2 つ持たない)
+ * - `tenant_id` が無い・空は 400 (403 ではない — 名乗っていないのは呼び方の誤り)
+ * - `tenant_id` が `relayTenantId` (relay が `KINTAI_COMP_ID` から引いた tenant) と違えば
+ *   403 [`KINTAI_OUT_OF_SCOPE`]
+ *
+ * ## ★ この照合は認可ではない
+ *
+ * **認可を担うのは `X-Alc-Proxy-Secret` だけ**で、body の `tenant_id` は「誰か」を主張しない
+ * (secret を持つ呼び手は任意の値を書ける。`handleDriverMasterRun` の doc と同じ)。
+ * ここで見ているのは「勤怠を持たない会社の利用者のために、上流を何回も読まない」ための
+ * **絞り込み**だけ。利用者がその tenant の人かどうかは、**呼び手 (front worker) が、応答の
+ * `tenant_id` を認証済みの身元と突き合わせて**確かめる ([`bundleYTimeShifts`] が入れる値)。
+ * ⇒ この 403 を「権限が無い」の意味に使い出さないこと。
+ */
+export function judgeYTimeShiftsRequest(
+  bodyText: string,
+  relayTenantId: string,
+): YTimeShiftsRequestVerdict {
+  const bad = (error: string) => ({ ok: false, status: 400, error }) as const;
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return bad("body must be JSON");
+  }
+  if (typeof body !== "object" || body === null) return bad("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === "string" ? v : "");
+  const input: YTimeShiftsInput = {
+    driverCd: typeof b.driver_cd === "number" ? String(b.driver_cd) : text(b.driver_cd),
+    from: text(b.from),
+    to: text(b.to),
+  };
+  const inputError = kintaiChangeLogInputError({ ...input, driver: input.driverCd });
+  if (inputError) return bad(inputError);
+  const tenantId = text(b.tenant_id).trim();
+  if (!tenantId) return bad("tenant_id は空でない文字列で指定してください");
+  if (tenantId !== relayTenantId) return { ok: false, status: 403, error: KINTAI_OUT_OF_SCOPE };
+  return { ok: true, input };
+}
+
+/** 上流の `POST /api/dtako/y-time-rows` の `shifts` の 1 要素と同じ形。 */
+export interface YTimeShift {
+  start: string;
+  end: string;
+  /** `null` = まだ畳み直していない勤務 (`[]` = 区間なし とは別)。 */
+  non_working: GcpNonWorking[] | null;
+  /** 勤怠の勤務は注記を持たない。 */
+  note: null;
+}
+
+export interface YTimeShiftsResponse {
+  /** **relay が実際に読んだ tenant** (`KINTAI_COMP_ID` から引いた値)。body の値の写しではない。 */
+  tenant_id: string;
+  shifts: YTimeShift[];
+  /** `from`〜`to` の月のうち、勤務が 1 本も無かった月 (`YYYY-MM`)。前月ぶんは数えない。 */
+  missing_months: string[];
+}
+
+/**
+ * 月ごとに読んだ勤務を 1 つの応答に束ねる。
+ *
+ * - `previous` (`from` の月の前月の勤務) は、**終業が `from` の 0:00 より後のものだけ**渡す。
+ *   前月を読むのは「前月末に始業して期間へまたぐ勤務」を拾うためで、期間に 1 分も掛からない
+ *   勤務は行が期間の中に出ることが無い。渡すと、畳み直していない前月の勤務が上流で
+ *   「行を作れなかった勤務」に数えられ、期間の外の勤務のせいで畳み直しを促すことになる。
+ *   **見るのは時刻だけ** (行の規則ではない)
+ * - `byMonth` (`months` と同じ並びの、`from`〜`to` の月の勤務) は全部渡す
+ * - 始業の昇順に並べる (上流の並びに頼らない)。値は読んだまま
+ */
+export function bundleYTimeShifts(opts: {
+  tenantId: string;
+  from: string;
+  months: string[];
+  previous: GcpShiftDay[];
+  byMonth: GcpShiftDay[][];
+}): YTimeShiftsResponse {
+  const fromStart = `${opts.from} 00:00:00`;
+  const kept = [...opts.previous.filter((s) => s.end > fromStart), ...opts.byMonth.flat()];
+  kept.sort((a, b) => a.start.localeCompare(b.start));
+  return {
+    tenant_id: opts.tenantId,
+    shifts: kept.map((s) => ({ start: s.start, end: s.end, non_working: s.nonWorking, note: null })),
+    missing_months: opts.months.filter((_, i) => opts.byMonth[i]!.length === 0),
+  };
+}
+
+/**
+ * 乗務員 1 人の `from`〜`to` に掛かる勤務を、勤怠の `shift-days` から読んで束ねる。
+ *
+ * 読むのは **`from` の月の前月 〜 `to` の月**。`shift-days` は始業がその月に入る勤務しか
+ * 返さないので、前月を読まないと前月末に始業した勤務が落ちる。月ごとの読み出しは
+ * **並列** (最大で 400 日ぶん + 前月)。
+ *
+ * **1 つの月でも読めなければ全体を失敗にする** (上流の非 2xx・JSON でない・形が合わない)。
+ * 読めた月だけで返すと、勤務の欠けた表が正常な結果として出てしまう。
+ *
+ * 入力の検証は [`judgeYTimeShiftsRequest`] が済ませている前提だが、直接呼ぶ呼び手のために
+ * ここでも同じ判定を通す ([`relayKintaiChangeLog`] と同じ)。
+ */
+export async function relayKintaiYTimeShifts(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: YTimeShiftsInput,
+  tenantId: string,
+): Promise<YTimeShiftsResponse> {
+  const inputError = kintaiChangeLogInputError({ ...input, driver: input.driverCd });
+  if (inputError) throw new KintaiRelayError(inputError);
+  const months = monthsCoveredByRange(input.from, input.to);
+  const previousMonth = windowMonths(months[0]!, 2)[0]!;
+  const read = async (month: string): Promise<GcpShiftDay[]> => {
+    const who = `gcp kintai shift-days ${month}`;
+    const q = new URLSearchParams({ month, driver: input.driverCd });
+    const shifts = parseGcpShiftDays(
+      await readJson<unknown>(await deps.gcp(`${SHIFT_DAYS_PATH}?${q}`), who),
+    );
+    if (!shifts) throw new KintaiRelayError(`${who}: 応答の形が合いません`);
+    return shifts;
+  };
+  const [previous, ...byMonth] = await Promise.all([previousMonth, ...months].map(read));
+  return bundleYTimeShifts({ tenantId, from: input.from, months, previous: previous!, byMonth });
 }
 
 // ---------------------------------------------------------------------------
