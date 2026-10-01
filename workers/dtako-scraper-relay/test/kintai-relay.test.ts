@@ -10,6 +10,12 @@ import {
   relayKintaiUnkoGaps,
   relayKintaiChangeLog,
   CHANGE_LOG_MAX_DAYS,
+  relayKintaiYTimeShifts,
+  bundleYTimeShifts,
+  judgeYTimeShiftsRequest,
+  judgeKintaiGate,
+  KINTAI_COMP_ID_UNSET,
+  KINTAI_OUT_OF_SCOPE,
   windowMonths,
   jstMonth,
   tenantForCompId,
@@ -1223,5 +1229,277 @@ describe("checkKyuyoAccess — 給与 allowlist の関門 (Refs #951)", () => {
     const denial = await checkKyuyoAccess(d, "jwt");
     expect(denial!.status).toBe(503);
     expect(denial!.message).toContain("TypeError: fetch failed");
+  });
+});
+
+describe("judgeKintaiGate — GCP を読むだけの口の関門の順序 (Refs #1133 c1133-40)", () => {
+  const SECRET = "shared-secret";
+  const full = { authWorker: { name: "auth" }, compId: "90000001", origin: "https://onprem.invalid", cfId: "cid", cfSecret: "csecret", proxySecret: SECRET };
+  const eq = (a: string, b: string) => a === b;
+
+  it("全部そろっていて secret が一致すれば通し、配線を返す", () => {
+    expect(judgeKintaiGate(full, SECRET, eq)).toEqual({ ok: true, config: full });
+  });
+
+  it("共有 secret を解決できなければ 503 (reason なし)。呼び手の secret は比べない", () => {
+    const secretsEqual = vi.fn(() => true);
+    const got = judgeKintaiGate({ ...full, proxySecret: "", compId: "" }, "", secretsEqual);
+    expect(got).toEqual({ ok: false, status: 503, error: "kintai-relay not configured" });
+    expect(secretsEqual).not.toHaveBeenCalled();
+  });
+
+  it("secret が違えば 401。KINTAI_COMP_ID が空でも reason を返さない (secret の比較が先)", () => {
+    const got = judgeKintaiGate({ ...full, compId: "" }, "wrong", eq);
+    expect(got).toEqual({ ok: false, status: 401, error: "Unauthorized" });
+    expect(got).not.toHaveProperty("reason");
+  });
+
+  it("secret が違えば、ほかの配線が欠けていても 401 (設定の様子を教えない)", () => {
+    const got = judgeKintaiGate({ ...full, authWorker: undefined, origin: "", cfId: "", cfSecret: "" }, "", eq);
+    expect(got).toEqual({ ok: false, status: 401, error: "Unauthorized" });
+  });
+
+  it("secret が一致し KINTAI_COMP_ID が空なら 503 + reason", () => {
+    expect(judgeKintaiGate({ ...full, compId: "" }, SECRET, eq)).toEqual({
+      ok: false,
+      status: 503,
+      error: "kintai-relay not configured",
+      reason: KINTAI_COMP_ID_UNSET,
+    });
+  });
+
+  it.each([
+    ["auth-worker の binding", { authWorker: undefined }],
+    ["オンプレの URL", { origin: "" }],
+    ["CF Access の client id", { cfId: "" }],
+    ["CF Access の client secret", { cfSecret: "" }],
+  ])("secret が一致し %s だけが欠けていれば 503 で、reason は付けない", (_label, missing) => {
+    const got = judgeKintaiGate({ ...full, ...missing }, SECRET, eq);
+    expect(got).toEqual({ ok: false, status: 503, error: "kintai-relay not configured" });
+    expect(got).not.toHaveProperty("reason");
+  });
+});
+
+describe("judgeYTimeShiftsRequest — body の検証と tenant の絞り込み (Refs #1133 c1133-40)", () => {
+  const ok = { driver_cd: "9001", from: "2026-04-01", to: "2026-04-30", tenant_id: "tenant-a" };
+  const judge = (body: unknown, relayTenant = "tenant-a") =>
+    judgeYTimeShiftsRequest(typeof body === "string" ? body : JSON.stringify(body), relayTenant);
+
+  it("正しい body は入力に直して通す (driver_cd は数値でも受ける)", () => {
+    const input = { driverCd: "9001", from: "2026-04-01", to: "2026-04-30" };
+    expect(judge(ok)).toEqual({ ok: true, input });
+    expect(judge({ ...ok, driver_cd: 9001 })).toEqual({ ok: true, input });
+  });
+
+  it.each([
+    ["JSON でない", "not json", "body must be JSON"],
+    ["object でない", "5", "body must be a JSON object"],
+    ["null", "null", "body must be a JSON object"],
+    ["driver_cd が無い", { ...ok, driver_cd: undefined }, "driver は数字で"],
+    ["driver_cd が数字でない", { ...ok, driver_cd: "90x1" }, "driver は数字で"],
+    ["driver_cd が負の数", { ...ok, driver_cd: -1 }, "driver は数字で"],
+    ["from が無い", { ...ok, from: undefined }, "from/to は YYYY-MM-DD で"],
+    ["to の形が違う", { ...ok, to: "2026/04/30" }, "from/to は YYYY-MM-DD で"],
+    ["from が文字列でない", { ...ok, from: 20260401 }, "from/to は YYYY-MM-DD で"],
+    ["from が to より後", { ...ok, from: "2026-05-01" }, "from は to 以前に"],
+    ["期間が 400 日を超える", { ...ok, from: "2025-01-01", to: "2026-04-30" }, `${CHANGE_LOG_MAX_DAYS} 日以内`],
+    ["tenant_id が無い", { ...ok, tenant_id: undefined }, "tenant_id は空でない文字列で"],
+    ["tenant_id が空白だけ", { ...ok, tenant_id: "  " }, "tenant_id は空でない文字列で"],
+    ["tenant_id が文字列でない", { ...ok, tenant_id: 1 }, "tenant_id は空でない文字列で"],
+  ])("400: %s", (_label, body, message) => {
+    const got = judge(body);
+    expect(got).toMatchObject({ ok: false, status: 400 });
+    expect((got as { error: string }).error).toContain(message);
+  });
+
+  it("期間はちょうど 400 日まで通す", () => {
+    expect(judge({ ...ok, from: "2025-03-27", to: "2026-04-30" }).ok).toBe(true);
+  });
+
+  it("tenant_id が relay の読む tenant と違えば 403 kintai_out_of_scope", () => {
+    expect(judge({ ...ok, tenant_id: "tenant-b" })).toEqual({ ok: false, status: 403, error: KINTAI_OUT_OF_SCOPE });
+    expect(judge(ok, "tenant-b")).toEqual({ ok: false, status: 403, error: KINTAI_OUT_OF_SCOPE });
+  });
+
+  it("tenant_id が無いのは 403 ではなく 400 (tenant が違う body でも、形の誤りが先)", () => {
+    expect(judge({ ...ok, tenant_id: "" }, "tenant-b")).toMatchObject({ status: 400 });
+    expect(judge({ ...ok, tenant_id: "tenant-b", from: "x" })).toMatchObject({ status: 400 });
+  });
+});
+
+describe("bundleYTimeShifts — 月ごとの勤務を束ねる (Refs #1133 c1133-40)", () => {
+  const shift = (start: string, end: string, nonWorking: unknown = []) =>
+    ({ start, end, nonWorking }) as Parameters<typeof bundleYTimeShifts>[0]["previous"][number];
+  const base = { tenantId: "tenant-a", from: "2026-04-01", months: ["2026-04"] };
+
+  it("前月の勤務は、終業が from の 0:00 より後のものだけ渡す (ちょうど 0:00 は渡さない・1 分後は渡す)", () => {
+    const got = bundleYTimeShifts({
+      ...base,
+      previous: [
+        shift("2026-03-30 08:00:00", "2026-03-30 17:00:00"),
+        shift("2026-03-31 15:00:00", "2026-04-01 00:00:00"),
+        shift("2026-03-31 16:00:00", "2026-04-01 00:01:00"),
+      ],
+      byMonth: [[shift("2026-04-02 08:00:00", "2026-04-02 17:00:00")]],
+    });
+    expect(got.shifts.map((s) => s.start)).toEqual(["2026-03-31 16:00:00", "2026-04-02 08:00:00"]);
+  });
+
+  it("from が月の途中でも、境は from の 0:00 (月初ではない)。期間の月の勤務は from より前でも全部渡す", () => {
+    const got = bundleYTimeShifts({
+      ...base,
+      from: "2026-04-10",
+      previous: [shift("2026-03-31 20:00:00", "2026-04-01 05:00:00")],
+      byMonth: [[shift("2026-04-02 08:00:00", "2026-04-02 17:00:00"), shift("2026-04-12 08:00:00", "2026-04-12 17:00:00")]],
+    });
+    expect(got.shifts.map((s) => s.start)).toEqual(["2026-04-02 08:00:00", "2026-04-12 08:00:00"]);
+  });
+
+  it("値は読んだまま (non_working の null / [] / kind を保つ)、note は null、tenant_id は渡された値", () => {
+    const interval = { start: "2026-04-02 12:00:00", end: "2026-04-02 13:00:00", kind: "lunch_window" };
+    const got = bundleYTimeShifts({
+      ...base,
+      previous: [],
+      byMonth: [[shift("2026-04-02 08:00:00", "2026-04-02 17:00:00", [interval]), shift("2026-04-03 08:00:00", "2026-04-03 17:00:00", null)]],
+    });
+    expect(got).toEqual({
+      tenant_id: "tenant-a",
+      shifts: [
+        { start: "2026-04-02 08:00:00", end: "2026-04-02 17:00:00", non_working: [interval], note: null },
+        { start: "2026-04-03 08:00:00", end: "2026-04-03 17:00:00", non_working: null, note: null },
+      ],
+      missing_months: [],
+    });
+  });
+
+  it("始業の昇順に並べる (月の応答の並びに頼らない)", () => {
+    const got = bundleYTimeShifts({
+      ...base,
+      months: ["2026-04", "2026-05"],
+      previous: [shift("2026-03-31 22:00:00", "2026-04-01 06:00:00")],
+      byMonth: [
+        [shift("2026-04-20 08:00:00", "2026-04-20 17:00:00"), shift("2026-04-05 08:00:00", "2026-04-05 17:00:00")],
+        [shift("2026-05-01 08:00:00", "2026-05-01 17:00:00")],
+      ],
+    });
+    expect(got.shifts.map((s) => s.start)).toEqual([
+      "2026-03-31 22:00:00",
+      "2026-04-05 08:00:00",
+      "2026-04-20 08:00:00",
+      "2026-05-01 08:00:00",
+    ]);
+  });
+
+  it("missing_months は期間の月のうち勤務が 0 本の月。前月は 0 本でも数えない", () => {
+    const got = bundleYTimeShifts({
+      ...base,
+      months: ["2026-04", "2026-05", "2026-06"],
+      previous: [],
+      byMonth: [[], [shift("2026-05-01 08:00:00", "2026-05-01 17:00:00")], []],
+    });
+    expect(got.missing_months).toEqual(["2026-04", "2026-06"]);
+  });
+
+  it("前月の勤務が期間に掛かっていても、その月 (期間の月) の勤務が 0 本なら missing_months に入る", () => {
+    const got = bundleYTimeShifts({
+      ...base,
+      previous: [shift("2026-03-31 22:00:00", "2026-04-01 06:00:00")],
+      byMonth: [[]],
+    });
+    expect(got.shifts).toHaveLength(1);
+    expect(got.missing_months).toEqual(["2026-04"]);
+  });
+});
+
+describe("relayKintaiYTimeShifts — 月ごとの shift-days を並列で読んで束ねる (Refs #1133 c1133-40)", () => {
+  const item = (start_at: string, end_at: string, non_working: unknown = []) => ({ start_at, end_at, non_working });
+  /** 月 (`month` クエリ) ごとの応答を返す gcp の stub。呼ばれた path を記録する。 */
+  function gcpByMonth(byMonth: Record<string, unknown | (() => Response)>) {
+    const paths: string[] = [];
+    const gcp = async (path: string) => {
+      paths.push(path);
+      const month = new URL(path, "https://x.invalid").searchParams.get("month")!;
+      const hit = byMonth[month];
+      if (typeof hit === "function") return (hit as () => Response)();
+      return json({ month, driver_cd: 9001, items: hit ?? [] });
+    };
+    return { gcp, paths };
+  }
+  const input = { driverCd: "9001", from: "2026-04-10", to: "2026-05-20" };
+
+  it("from の月の前月 〜 to の月を、乗務員CD 付きで shift-days に読みに行き、束ねて返す", async () => {
+    const { gcp, paths } = gcpByMonth({
+      "2026-03": [item("2026-03-01 08:00:00", "2026-03-01 17:00:00"), item("2026-03-31 22:00:00", "2026-04-10 00:01:00", null)],
+      "2026-04": [item("2026-04-11 08:00:00", "2026-04-11 17:00:00")],
+    });
+    const got = await relayKintaiYTimeShifts({ gcp }, input, "tenant-a");
+    expect(paths).toEqual([
+      "/api/kintai/shift-days?month=2026-03&driver=9001",
+      "/api/kintai/shift-days?month=2026-04&driver=9001",
+      "/api/kintai/shift-days?month=2026-05&driver=9001",
+    ]);
+    expect(got).toEqual({
+      tenant_id: "tenant-a",
+      shifts: [
+        { start: "2026-03-31 22:00:00", end: "2026-04-10 00:01:00", non_working: null, note: null },
+        { start: "2026-04-11 08:00:00", end: "2026-04-11 17:00:00", non_working: [], note: null },
+      ],
+      missing_months: ["2026-05"],
+    });
+  });
+
+  it("年をまたぐ: 1 月から始まる期間は前年 12 月も読む", async () => {
+    const { gcp, paths } = gcpByMonth({});
+    await relayKintaiYTimeShifts({ gcp }, { driverCd: "9001", from: "2026-01-05", to: "2026-01-31" }, "tenant-a");
+    expect(paths.map((p) => new URL(p, "https://x.invalid").searchParams.get("month"))).toEqual(["2025-12", "2026-01"]);
+  });
+
+  it("1 つの月が失敗したら全体を失敗にする (読めた月だけで返さない)", async () => {
+    const { gcp } = gcpByMonth({
+      "2026-04": [item("2026-04-11 08:00:00", "2026-04-11 17:00:00")],
+      "2026-05": () => new Response("boom", { status: 500 }),
+    });
+    await expect(relayKintaiYTimeShifts({ gcp }, input, "tenant-a")).rejects.toThrow(
+      /gcp kintai shift-days 2026-05: status 500: boom/,
+    );
+  });
+
+  it("形の合わない応答は失敗にする (黙って空にしない)。JSON でない応答も同じ", async () => {
+    const malformed = gcpByMonth({ "2026-03": () => json({ month: "2026-03", items: [{ start_at: "x" }] }) });
+    const rejected = expect(relayKintaiYTimeShifts({ gcp: malformed.gcp }, input, "tenant-a")).rejects;
+    await rejected.toBeInstanceOf(KintaiRelayError);
+    await rejected.toThrow("gcp kintai shift-days 2026-03: 応答の形が合いません");
+    const html = gcpByMonth({ "2026-04": () => new Response("<html>", { status: 200 }) });
+    await expect(relayKintaiYTimeShifts({ gcp: html.gcp }, input, "tenant-a")).rejects.toThrow(/parse failed/);
+  });
+
+  it("並列で読む: 最初の応答が返る前に、全部の月の読み出しが始まっている", async () => {
+    // 解決を手で遅らせる stub。直列 (前の月の応答を待ってから次を読む) なら、1 つも解決
+    // していないこの時点で始まっている読み出しは 1 本だけになる
+    const started: string[] = [];
+    const release: (() => void)[] = [];
+    const gcp = (path: string) => {
+      const month = new URL(path, "https://x.invalid").searchParams.get("month")!;
+      started.push(month);
+      return new Promise<Response>((resolve) => {
+        release.push(() => resolve(json({ month, items: [] })));
+      });
+    };
+    const pending = relayKintaiYTimeShifts({ gcp }, input, "tenant-a");
+    let settled = false;
+    void pending.then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(started).toEqual(["2026-03", "2026-04", "2026-05"]);
+    expect(settled).toBe(false);
+    for (const go of release) go();
+    expect((await pending).missing_months).toEqual(["2026-04", "2026-05"]);
+  });
+
+  it("直接呼ばれて入力が誤っていれば、上流を読まずに失敗する", async () => {
+    const { gcp, paths } = gcpByMonth({});
+    await expect(
+      relayKintaiYTimeShifts({ gcp }, { driverCd: "abc", from: "2026-04-01", to: "2026-04-30" }, "tenant-a"),
+    ).rejects.toThrow(/driver は数字で/);
+    expect(paths).toHaveLength(0);
   });
 });

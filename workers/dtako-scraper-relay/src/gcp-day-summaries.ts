@@ -155,6 +155,55 @@ export function parseGcpShiftOverlaps(body: unknown): Map<string, GcpShiftOverla
   return out;
 }
 
+/** 勤務の中の実働でない区間 1 つ。`start` / `end` 以外の欄 (`kind` 等) は応答のまま運ぶ。 */
+export type GcpNonWorking = { start: string; end: string } & Record<string, unknown>;
+
+/** 勤怠の勤務 1 本 (`shift-days` の `items` の 1 要素から、時刻と実働でない区間だけを取ったもの)。
+ * `nonWorking` の `null` は「まだ畳み直していない勤務」で、`[]` (区間なし) とは別。 */
+export interface GcpShiftDay {
+  start: string;
+  end: string;
+  nonWorking: GcpNonWorking[] | null;
+}
+
+function isNonWorking(v: unknown): v is GcpNonWorking {
+  if (typeof v !== "object" || v === null) return false;
+  const { start, end } = v as Record<string, unknown>;
+  return [start, end].every((t) => typeof t === "string" && DATETIME_RE.test(t));
+}
+
+/**
+ * 勤怠の `GET /api/kintai/shift-days` の応答
+ * `{month, driver_cd, items: [{start_at, end_at, non_working, …}]}` から、勤務ごとの
+ * 始業・終業・実働でない区間を取り出す (Refs #1133 c1133-40)。
+ *
+ * **値は応答のまま** — 並べ替えも計算もしない (`non_working` の要素は欄を落とさずそのまま)。
+ * `summary` / `parts` / `shift_source` は読まない (行の規則は上流が持つ)。
+ *
+ * ★ **形の合わない応答は `null`** (`parseGcpDaySummaries` のように行を捨てて続けない)。
+ * 勤務が 1 本欠けても、区間が 1 つ欠けても、その先で作る表が黙って変わるため、呼び手が
+ * 失敗として扱えるようにする。`items: []` は正常 (その月に勤務が無い)。
+ */
+export function parseGcpShiftDays(body: unknown): GcpShiftDay[] | null {
+  if (typeof body !== "object" || body === null) return null;
+  const items = (body as { items?: unknown }).items;
+  if (!Array.isArray(items)) return null;
+  const out: GcpShiftDay[] = [];
+  for (const raw of items) {
+    if (typeof raw !== "object" || raw === null) return null;
+    const { start_at: start, end_at: end, non_working: nonWorking } = raw as Record<string, unknown>;
+    if (typeof start !== "string" || !DATETIME_RE.test(start)) return null;
+    if (typeof end !== "string" || !DATETIME_RE.test(end)) return null;
+    if (nonWorking === null) {
+      out.push({ start, end, nonWorking: null });
+      continue;
+    }
+    if (!Array.isArray(nonWorking) || !nonWorking.every(isNonWorking)) return null;
+    out.push({ start, end, nonWorking });
+  }
+  return out;
+}
+
 /** サマリ側の乗務員CD で GCP 側を引く (両側とも `String(Number(...))` に揃える)。
  * `parseGcpDaySummaries` と `parseGcpShiftOverlaps` のどちらの出力にも使う。 */
 export function gcpPartsFor<T>(byDriver: ReadonlyMap<string, T>, driverCd: string): T | null {
