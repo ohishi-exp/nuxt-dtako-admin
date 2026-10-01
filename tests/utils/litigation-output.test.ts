@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  buildLitigationKingakuBooks,
   buildLitigationZipSummary,
   buildLitigationOutputChunks,
   countLitigationResults,
@@ -14,9 +15,12 @@ import {
   litigationResultFromHeaders,
   litigationZipFilename,
   LITIGATION_EMPTY_MESSAGE,
+  LITIGATION_KINGAKU_COLUMNS,
   LITIGATION_NOT_FOUND_MESSAGE,
   type LitigationOutputChunk,
+  type LitigationOutputResult,
 } from '~/utils/litigation-output'
+import { encodeYKingakuHeader, type YKingakuMonth } from '~/utils/y-kingaku'
 
 function headers(h: Record<string, string>) {
   return new Headers(h)
@@ -209,5 +213,105 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
     expect(s[1]!.detail).toBe('2023-12〜2024-11 (乗務員 9101) — テンプレに書けなかった日 2 日 / 警告 3 件')
     expect(s[2]).toMatchObject({ state: 'excluded', detail: '2024-12〜2025-11 (乗務員 9101) — 入らない: この期間に運行が 0 件' })
     expect(s[3]!.detail).toBe('変更 5 件')
+  })
+})
+
+describe('Y金額 (時間の行) — 応答ヘッダの畳みと冊ごとの表 (Refs #1133 c1133-31)', () => {
+  const month = (from: string, to: string, over: Partial<YKingakuMonth> = {}): YKingakuMonth => ({
+    from, to, statutoryIn: 65, statutoryOut: 3725, over60: null, holiday: 480, night: 90, total: 12345, ...over,
+  })
+  const MONTHS = [month('2024-06-01', '2024-06-30'), month('2024-07-01', '2024-07-31', { statutoryIn: 0, holiday: 0 })]
+  const ok = (extra: Partial<LitigationOutputResult> = {}): LitigationOutputResult => ({
+    ...litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10' })), ...extra,
+  })
+
+  it('★ 集計のヘッダを月度の配列に畳む', () => {
+    const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10', 'x-y-time-kingaku': encodeYKingakuHeader(MONTHS) }))
+    expect(r.kingaku).toEqual(MONTHS)
+    expect(r).not.toHaveProperty('kingakuError')
+  })
+
+  it('★ ヘッダが無ければ欄そのものを持たない (集計を返さない呼び出し・版の結果は今までと同じ形)', () => {
+    const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10' }))
+    expect(r).not.toHaveProperty('kingaku')
+    expect(r).not.toHaveProperty('kingakuError')
+    expect(litigationResultFromFailure(CHUNK, 500, null, '失敗')).not.toHaveProperty('kingaku')
+  })
+
+  it('★ 集計できなかった理由のヘッダは、復号して理由として持つ', () => {
+    const r = litigationResultFromHeaders(CHUNK, headers({
+      'x-y-time-rows': '10', 'x-y-time-kingaku-error': encodeURIComponent('要素!F5 (法定休日の曜日) が 日〜土 の 1 文字でない'),
+    }))
+    expect(r.kingakuError).toBe('要素!F5 (法定休日の曜日) が 日〜土 の 1 文字でない')
+    expect(r).not.toHaveProperty('kingaku')
+    expect(r.status).toBe('ok')
+  })
+
+  it('★ 壊れた集計のヘッダは 0 として読まず、読めなかったと言う', () => {
+    for (const raw of ['%', 'x', encodeURIComponent('{"a":1}')]) {
+      const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10', 'x-y-time-kingaku': raw }))
+      expect(r).not.toHaveProperty('kingaku')
+      expect(r.kingakuError).toBe('サーバーが返した集計が読めなかった')
+    }
+  })
+
+  it('列の見出しは Y金額 シートの時間の行と同じ並び', () => {
+    expect(LITIGATION_KINGAKU_COLUMNS).toEqual(['法内残業', '法外残業', '月60h超', '休日労働', '深夜労働', '総労働時間'])
+  })
+
+  it('★ 冊ごとに、賃金月度の行 (H:MM、24 時超えもそのまま) と合計行を作る。月 60h 超が不適用なら「不適用」', () => {
+    const books = buildLitigationKingakuBooks([CHUNK], [ok({ kingaku: MONTHS })])
+    expect(books).toEqual([{
+      driverCd: CHUNK.driverCd,
+      label: '2024-06〜2025-05',
+      rows: [
+        { period: '2024-06-01〜2024-06-30', cells: ['1:05', '62:05', '不適用', '8:00', '1:30', '205:45'], partial: false },
+        { period: '2024-07-01〜2024-07-31', cells: ['0:00', '62:05', '不適用', '0:00', '1:30', '205:45'], partial: false },
+      ],
+      total: { period: '合計', cells: ['1:05', '124:10', '不適用', '8:00', '3:00', '411:30'], partial: false },
+      note: null,
+    }])
+  })
+
+  it('月 60h 超を適用する冊は時間で出し、合計も足す', () => {
+    const books = buildLitigationKingakuBooks([CHUNK], [ok({
+      kingaku: [month('2024-06-01', '2024-06-30', { over60: 125 }), month('2024-07-01', '2024-07-31', { over60: 0 })],
+    })])
+    expect(books[0]!.rows.map(r => r.cells[2])).toEqual(['2:05', '0:00'])
+    expect(books[0]!.total!.cells[2]).toBe('2:05')
+  })
+
+  it('★ 冊の期間からはみ出す月度 (締め日が月の途中) には印を付ける', () => {
+    const books = buildLitigationKingakuBooks([CHUNK], [ok({
+      kingaku: [month('2024-05-21', '2024-06-20'), month('2024-06-21', '2024-07-20'), month('2025-05-21', '2025-06-20')],
+    })])
+    expect(books[0]!.rows.map(r => r.partial)).toEqual([true, false, true])
+    expect(books[0]!.total!.partial).toBe(false)
+  })
+
+  it('★ 集計が無い冊は黙って落とさず、理由を言う (表は作らない)', () => {
+    const note = (extra: Partial<LitigationOutputResult>) => {
+      const [book] = buildLitigationKingakuBooks([CHUNK], [ok(extra)])
+      expect(book!.rows).toEqual([])
+      expect(book!.total).toBeNull()
+      return book!.note
+    }
+    expect(note({ kingakuError: '要素!G19 (締め日) が「末」でも 1〜31 の日でもない' }))
+      .toBe('集計なし: 要素!G19 (締め日) が「末」でも 1〜31 の日でもない')
+    expect(note({})).toBe('集計なし: サーバーが集計を返さなかった')
+    expect(note({ kingaku: [] })).toBe('集計なし: Y時間 シートに書けた日が 1 日も無い')
+  })
+
+  it('未実行の冊と、Excel を作れなかった冊 (0 件・未登録・失敗) は出さない', () => {
+    const chunks = buildLitigationOutputChunks({ fromMonth: '2024-06', toMonth: '2028-05', driverCds: [CHUNK.driverCd] })
+    expect(chunks).toHaveLength(4)
+    const books = buildLitigationKingakuBooks(chunks, [
+      null,
+      litigationResultFromHeaders(chunks[1]!, headers({ 'x-y-time-rows': '0', 'x-y-time-kingaku': encodeYKingakuHeader([]) })),
+      litigationResultFromFailure(chunks[2]!, 404, { data: { upstream: 'alc' } }, ''),
+      { ...ok({ kingaku: [month('2027-06-01', '2027-06-30')] }), from: chunks[3]!.from, to: chunks[3]!.to },
+    ])
+    expect(books.map(b => b.label)).toEqual(['2027-06〜2028-05'])
+    expect(buildLitigationKingakuBooks(chunks, [])).toEqual([])
   })
 })
