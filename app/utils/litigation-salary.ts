@@ -3,7 +3,8 @@
  *
  * 拘束×賃金の給与比較タブ (`restraint-wage.vue`) と**同じ比較** (`compareSalaryMonth`) を、
  * 案件の乗務員 × 月に並べる。比べるのは給与明細の実支給 (基本給・残業代・総支給) と、
- * 明細の【補助】単価 × システムの勤務日数・時間外で出した額。
+ * 明細の【補助】単価 × システムの勤務日数・残業時間で出した額。残業時間は wage report が正本
+ * (`SalaryComparisonRow.overtimeMinutes`、週 40 時間超を含む) で、ここでは数え直さない。
  *
  * | 側 | 素材 | 口 |
  * | --- | --- | --- |
@@ -15,7 +16,7 @@
  */
 import { fmtMinutes, fmtYen, nextYm } from './restraint-wage-view'
 import type { WageReportResponse, WageReportRow } from './restraint-wage-view'
-import { BASE_RATE_NONE_LABELS, compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
+import { BASE_RATE_NONE_LABELS, baseRateBasisNotes, baseRateBasisText, compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
 import { splitCdMapKey } from './employee-master'
 import type { EmployeeMasterEntry, KyuyoEmployeesResponse } from './employee-master'
@@ -254,10 +255,10 @@ export interface LitigationSalaryOver37 {
   diff: number | null
   /** 明細の残業代が理論値を下回った (差が負) — 太字にするのはこれだけ */
   shortfall: boolean
-  /** 基礎単価の根拠 (`割増基礎 N 円 ÷ (D 日 × 8h)` / `明細の時給` / `÷ 法定の月平均`)。分母は所定労働時間 */
+  /** 基礎単価の根拠 (`baseRateBasisText`。拘束×賃金の給与比較と同じ文字列)。分母は所定労働時間 */
   rateBasis: string
-  /** 日給で所定を引けなかった理由 (法定 8 時間で計算した旨)。引けた・日給でないときは null */
-  scheduledNote: string | null
+  /** 根拠に添える注記 (`baseRateBasisNotes`: 日数をデジタコ稼働に倒した / 所定を引けず法定 8 時間)。無ければ空 */
+  rateNotes: string[]
   /** 37条の基礎単価がその月の最低賃金を下回る — **エラー** (赤太字)。最低賃金が引けない月は false */
   belowMinWage: boolean
   /** `belowMinWage` の比べた相手 (その月の最低賃金、円/h)。引けない月は null */
@@ -273,7 +274,7 @@ export interface LitigationSalaryRowCells {
   over37: LitigationSalaryOver37 | null
   over37NoneReason: string
   workDays: number
-  /** 時間外 (時間、小数 1 桁) */
+  /** 残業時間 (時間、小数 1 桁)。37条・残業(計算) と同じ `overtimeMinutes` (週 40 時間超を含む) */
   overtimeHours: number
 }
 
@@ -290,21 +291,6 @@ function sysBaseBasisText(b: SalaryComparisonRow['sysBaseBasis']): string {
   }
 }
 
-/** 37条の基礎単価の根拠の文字列 (分母は所定労働時間)。基礎単価が出ている行 (= 区分不明でない) だけが呼ぶ。 */
-function baseRateBasisText(c: SalaryComparisonRow): string {
-  const b = c.baseRateBasis
-  if (b.kind === 'hours') return `明細の時給 ${yen(b.hourlyRate!)} 円/h`
-  if (b.kind === 'monthly') return `割増基礎 ${yen(c.csvPremiumBase)} 円 ÷ 法定の月平均 ${(Math.round(b.hours! * 10) / 10).toFixed(1)}h`
-  return `割増基礎 ${yen(c.csvPremiumBase)} 円 ÷ (${b.workDays} 日 × ${fmtMinutes(b.dailyMinutes)})`
-}
-
-/** 日給の所定を引けなかったときの注記 (法定 8 時間で計算した)。**未設定と読めなかったは別の文言**。 */
-function scheduledNoteText(b: SalaryComparisonRow['baseRateBasis']): string | null {
-  if (b.scheduled === 'unset') return '所定未設定のため法定 8 時間で計算'
-  if (b.scheduled === 'unread') return '所定を読めなかったため法定 8 時間で計算 (古い保存物なら拘束の材料を取り直す)'
-  return null
-}
-
 /**
  * 比較済みの 1 行を、表示用のセル一式にする。画面と印刷の紙面は同じ縦に積んだセル
  * (明細 / 計算 / 差 + 根拠) をこれで組む。
@@ -315,7 +301,7 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
       { key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: sysBaseBasisText(c.sysBaseBasis) },
       {
         key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime,
-        basis: c.sysOvertimeRate === null ? '単価なし' : `${yen(c.sysOvertimeRate)} 円/h × ${fmtMinutes(c.sysOvertimeMinutes)}`,
+        basis: c.sysOvertimeRate === null ? '単価なし' : `${yen(c.sysOvertimeRate)} 円/h × ${fmtMinutes(c.overtimeMinutes)}`,
       },
       { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal, basis: null },
     ],
@@ -324,19 +310,19 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
       ? null
       : {
           rate: c.baseRateActual,
-          minutes: c.minWageOvertimeMinutes,
+          minutes: c.overtimeMinutes,
           theory: c.baseRateOvertimePay,
           paid: c.csvOvertime,
           diff: c.diffCsvVsBaseRateOvertime,
           shortfall: (c.diffCsvVsBaseRateOvertime ?? 0) < 0,
           rateBasis: baseRateBasisText(c),
-          scheduledNote: scheduledNoteText(c.baseRateBasis),
+          rateNotes: baseRateBasisNotes(c.baseRateBasis),
           belowMinWage: isBaseRateBelowMinWage(c),
           minWageRate: c.rateBasis.minWageRate,
         },
     over37NoneReason: c.baseRateBasis.none === null ? '' : `(${BASE_RATE_NONE_LABELS[c.baseRateBasis.none]})`,
     workDays: c.sysWorkDays,
-    overtimeHours: Math.round(c.sysOvertimeMinutes / 6) / 10,
+    overtimeHours: Math.round(c.overtimeMinutes / 6) / 10,
   }
 }
 

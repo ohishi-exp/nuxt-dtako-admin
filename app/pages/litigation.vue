@@ -1797,8 +1797,8 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium text-right">基本給</th>
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
-                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 出勤日数 × 1 日の所定、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
-                  <th class="px-3 py-2 font-medium text-right">勤務日 / 時間外</th>
+                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 明細の (出勤日数 + 有休日数) × 1 日の所定。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無ければデジタコの稼働日数、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
+                  <th class="px-3 py-2 font-medium text-right" title="勤務日 = デジタコの稼働日数 / 時間外 = 残業時間 (時間外 + 時間外深夜 + 週 40 時間超。残業・残業代 (37条) のセルと同じ時間)">勤務日 / 時間外</th>
                   <th class="px-3 py-2 font-medium" title="計算に使った単価 = 単価マスタ (最低賃金の一括設定で入れた額)。その月の最低賃金と違う月はエラー">単価 (最低賃金)</th>
                 </tr>
               </thead>

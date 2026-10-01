@@ -21,7 +21,7 @@ withDefaults(defineProps<{
       <div class="flex justify-between" :class="[compact ? 'gap-1' : 'gap-3', over37.belowMinWage ? 'font-bold text-red-600 dark:text-red-400' : '']" data-salary-line="rate"><span :class="compact || over37.belowMinWage ? '' : 'text-xs text-gray-500'">基礎単価</span><span>{{ fmtRatePerHour(over37.rate) }} 円/h</span></div>
       <div v-if="over37.belowMinWage" class="text-right font-bold text-red-600 dark:text-red-400" :class="compact ? '' : 'text-xs'" data-salary-line="below-minwage">37条の基礎単価が最低賃金 {{ fmtRatePerHour(over37.minWageRate) }} 円/h を下回る</div>
       <div class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="rate-basis">= {{ over37.rateBasis }}</div>
-      <div v-if="over37.scheduledNote" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="scheduled-note">{{ over37.scheduledNote }}</div>
+      <div v-for="note in over37.rateNotes" :key="note" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="rate-note">{{ note }}</div>
       <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="minutes"><span :class="compact ? '' : 'text-xs text-gray-500'">残業時間</span><span>{{ fmtMinutes(over37.minutes) }}</span></div>
       <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="theory"><span :class="compact ? '' : 'text-xs text-gray-500'">理論値</span><span>{{ fmtYen(over37.theory) }}</span></div>
       <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="paid"><span :class="compact ? '' : 'text-xs text-gray-500'">支給</span><span>{{ fmtYen(over37.paid) }}</span></div>
