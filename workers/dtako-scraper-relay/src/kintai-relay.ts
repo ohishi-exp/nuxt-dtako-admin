@@ -157,8 +157,6 @@ export interface KintaiRelayDeps {
   onprem(path: string, init?: RequestInit): Promise<Response>;
   /** auth-worker 経由で GCP を叩く。`X-Tenant-ID` は実装側で付ける。 */
   gcp(path: string, init?: RequestInit): Promise<Response>;
-  /** 給与閲覧の認可確認の上流切替 (`checkKyuyoAccess` だけが読む)。未指定 = オンプレ。 */
-  kyuyoUpstream?: KyuyoUpstream;
 }
 
 /**
@@ -167,12 +165,6 @@ export interface KintaiRelayDeps {
  */
 export interface KyuyoAuthorizer {
   authorize(token: string): Promise<{ status: number; body: string; contentType: string | null }>;
-}
-
-/** `checkKyuyoAccess` の上流切替。`mode === "worker"` のときだけ `binding` (auth-worker RPC) に聞く。 */
-export interface KyuyoUpstream {
-  mode?: string | null;
-  binding?: KyuyoAuthorizer | null;
 }
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -879,34 +871,11 @@ export async function relayKintaiChangeLog(
 // → GCP という経路になる。`relayKintaiDaySummaries` とまったく同じ道。
 
 /**
- * 「この人は給与データを見てよいか」を上流に聞く口
- * (rust-ichibanboshi `src/routes/kyuyo.rs` の `access`、Refs #951)。
- *
- * ## ★ この口は **`onprem()` で叩く。`gcp()` ではない**
- *
- * 同じファイルの `WAGE_SNAPSHOT_PATH` / `WAGE_RANGE_PATH` が `gcp()` なので
- * **「揃えよう」と `gcp()` に変えたくなるが、変えると全員 503 になる。**
- * 上流は同じバイナリでも**インスタンスごとに設定が違う**:
- *
- * | | Supabase 接続 | `/kyuyo/*` の allowlist |
- * | --- | --- | --- |
- * | **オンプレ側** (`onprem()` の宛先) | **無い** | **ある** |
- * | **GCP Cloud Run** (`gcp()` の宛先) | **ある** | **無い** |
- *
- * `kintai.wage_snapshot` は Supabase にあるので wage-* は `gcp()` でしか届かず、
- * allowlist はオンプレ側 (`onprem()` の宛先) にしか無いので判定は `onprem()` でしか取れない。
- * **経路が分かれているのは意図で、揃えるのが誤り。**
- * (上流 `routes::wage_snapshot` の module docs に同じ表がある。)
+ * 「この人は給与データを見てよいか」の聞き先は auth-worker の `KyuyoAuthEntrypoint.authorize`
+ * (RPC、Refs #951)。SQL Server にも Tunnel にも依存しない。**`gcp()` / `onprem()` は使わない。**
+ * 許可リストの正は auth-worker の KV `kyuyo-allowed-emails` 1 か所。
  */
-const KYUYO_ACCESS_PATH = "/api/kyuyo/access";
-
-/**
- * worker モード (`NUXT_KYUYO_UPSTREAM=worker`) の語彙は app 側 `server/utils/kyuyo-upstream.ts` と揃える
- * (`worker` だけがオンプレに聞かない、他はすべてオンプレ)。聞く先は auth-worker の
- * `KyuyoAuthEntrypoint.authorize` で、給与大臣 Worker の `/kyuyo/access` と同じ判定
- * (SQL Server にも Tunnel にも依存しない)。
- */
-const KYUYO_WORKER_UNREACHABLE_MESSAGE = "給与の認可 (auth-worker) に届きません";
+const KYUYO_ACCESS_UNREACHABLE_MESSAGE = "給与の認可 (auth-worker) に届きません";
 
 /** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
 const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
@@ -916,7 +885,7 @@ const WAGE_RANGE_PATH = "/api/kintai/wage-range";
 /**
  * 給与 allowlist に通らなかったときに relay が返すもの。**null = 通った。**
  *
- * status は**上流のものをそのまま持つ** (401 だけ写し替える。下の
+ * 403 は status を保ち、401 と不明な応答は 503 に写す (下の
  * [`checkKyuyoAccess`] 参照) — 画面側は `describeApiError` で本文をそのまま
  * 出すので、502 等へ丸めると 403 / 503 の撃ち分けがこの経路だけ効かなくなる。
  */
@@ -926,7 +895,7 @@ export interface KyuyoAccessDenial {
 }
 
 /**
- * 上流 401 を写す先。
+ * auth-worker の 401 を写す先。
  *
  * **401 のまま返してはいけない** — 画面では「ログインし直せ」の意味になり、
  * 原因と処方が食い違う。ここへ 401 が返るのは
@@ -941,8 +910,7 @@ export interface KyuyoAccessDenial {
  */
 export const KYUYO_ACCESS_UNIDENTIFIED_STATUS = 503;
 
-/** 上流 401 を 503 に写したときに出す文 (上流の「token が無効です」は
- * ログインの話に読めるので、こちらで言い換える)。 */
+/** 401 を 503 に写したときに出す文 (「token が無効です」はログインの話に読めるので言い換える)。 */
 export const KYUYO_ACCESS_UNIDENTIFIED_MESSAGE =
   "給与データの閲覧可否を判定できませんでした (閲覧者を上流に識別させられていません)。権限の問題ではありません";
 
@@ -957,16 +925,47 @@ function kyuyoAccessMessage(body: string, status: number): string {
   return body.trim() ? body.trim().slice(0, 200) : `上流が status ${status} を返しました`;
 }
 
-/** worker モード。fail-closed は onprem と同じ (binding 無し・reject・許可以外は 503 か 403)。理由文は日本語に写す。 */
-async function checkKyuyoAccessViaWorker(
+/**
+ * 給与 allowlist を auth-worker に問い合わせる (Refs #951)。**通れば null。許可は status 200 のときだけ。**
+ *
+ * ## なぜ relay が聞くのか
+ *
+ * `paid` (実支給額) を読み書きする `wage-range` / `wage-snapshot` の認可は
+ * **tenant 単位**で、email allowlist を通っていない。⇒ allowlist に載っている 1 名が
+ * 保存した瞬間、実支給額が tenant 全員の読める場所へ移る。tenant 判定を**通した後**にこれを AND する。
+ *
+ * ## ★ 渡すのは**リクエスト自身の JWT** (`Bearer ` を除いた token)
+ *
+ * `record.token` を使ってはいけない — viewer 経路では `token ?? "viewer"` が入り、theearth
+ * セッションを持つ record では theearth のセッショントークン (ランダム hex) が入っていて、
+ * どちらもブラウザ JWT ではない。auth-worker で 401 になる。
+ *
+ * ## allowlist はここに持たない
+ *
+ * relay 側に写しを持つと二重管理になり、片方だけ更新されて食い違う。
+ * 正は auth-worker の KV `kyuyo-allowed-emails` 1 か所。
+ *
+ * ## fail-closed
+ *
+ * bearer 無し・binding 未設定・RPC の reject・戻りが不正は 503。理由文は日本語に写す
+ * (auth-worker の英語コードを画面に出さない)。
+ */
+export async function checkKyuyoAccess(
   binding: KyuyoAuthorizer | null | undefined,
-  token: string,
+  bearer: string | null,
 ): Promise<KyuyoAccessDenial | null> {
-  const unreachable = { status: 503, message: KYUYO_WORKER_UNREACHABLE_MESSAGE };
+  // Bearer が無いなら聞くまでもない (必ず 401 になる)。結論は聞いた場合と同じ 503。
+  if (!bearer) {
+    return {
+      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+    };
+  }
+  const unreachable = { status: 503, message: KYUYO_ACCESS_UNREACHABLE_MESSAGE };
   if (!binding) return unreachable;
   let raw: unknown;
   try {
-    raw = await binding.authorize(token);
+    raw = await binding.authorize(bearer);
   } catch {
     return unreachable;
   }
@@ -983,91 +982,6 @@ async function checkKyuyoAccessViaWorker(
     return { status: 503, message: "給与の閲覧許可リストが未設定です" };
   }
   return unreachable;
-}
-
-/**
- * 給与 allowlist を上流に問い合わせる (Refs #951)。**通れば null。**
- *
- * ## なぜ relay が聞くのか
- *
- * `paid` (実支給額) を読み書きする `wage-range` / `wage-snapshot` の認可は
- * **tenant 単位**で、`/api/kyuyo/payroll` に掛かっている **email allowlist を
- * 通っていない**。⇒ allowlist に載っている 1 名が保存した瞬間、実支給額が
- * tenant 全員の読める場所へ移る。tenant 判定を**通した後**にこれを AND する。
- *
- * ## ★ 転送するのは**リクエスト自身の Bearer**
- *
- * `record.token` を使ってはいけない — viewer 経路では `token ?? "viewer"` が
- * 入り、theearth セッションを持つ record では **theearth のセッショントークン**
- * (ランダム hex) が入っていて、どちらもブラウザ JWT ではない。上流で
- * `active:false` になって**静かに 401** になる。
- *
- * ## allowlist はここに持たない
- *
- * relay 側に写しを持つと二重管理になり、片方だけ更新されて食い違う。
- * 既定 (オンプレ) の正は上流の `KYUYO_ALLOWED_EMAILS` 1 か所。worker モードでは
- * auth-worker の KV `kyuyo-allowed-emails` が正。並走中はオンプレの `[kyuyo] allowed_emails`
- * と両方を同時に直す。
- */
-export async function checkKyuyoAccess(
-  deps: Pick<KintaiRelayDeps, "onprem" | "kyuyoUpstream">,
-  bearer: string | null,
-): Promise<KyuyoAccessDenial | null> {
-  // Bearer が無いなら上流に聞くまでもない (必ず 401 が返る)。往復を省くだけで、
-  // 結論は上流に聞いた場合と同じ 503。
-  if (!bearer) {
-    return {
-      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
-      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
-    };
-  }
-
-  if (deps.kyuyoUpstream?.mode === "worker") {
-    return checkKyuyoAccessViaWorker(deps.kyuyoUpstream.binding, bearer);
-  }
-
-  let res: Response;
-  try {
-    // ★★ **`onprem()` である。`gcp()` に「揃えて」はいけない。**
-    // このすぐ下の `relayWageSnapshotPut` / `relayWageRangeGet` は `gcp()` なので
-    // 揃えたくなるが、**allowlist を持っているのはオンプレ側 (= `onprem()`) だけ**で、
-    // GCP 側の `KyuyoAuthState` は未設定。`gcp()` に変えると**全員 503** になり、
-    // 許可されている 1 名まで画面が死ぬ。理由の表は [`KYUYO_ACCESS_PATH`] の docs。
-    res = await deps.onprem(KYUYO_ACCESS_PATH, {
-      headers: { Authorization: `Bearer ${bearer}` },
-    });
-  } catch (err) {
-    // **fail-closed。** 判定が取れないなら通さない
-    return {
-      status: 503,
-      // `String(err)` で足りる (`Error` は "TypeError: fetch failed" になる)。
-      // `err instanceof Error ? ... : ...` にすると分岐が 2 本増えるだけで、
-      // 出る文はほぼ同じ
-      message: `給与データの閲覧可否を上流に問い合わせられませんでした: ${String(err)}`,
-    };
-  }
-
-  if (res.ok) return null;
-
-  const body = await res.text();
-  if (res.status === 401) {
-    return {
-      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
-      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
-    };
-  }
-  if (res.status === 404) {
-    // ★ **デプロイ順序**。この口はまだ上流に無い (relay が先に出た)。fail-closed の
-    // ままでよいが、404 を素通しすると画面には「期間集計の口が無い」と読める文が
-    // 出て**原因を取り違える**。設定・順序の話なので 503 に倒す
-    return {
-      status: 503,
-      message:
-        "上流に給与アクセス判定の口 (/api/kyuyo/access) がありません。上流のデプロイが先に必要です",
-    };
-  }
-  // 403 / 503 はそのまま passthrough — 画面が理由をそのまま出せる
-  return { status: res.status, message: kyuyoAccessMessage(body, res.status) };
 }
 
 /**
