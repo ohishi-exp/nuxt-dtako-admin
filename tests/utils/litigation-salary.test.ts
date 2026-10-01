@@ -294,7 +294,7 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
   it('37条は理論値があれば 5 項目 + 根拠、差が負のときだけ shortfall', () => {
     expect(salaryRowCells(base).over37).toEqual({
       rate: 1333.3, minutes: 605, theory: 16667, paid: 30000, diff: 13333, shortfall: false,
-      rateBasis: '割増基礎 200,000 円 ÷ 法定時間内 150h00m', floored: false,
+      rateBasis: '割増基礎 200,000 円 ÷ 150h00m', floored: false,
     })
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: -1 }).over37!.shortfall).toBe(true)
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: null }).over37!.shortfall).toBe(false)
@@ -303,13 +303,13 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
   it('★ 基礎単価の根拠の文字列 (baseRateBasisText をそのまま運ぶ): 逆算 / 最低賃金を採用 (逆算の値つき) / 時給', () => {
     const text = (b: Partial<SalaryComparisonRow['baseRateBasis']>, over: Partial<SalaryComparisonRow> = {}) =>
       salaryRowCells({ ...base, ...over, baseRateBasis: { ...base.baseRateBasis, ...b } }).over37!.rateBasis
-    expect(text({})).toBe('割増基礎 200,000 円 ÷ 法定時間内 150h00m')
-    expect(text({ kind: 'monthly' })).toBe('割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(text({})).toBe('割増基礎 200,000 円 ÷ 150h00m')
+    expect(text({ kind: 'monthly' })).toBe('割増基礎 200,000 円 ÷ 150h00m')
     expect(text({ floored: true, reverse: 800 }))
-      .toBe('最低賃金 1,000 円/h (割増基礎 200,000 円 ÷ 法定時間内 150h00m = 800 円/h は最低賃金を下回る)')
-    expect(text({ kind: 'hours', hourlyRate: 1200, reverse: 1200 })).toBe('明細の時給 1,200 円/h')
+      .toBe('最低賃金 (逆算 800 円/h)')
+    expect(text({ kind: 'hours', hourlyRate: 1200, reverse: 1200 })).toBe('明細の時給')
     expect(text({ kind: 'hours', hourlyRate: 900, reverse: 900, floored: true }))
-      .toBe('最低賃金 1,000 円/h (明細の時給 900 円/h は最低賃金を下回る)')
+      .toBe('最低賃金 (明細の時給 900 円/h)')
   })
 
   it('★ floored: 逆算の基礎単価が最低賃金を下回り最低賃金を採用した月だけ true (根拠の行を赤にする)。逆算を採用した月は false', () => {

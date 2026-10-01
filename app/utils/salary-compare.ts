@@ -810,16 +810,15 @@ export const BASE_RATE_NONE_LABELS: Record<NonNullable<BaseRateBasis['none']>, s
  * 基礎単価を出せなかった行 (`none` が在る) は空文字 — 理由は `BASE_RATE_NONE_LABELS` が出す。
  */
 export function baseRateBasisText(
-  row: Pick<SalaryComparisonRow, 'baseRateBasis' | 'csvPremiumBase' | 'statutoryMinutes' | 'rateBasis'>,
+  row: Pick<SalaryComparisonRow, 'baseRateBasis' | 'csvPremiumBase' | 'statutoryMinutes'>,
 ): string {
   const b = row.baseRateBasis
   if (b.none !== null) return ''
-  const calc = b.kind === 'hours'
-    ? `明細の時給 ${fmtYen(b.hourlyRate)} 円/h`
-    : `割増基礎 ${fmtYen(row.csvPremiumBase)} 円 ÷ 法定時間内 ${fmtMinutes(row.statutoryMinutes)}`
-  if (!b.floored) return calc
-  const reverse = b.kind === 'hours' ? calc : `${calc} = ${fmtYen(Math.round(b.reverse!))} 円/h`
-  return `最低賃金 ${fmtYen(row.rateBasis.minWageRate)} 円/h (${reverse} は最低賃金を下回る)`
+  if (b.kind === 'hours') {
+    return b.floored ? `最低賃金 (明細の時給 ${fmtYen(b.hourlyRate)} 円/h)` : '明細の時給'
+  }
+  if (b.floored) return `最低賃金 (逆算 ${fmtYen(Math.round(b.reverse!))} 円/h)`
+  return `割増基礎 ${fmtYen(row.csvPremiumBase)} 円 ÷ ${fmtMinutes(row.statutoryMinutes)}`
 }
 
 /**
