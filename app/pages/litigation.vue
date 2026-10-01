@@ -4,7 +4,8 @@
  *
  * 「何月から何月まで・どの乗務員の勤務を記録するか」を選び、案件として保存して
  * 開き直せる土台。案件を「開く」と詳細にタブが出る。「出力」タブ (#c1133-2) は
- * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめる。
+ * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめ、作った冊ごとに
+ * Y金額 シートの時間の行 (賃金月度ごとの合計、#c1133-31) を表にする。
  * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
  * Y時間の欠け / alc にあってオンプレのデジタコに無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
  * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
@@ -24,6 +25,7 @@ import { getDrivers, getYTimePreview, getOperations, getDtakoOperationChanges, c
 import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
+  buildLitigationKingakuBooks,
   buildLitigationOutputChunks,
   buildLitigationZipSummary,
   countLitigationResults,
@@ -397,6 +399,9 @@ const zipSummary = computed(() => {
     changesCsv: { filename: LITIGATION_CHANGES_CSV_FILENAME, finished: changesFinished.value, rows: changesRows.value.length },
   })
 })
+
+/** Excel を作れた冊ごとの「Y金額 (時間の行)」(「ZIP を作る」の結果として出る。画面と紙面で共用) */
+const kingakuBooks = computed(() => buildLitigationKingakuBooks(outputChunks.value, outputResults.value))
 
 const OUTPUT_RETRY = '「ZIP を作る」を押してやり直してください'
 
@@ -1492,6 +1497,7 @@ function fmtDateTime(iso: string): string {
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
             ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
+            作った冊ごとに、Y金額 シートの時間の行 (賃金月度ごとの残業・休日労働・深夜労働・総労働時間) を下に出します。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
@@ -1571,6 +1577,8 @@ function fmtDateTime(iso: string): string {
               </tbody>
             </table>
           </div>
+
+          <LitigationKingakuTable v-if="kingakuBooks.length > 0" :books="kingakuBooks" :driver-label="driverLabel" />
         </div>
 
         <!-- エラー: 乗務員 × 月ごとに 4 つの検知 (litigation-errors.ts) -->
@@ -1953,6 +1961,8 @@ function fmtDateTime(iso: string): string {
           Y時間の警告 (冊単位):
           <template v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
         </div>
+
+        <LitigationKingakuTable v-if="kingakuBooks.length > 0" :books="kingakuBooks" :driver-label="driverLabel" compact />
         </div>
 
         <div v-if="activeTab === 'errors'" data-testid="litigation-print-errors">
@@ -2090,6 +2100,10 @@ function fmtDateTime(iso: string): string {
   .litigation-print-table th, .litigation-print-table td { border: 1px solid #999; padding: 1px 3px; text-align: left; vertical-align: top; }
   .litigation-print-table th { background: #eee; }
   .litigation-print-table tr { break-inside: avoid; }
+  /* Y金額 (時間の行): 1 冊を 1 枚の中に収める。表は中身の幅に詰め、時間は右寄せ */
+  .litigation-kingaku-book { break-inside: avoid; margin-top: 3px; }
+  .litigation-print-table.litigation-kingaku-table { width: auto; }
+  .litigation-print-table td.litigation-kingaku-num { text-align: right; }
   .litigation-print-salary { font-size: 7.5px; }
   .litigation-print-salary .litigation-print-table td { padding: 0 2px; }
 }

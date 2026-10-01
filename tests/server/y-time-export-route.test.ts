@@ -16,17 +16,19 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { requireAuthMock, alcProxyFetchMock, readBodyMock, setResponseHeaderMock, writeYTimeRowsMock } = vi.hoisted(() => ({
+const { requireAuthMock, alcProxyFetchMock, readBodyMock, setResponseHeaderMock, writeYTimeRowsMock, readSheetCellsMock } = vi.hoisted(() => ({
   requireAuthMock: vi.fn(),
   alcProxyFetchMock: vi.fn(),
   readBodyMock: vi.fn(),
   setResponseHeaderMock: vi.fn(),
   writeYTimeRowsMock: vi.fn(),
+  readSheetCellsMock: vi.fn(),
 }))
 vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 vi.mock('../../server/utils/alc-proxy', () => ({ alcProxyFetch: alcProxyFetchMock }))
 vi.mock('~/utils/y-time-xlsx', () => ({
   writeYTimeRows: writeYTimeRowsMock,
+  readSheetCells: readSheetCellsMock,
   buildFilename: (cd: string, from: string, to: string) => `y-time_${cd}_${from}_${to}.xlsx`,
 }))
 vi.mock('h3', async (importOriginal) => {
@@ -40,6 +42,7 @@ vi.mock('h3', async (importOriginal) => {
 })
 
 import handler from '../../server/api/y-time-export.post'
+import { Y_KINGAKU_SETTING_REFS, decodeYKingakuHeader } from '../../app/utils/y-kingaku'
 
 const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<Uint8Array>)(event)
 
@@ -52,6 +55,20 @@ function r2With(objects: Record<string, ArrayBuffer>) {
   }
 }
 const templateR2 = () => r2With({ [BODY.template_key]: new ArrayBuffer(8) })
+
+/** `要素` シートの設定 (架空): 法定休日・起算 = 日、週 40h、所定 = 月〜金 6h、末締め、月 60h は不適用 */
+function settingCells(over: Record<string, unknown> = {}): Record<string, unknown> {
+  const str = (value: string) => ({ kind: 'string', value })
+  const num = (value: number) => ({ kind: 'number', value })
+  const cells: Record<string, unknown> = {
+    F5: str('日'), F7: num(40), F9: str('日'), G19: str('末'), U27: { kind: 'boolean', value: false },
+  }
+  ;['日', '月', '火', '水', '木', '金', '土'].forEach((w, i) => {
+    cells[`E${11 + i}`] = str(w)
+    cells[`F${11 + i}`] = num(i >= 1 && i <= 5 ? 0.25 : 0)
+  })
+  return { ...cells, ...over }
+}
 
 const okEnv = (extra: Record<string, unknown> = {}) => ({ INTERNAL_SHARED_SECRET: 'secret', ...extra })
 const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { env } } })
@@ -67,7 +84,9 @@ beforeEach(() => {
   })
   setResponseHeaderMock.mockReset()
   writeYTimeRowsMock.mockReset()
-  writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [] })
+  writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [], inputDays: [] })
+  readSheetCellsMock.mockReset()
+  readSheetCellsMock.mockResolvedValue(settingCells())
 })
 
 describe('POST /api/y-time-export — 認可 (Refs #988)', () => {
@@ -267,5 +286,138 @@ describe('POST /api/y-time-export — period_rewrite と件数ヘッダ (Refs #1
     expect(headers['x-y-time-rows']).toBe('0')
     expect(headers['x-y-time-missing-count']).toBe('0')
     expect(headers['x-y-time-warnings-count']).toBe('0')
+  })
+})
+
+describe('POST /api/y-time-export — Y金額 の時間の行 (Refs #1133 c1133-31)', () => {
+  const headersOf = () => Object.fromEntries(setResponseHeaderMock.mock.calls.map(c => [c[1], c[2]])) as Record<string, string>
+  // 2030-07-08 (月) 8:00〜20:00・休憩 60 分 = 実労働 11h → 所定 6h + 法内 2h + 日 8h 超 3h
+  const INPUT_DAYS = [{ date: '2030-07-08', cells: { G: 480, H: 1200, L: 60 } }]
+  const REWRITE = { ...BODY, from: '2030-07-01', to: '2030-07-31', period_rewrite: true }
+
+  it('★ period_rewrite: true のとき、書いた入力とテンプレの設定から月度ごとの時間をヘッダで返す', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [], inputDays: INPUT_DAYS })
+    const tpl = new ArrayBuffer(8)
+    const out = await call(eventWith(okEnv({ DTAKO_R2: r2With({ [BODY.template_key]: tpl }) })))
+    expect(out).toBe(XLSX_BYTES)
+    // 設定は取ってきたテンプレそのものから読む (追加の取得はしない)
+    expect(readSheetCellsMock).toHaveBeenCalledTimes(1)
+    expect(readSheetCellsMock).toHaveBeenCalledWith(tpl, '要素', Y_KINGAKU_SETTING_REFS)
+    const h = headersOf()
+    expect(h['x-y-time-kingaku']).toMatch(/^[\x21-\x7e]+$/)
+    expect(decodeYKingakuHeader(h['x-y-time-kingaku']!)).toEqual([
+      { from: '2030-07-01', to: '2030-07-31', statutoryIn: 120, statutoryOut: 180, over60: null, holiday: 0, night: 0, total: 660 },
+    ])
+    expect(h).not.toHaveProperty('x-y-time-kingaku-error')
+  })
+
+  it('★ period_rewrite が無い呼び出し (/y-time-export 画面) は設定も読まず、ヘッダも今までどおり', async () => {
+    for (const v of [undefined, false, 'true']) {
+      setResponseHeaderMock.mockClear()
+      readBodyMock.mockResolvedValue({ ...BODY, ...(v === undefined ? {} : { period_rewrite: v }) })
+      writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [], inputDays: INPUT_DAYS })
+      await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+      expect(Object.keys(headersOf()).sort()).toEqual([
+        'content-disposition', 'content-type', 'x-y-time-missing-count', 'x-y-time-rows', 'x-y-time-warnings-count',
+      ])
+    }
+    expect(readSheetCellsMock).not.toHaveBeenCalled()
+  })
+
+  it('period_rewrite: true でも、既存のヘッダは値も顔ぶれも変わらない (足すのは集計の 1 本だけ)', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: ['2030-07-05'], inputDays: INPUT_DAYS })
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', json: async () => ({ rows: [{}, {}], warnings: ['w'] }),
+    })
+    await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+    const { 'x-y-time-kingaku': kingaku, ...rest } = headersOf()
+    expect(kingaku).toBeTruthy()
+    expect(rest).toEqual({
+      'x-y-time-rows': '2',
+      'x-y-time-missing-count': '1',
+      'x-y-time-warnings-count': '1',
+      'x-y-time-missing-dates': '2030-07-05',
+      'x-y-time-warnings': 'w',
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'content-disposition': 'attachment; filename="y-time_0001_2030-07-01_2030-07-31.xlsx"',
+    })
+  })
+
+  it('★ 設定が読めないテンプレでは既定値で計算せず、理由を ASCII に落として返す (xlsx はそのまま返す)', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [], inputDays: INPUT_DAYS })
+    readSheetCellsMock.mockResolvedValue(settingCells({ U27: { kind: 'number', value: 0 } }))
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    let h = headersOf()
+    expect(h).not.toHaveProperty('x-y-time-kingaku')
+    expect(h['x-y-time-kingaku-error']).toMatch(/^[\x21-\x7e]+$/)
+    expect(decodeURIComponent(h['x-y-time-kingaku-error']!)).toBe('要素!U27 (月60時間規制の適用) が TRUE / FALSE でない')
+
+    // 要素 シートそのものが無い
+    setResponseHeaderMock.mockClear()
+    readSheetCellsMock.mockResolvedValue(null)
+    await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+    h = headersOf()
+    expect(h).not.toHaveProperty('x-y-time-kingaku')
+    expect(decodeURIComponent(h['x-y-time-kingaku-error']!)).toBe('テンプレに「要素」シートが無い')
+  })
+
+  it('★ 集計が例外で落ちても xlsx は 200 で返り、理由だけをヘッダに載せる (既存のヘッダは変わらない)', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: ['2030-07-05'], inputDays: INPUT_DAYS })
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', json: async () => ({ rows: [{}, {}], warnings: ['w'] }),
+    })
+    readSheetCellsMock.mockRejectedValue(new Error('テンプレの zip が壊れている'))
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    const { 'x-y-time-kingaku-error': reason, ...rest } = headersOf()
+    expect(reason).toMatch(/^[\x21-\x7e]+$/)
+    expect(decodeURIComponent(reason!)).toBe('集計中にエラーが起きた: テンプレの zip が壊れている')
+    expect(rest).toEqual({
+      'x-y-time-rows': '2',
+      'x-y-time-missing-count': '1',
+      'x-y-time-warnings-count': '1',
+      'x-y-time-missing-dates': '2030-07-05',
+      'x-y-time-warnings': 'w',
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'content-disposition': 'attachment; filename="y-time_0001_2030-07-01_2030-07-31.xlsx"',
+    })
+
+    // Error でない値が投げられても同じ (文字にして載せる)。計算の途中で落ちた場合も同じ扱い
+    setResponseHeaderMock.mockClear()
+    readSheetCellsMock.mockRejectedValue('文字の例外')
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    expect(decodeURIComponent(headersOf()['x-y-time-kingaku-error']!)).toBe('集計中にエラーが起きた: 文字の例外')
+    expect(headersOf()).not.toHaveProperty('x-y-time-kingaku')
+
+    setResponseHeaderMock.mockClear()
+    readSheetCellsMock.mockResolvedValue(settingCells())
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [], inputDays: undefined })
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    expect(decodeURIComponent(headersOf()['x-y-time-kingaku-error']!)).toMatch(/^集計中にエラーが起きた: /)
+    expect(headersOf()).not.toHaveProperty('x-y-time-kingaku')
+  })
+
+  it('集計の外 (xlsx の書き込み) の失敗は今までどおり throw する', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockRejectedValue(new Error('sheet "Y時間" not found in template'))
+    await expect(call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).rejects.toThrow('sheet "Y時間" not found in template')
+    expect(readSheetCellsMock).not.toHaveBeenCalled()
+  })
+
+  it('書けた日が 1 日も無い冊 (運行 0 件) は月度 0 行', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+    expect(decodeYKingakuHeader(headersOf()['x-y-time-kingaku']!)).toEqual([])
+  })
+
+  it('未ログインなら設定も読まない (認可の前に何もしない)', async () => {
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
+    readBodyMock.mockResolvedValue(REWRITE)
+    await expect(call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).rejects.toMatchObject({ statusCode: 401 })
+    expect(readSheetCellsMock).not.toHaveBeenCalled()
+    expect(setResponseHeaderMock).not.toHaveBeenCalled()
   })
 })

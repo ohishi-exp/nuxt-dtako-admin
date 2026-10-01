@@ -52,6 +52,16 @@
  * `x-y-time-rows` は上流が返した行数で、**0 = その期間に運行が 0 件**
  * (404 = 乗務員CD が alc に無い、とは別物) を画面が言い分けるのに使う。
  *
+ * ## Y金額 の時間の行 (`x-y-time-kingaku` / `x-y-time-kingaku-error`、Refs #1133 c1133-31)
+ *
+ * **`period_rewrite: true` のときだけ**付ける (訴訟準備の出力タブが冊ごとの表にする)。
+ * Excel は開くまで式を計算しないので、テンプレの Y時間 / Y金額 の式を写した
+ * `~/utils/y-kingaku` で、**いま xlsx に書いた入力** (`writeYTimeRows` の `inputDays`) と
+ * テンプレの `要素` シートの設定から計算する。値は月度の配列の JSON を URI encode したもの。
+ * 設定が読めないテンプレでは既定値で計算せず、理由を `-error` に載せる (xlsx はそのまま返す)。
+ * 集計が例外で落ちたときも同じく `-error` に載せ、xlsx は返す (集計のせいで Excel を失わない)。
+ * 追加の通信はしない (上流もテンプレも、この応答のために既に取ってある)。
+ *
  * ## 上流の 404 だけ `data.upstream = 'alc'` を付ける
  *
  * 404 は 2 か所から出る: 上流 (`driver_cd not found`、alc の NotFound はこれだけ) と、
@@ -68,7 +78,14 @@ import {
 import { requireAuth } from '@ippoan/auth-client/server'
 import { assertAllowedRole } from '../utils/require-role'
 import type { YTimeExportResponse } from '~/types'
-import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
+import { writeYTimeRows, buildFilename, readSheetCells } from '~/utils/y-time-xlsx'
+import {
+  Y_KINGAKU_SETTING_REFS,
+  Y_KINGAKU_SETTING_SHEET,
+  computeYKingaku,
+  encodeYKingakuHeader,
+  parseYKingakuSettings,
+} from '~/utils/y-kingaku'
 import { alcProxyFetch } from '../utils/alc-proxy'
 import { cfEnv, resolveSecret } from '../utils/cf-env'
 
@@ -182,6 +199,31 @@ export default defineEventHandler(async (event) => {
       // ASCII safe にだけ落とす (ヘッダーに日本語を直接入れると 500 になる ので URI encode)
       encodeURIComponent(data.warnings.slice(0, 5).join(' / ')),
     )
+  }
+
+  // Y金額 シートの時間の行 (訴訟準備の出力タブが表にする)。入力は「シートに書いた値」
+  // **集計は付け足しで、主機能は xlsx を返すこと** — 想定外のテンプレで集計が落ちても Excel は返す
+  // (try の中は集計だけ。ヘッダは値が揃ってから 1 本だけ付ける)
+  if (body.period_rewrite === true) {
+    let kingaku: { name: string, value: string }
+    try {
+      const settings = parseYKingakuSettings(
+        await readSheetCells(tplBytes, Y_KINGAKU_SETTING_SHEET, Y_KINGAKU_SETTING_REFS),
+      )
+      kingaku = settings.ok
+        ? {
+            name: 'x-y-time-kingaku',
+            value: encodeYKingakuHeader(
+              computeYKingaku(result.inputDays, { from: body.from, to: body.to }, settings.settings),
+            ),
+          }
+        : { name: 'x-y-time-kingaku-error', value: encodeURIComponent(settings.reason) }
+    }
+    catch (e) {
+      const detail = e instanceof Error ? e.message : String(e)
+      kingaku = { name: 'x-y-time-kingaku-error', value: encodeURIComponent(`集計中にエラーが起きた: ${detail}`) }
+    }
+    setResponseHeader(event, kingaku.name, kingaku.value)
   }
 
   // 4. response

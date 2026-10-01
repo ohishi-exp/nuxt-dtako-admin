@@ -24,10 +24,18 @@
  * `data.upstream` は `server/api/y-time-export.post.ts` が上流由来のエラーにだけ付ける。
  * alc の dtako は 2024-04〜2025-12 が 0 件 (nuxt-dtako-admin-map skill「Y時間 エクスポート」)
  * なので、`empty` は「働いていない」ではなく「alc に材料が無い」と読ませる。
+ *
+ * ## Y金額 (時間の行) の表 (Refs #1133 c1133-31)
+ *
+ * サーバは `period_rewrite: true` の応答に、Y金額 シートの時間の行 (賃金月度ごとの合計) を
+ * `x-y-time-kingaku` で載せる (計算は `y-kingaku.ts`)。ここはそれを結果に畳み、冊ごとの表の
+ * 行 (`buildLitigationKingakuBooks`) にする。**別の通信はしない** — 「ZIP を作る」の結果として出る。
  */
 import { monthRange } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
 import { LITIGATION_CASE_MAX_MONTHS } from './litigation-case-form'
+import { fmtTimecardCompareMinutes } from './timecard-compare-view'
+import { decodeYKingakuHeader, sumYKingakuMonths, type YKingakuMonth } from './y-kingaku'
 
 /** 京都ソフト案件の Y時間 テンプレ (y-time-export.vue の既定と同じ R2 key) */
 export const LITIGATION_TEMPLATE_KEY = 'templates/kyoto-soft/base.xlsx'
@@ -67,6 +75,13 @@ export interface LitigationOutputResult {
   warningsCount: number
   /** 画面に出す 1 文 */
   message: string
+  /**
+   * Y金額 シートの時間の行 (賃金月度ごと、分)。サーバが集計を返したときだけ在る
+   * (失敗の結果・集計を返さない版のサーバでは無い)
+   */
+  kingaku?: YKingakuMonth[]
+  /** 集計できなかった理由 (テンプレの設定が読めない等)。`kingaku` とは同時に持たない */
+  kingakuError?: string
 }
 
 /** 応答ヘッダを読むための最小の形 (`Headers` がそのまま渡せる) */
@@ -76,6 +91,7 @@ export interface HeaderReader {
 
 export const LITIGATION_EMPTY_MESSAGE = 'この期間に運行が 0 件 (alc に取り込まれていない可能性)'
 export const LITIGATION_NOT_FOUND_MESSAGE = 'この乗務員CD は alc に登録が無い'
+export const LITIGATION_KINGAKU_UNREADABLE = 'サーバーが返した集計が読めなかった'
 
 /**
  * 案件を区切りの配列にする。並びは乗務員ごと・期間の古い順。
@@ -148,6 +164,12 @@ export function litigationResultFromHeaders(
   if (rows === null) message = '行数が返らなかった (0 件かどうか判定できない)'
   else if (rows === 0) message = LITIGATION_EMPTY_MESSAGE
   else message = `${rows} 行`
+  const rawKingaku = headers.get('x-y-time-kingaku')
+  const rawKingakuError = headers.get('x-y-time-kingaku-error')
+  const kingaku = rawKingaku === null ? null : decodeYKingakuHeader(rawKingaku)
+  let kingakuError: string | null = null
+  if (rawKingakuError !== null) kingakuError = decodeURIComponent(rawKingakuError)
+  else if (rawKingaku !== null && kingaku === null) kingakuError = LITIGATION_KINGAKU_UNREADABLE
   return {
     driverCd: chunk.driverCd,
     from: chunk.from,
@@ -159,6 +181,8 @@ export function litigationResultFromHeaders(
     warnings,
     warningsCount: parseCount(headers.get('x-y-time-warnings-count')) ?? warnings.length,
     message,
+    ...(kingaku ? { kingaku } : {}),
+    ...(kingakuError !== null ? { kingakuError } : {}),
   }
 }
 
@@ -246,4 +270,74 @@ export function buildLitigationZipSummary(input: LitigationZipSummaryInput): Lit
     detail: ch.finished ? `変更 ${ch.rows} 件` : '変更記録タブで「検知を実行」していない — 空の表 (その旨を備考に書く)',
   }
   return [...excel, changes]
+}
+
+// ---- Y金額 シートの時間の行 (出力タブの表と紙面) ----
+
+/** 表の時間の列 (Y金額 シートの E〜J 列の見出しと同じ並び) */
+export const LITIGATION_KINGAKU_COLUMNS = ['法内残業', '法外残業', '月60h超', '休日労働', '深夜労働', '総労働時間'] as const
+
+export const LITIGATION_KINGAKU_NOT_APPLIED = '不適用'
+
+export interface LitigationKingakuRow {
+  /** 対象期間 `YYYY-MM-DD〜YYYY-MM-DD` (合計行は「合計」) */
+  period: string
+  /** `LITIGATION_KINGAKU_COLUMNS` の順の `H:MM` (月 60h 超が不適用なら「不適用」) */
+  cells: string[]
+  /** 月度が冊の期間からはみ出している (はみ出した日はこの冊の Excel に無く、合計に入らない) */
+  partial: boolean
+}
+
+/** 1 冊ぶんの表。Excel を作れた冊 (`status: 'ok'`) だけが対象 */
+export interface LitigationKingakuBook {
+  driverCd: string
+  /** 冊の期間 `YYYY-MM〜YYYY-MM` */
+  label: string
+  /** 賃金月度ごとの行。集計が無い冊は空 */
+  rows: LitigationKingakuRow[]
+  /** 冊の合計行。集計が無い冊は null */
+  total: LitigationKingakuRow | null
+  /** 表を出せない理由。表があるときは null */
+  note: string | null
+}
+
+function kingakuCells(m: Omit<YKingakuMonth, 'from' | 'to'>): string[] {
+  return [
+    fmtTimecardCompareMinutes(m.statutoryIn),
+    fmtTimecardCompareMinutes(m.statutoryOut),
+    m.over60 === null ? LITIGATION_KINGAKU_NOT_APPLIED : fmtTimecardCompareMinutes(m.over60),
+    fmtTimecardCompareMinutes(m.holiday),
+    fmtTimecardCompareMinutes(m.night),
+    fmtTimecardCompareMinutes(m.total),
+  ]
+}
+
+/**
+ * 出力の結果から、冊ごとの「Y金額 (時間の行)」の表を作る。添字は `chunks` と `results` で揃える。
+ * 未実行の冊と、Excel を作れなかった冊 (0 件・未登録・失敗) は出さない — 理由は区切りの一覧が言う。
+ * **集計が無い冊を黙って落とさない** (理由を `note` に書く)。
+ */
+export function buildLitigationKingakuBooks(
+  chunks: readonly LitigationOutputChunk[],
+  results: readonly (LitigationOutputResult | null)[],
+): LitigationKingakuBook[] {
+  const books: LitigationKingakuBook[] = []
+  chunks.forEach((chunk, i) => {
+    const r = results[i]
+    if (!r || r.status !== 'ok') return
+    const book: LitigationKingakuBook = { driverCd: chunk.driverCd, label: chunk.label, rows: [], total: null, note: null }
+    books.push(book)
+    if (r.kingakuError !== undefined) book.note = `集計なし: ${r.kingakuError}`
+    else if (!r.kingaku) book.note = '集計なし: サーバーが集計を返さなかった'
+    else if (r.kingaku.length === 0) book.note = '集計なし: Y時間 シートに書けた日が 1 日も無い'
+    else {
+      book.rows = r.kingaku.map((m) => ({
+        period: `${m.from}〜${m.to}`,
+        cells: kingakuCells(m),
+        partial: m.from < chunk.from || m.to > chunk.to,
+      }))
+      book.total = { period: '合計', cells: kingakuCells(sumYKingakuMonths(r.kingaku)), partial: false }
+    }
+  })
+  return books
 }

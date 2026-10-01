@@ -44,17 +44,17 @@ const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
 const COL_NOTE = 'C' // 備考
 // テンプレ数式 (AB7=IF(F7=1,0,G7), AC7=IF(F7=1,H7,...)) より:
 // F=前日 flag、G=始業、H=終業
-const COL_PREV_DAY = 'F'
-const COL_START = 'G'
-const COL_END = 'H'
+const COL_PREV_DAY = 'F' as const
+const COL_START = 'G' as const
+const COL_END = 'H' as const
 // I-O: 休憩時間 7 セル split (前日5-22 / 前日22-0 / 当日0-5 / 当日5-22 / 当日22-0 / 翌日0-5 / 翌日5-22)
-const COL_REST_PREV_5_22 = 'I'
-const COL_REST_PREV_22_0 = 'J'
-const COL_REST_TODAY_0_5 = 'K'
-const COL_REST_TODAY_5_22 = 'L'
-const COL_REST_TODAY_22_0 = 'M'
-const COL_REST_NEXT_0_5 = 'N'
-const COL_REST_NEXT_5_22 = 'O'
+const COL_REST_PREV_5_22 = 'I' as const
+const COL_REST_PREV_22_0 = 'J' as const
+const COL_REST_TODAY_0_5 = 'K' as const
+const COL_REST_TODAY_5_22 = 'L' as const
+const COL_REST_TODAY_22_0 = 'M' as const
+const COL_REST_NEXT_0_5 = 'N' as const
+const COL_REST_NEXT_5_22 = 'O' as const
 
 /** clearPeriod でクリアする列。F-O = 前日 flag + 始業/終業 + 休憩 7 セル */
 const CLEAR_COLS: readonly string[] = [
@@ -105,6 +105,53 @@ export interface WriteResult {
   missingDates: string[]
   /** テンプレ A 列スキャン後の row 番号 index size (デバッグ用) */
   dateRowIndexSize: number
+  /**
+   * 入力列 (F〜O) に**実際に書いた値**を日付ごとにまとめたもの (Refs #1133 c1133-31)。
+   * テンプレに行が無かった日 (`missingDates`) は入らず、同じ日付の行が複数あればセルごとに
+   * 後の行が上書きする (xlsx に書くセルと同じ `yTimeRowInputCells` から作る)。
+   * `clearPeriod` で期間内を消してから書く呼び出しでは、これが期間内の入力列の中身そのもの。
+   */
+  inputDays: YTimeInputDay[]
+}
+
+/** Y時間 シートの入力列。F = 前日 flag、G = 始業、H = 終業、I〜O = 休憩 7 セル */
+export type YTimeInputCol = 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O'
+
+/** 1 日ぶんの入力列の値。F は 1、G〜O は**分**。書かれなかったセル (= 空) はキーが無い */
+export interface YTimeInputDay {
+  /** A 列の日付 `yyyy-mm-dd` */
+  date: string
+  cells: Partial<Record<YTimeInputCol, number>>
+}
+
+/**
+ * 上流の 1 行が入力列のどのセルに何を書くか (書く順)。F は 1、G〜O は**分**。
+ *
+ * **xlsx への書き込み (`writeYTimeRows`) と、Y金額の時間の集計 (`y-kingaku.ts`) が同じ
+ * この関数を通る** — 「どのセルに書くか」の規則を 2 か所に持たない。
+ *
+ * - F は前日始業のときだけ (false のときは書かない = 空のまま)
+ * - G / H は必ず書く
+ * - I〜O は 0 なら書かない (テンプレ既存値を尊重 = `clearPeriod` 後は空のまま)
+ */
+export function yTimeRowInputCells(r: YTimeRow): [YTimeInputCol, number][] {
+  const cells: [YTimeInputCol, number][] = []
+  if (r.previous_day_start) cells.push([COL_PREV_DAY, 1])
+  cells.push([COL_START, r.start_minutes_of_day])
+  cells.push([COL_END, r.end_minutes_from_bucket_date])
+  const rests: [YTimeInputCol, number][] = [
+    [COL_REST_PREV_5_22, r.rest_prev_5_22],
+    [COL_REST_PREV_22_0, r.rest_prev_22_0],
+    [COL_REST_TODAY_0_5, r.rest_today_0_5],
+    [COL_REST_TODAY_5_22, r.rest_today_5_22],
+    [COL_REST_TODAY_22_0, r.rest_today_22_0],
+    [COL_REST_NEXT_0_5, r.rest_next_0_5],
+    [COL_REST_NEXT_5_22, r.rest_next_5_22],
+  ]
+  for (const rest of rests) {
+    if (rest[1] > 0) cells.push(rest)
+  }
+  return cells
 }
 
 /**
@@ -146,6 +193,7 @@ export async function writeYTimeRows(
 
   const idx = buildDateRowIndex(xml, opts.maxScanRows)
   const missingDates: string[] = []
+  const inputDays = new Map<string, YTimeInputDay>()
 
   // === 行単位のバッチ変更を集約 ===
   //
@@ -177,19 +225,13 @@ export async function writeYTimeRows(
     if (r.note != null) {
       rc.writeCells.set(COL_NOTE, { kind: 'inlineStr', value: r.note })
     }
-    if (r.previous_day_start) {
-      rc.writeCells.set(COL_PREV_DAY, { kind: 'number', value: 1 })
+    // G/H/I-O は `分 / 1440` (fractional-day)、F は 1 のまま
+    const day = inputDays.get(r.date) ?? { date: r.date, cells: {} }
+    inputDays.set(r.date, day)
+    for (const [col, value] of yTimeRowInputCells(r)) {
+      rc.writeCells.set(col, { kind: 'number', value: col === COL_PREV_DAY ? value : value / 1440 })
+      day.cells[col] = value
     }
-    rc.writeCells.set(COL_START, { kind: 'number', value: r.start_minutes_of_day / 1440 })
-    rc.writeCells.set(COL_END, { kind: 'number', value: r.end_minutes_from_bucket_date / 1440 })
-    // I-O: 0 ならテンプレ既存値を尊重 (= clearPeriod 後は self-closing のまま)
-    if (r.rest_prev_5_22 > 0) rc.writeCells.set(COL_REST_PREV_5_22, { kind: 'number', value: r.rest_prev_5_22 / 1440 })
-    if (r.rest_prev_22_0 > 0) rc.writeCells.set(COL_REST_PREV_22_0, { kind: 'number', value: r.rest_prev_22_0 / 1440 })
-    if (r.rest_today_0_5 > 0) rc.writeCells.set(COL_REST_TODAY_0_5, { kind: 'number', value: r.rest_today_0_5 / 1440 })
-    if (r.rest_today_5_22 > 0) rc.writeCells.set(COL_REST_TODAY_5_22, { kind: 'number', value: r.rest_today_5_22 / 1440 })
-    if (r.rest_today_22_0 > 0) rc.writeCells.set(COL_REST_TODAY_22_0, { kind: 'number', value: r.rest_today_22_0 / 1440 })
-    if (r.rest_next_0_5 > 0) rc.writeCells.set(COL_REST_NEXT_0_5, { kind: 'number', value: r.rest_next_0_5 / 1440 })
-    if (r.rest_next_5_22 > 0) rc.writeCells.set(COL_REST_NEXT_5_22, { kind: 'number', value: r.rest_next_5_22 / 1440 })
   }
 
   // 3. 単一パス apply (xml 全体を 1 回だけ walk、各 row inner は小さいのでほぼ瞬時)
@@ -215,6 +257,7 @@ export async function writeYTimeRows(
     bytes: new Uint8Array(buf),
     missingDates,
     dateRowIndexSize: idx.size,
+    inputDays: [...inputDays.values()],
   }
 }
 
@@ -250,6 +293,91 @@ async function resolveSheetPath(
   const target = relMatch[1].replace(/^\//, '')
   return target.startsWith('xl/') ? target : `xl/${target}`
 }
+
+/** シートのセル 1 つを読んだ結果。**セルの型で読み分ける** (数値の 0 を FALSE と読まない) */
+export type SheetCellValue =
+  | { kind: 'number', value: number }
+  | { kind: 'string', value: string }
+  | { kind: 'boolean', value: boolean }
+  /** セルが無い・値が無い */
+  | { kind: 'empty' }
+  /** エラー値 (`#N/A` 等) や、数値として読めない中身 */
+  | { kind: 'error' }
+
+/**
+ * 名前で引いたシートのセルを読む (Refs #1133 c1133-31、`要素` シートの設定を読むのに使う)。
+ * シートが無ければ null。式つきのセルはキャッシュ値 (`<v>`) を読む。
+ *
+ * - `t="b"` → 真偽 / `t="s"` (sharedStrings)・`t="inlineStr"`・`t="str"` → 文字 /
+ *   `t="e"` → エラー / それ以外 → 数値
+ * - sharedStrings は `<t>` 本体だけを繋ぎ、**ふりがな (`<rPh>`) は捨てる**
+ *   (「日」のセルが「日ニチ」にならないように)
+ *
+ * relay にも同じ役の読み口がある (`workers/dtako-scraper-relay/src/min-wage-import.ts` の
+ * `parseSharedStrings` / `parseSheetCells`)。package が別で import できないので、こちらは
+ * 型つきで読む版を別に持つ。
+ */
+export async function readSheetCells(
+  templateBytes: ArrayBuffer,
+  sheetName: string,
+  refs: readonly string[],
+): Promise<Record<string, SheetCellValue> | null> {
+  const zip = await JSZip.loadAsync(templateBytes)
+  const path = await resolveSheetPath(zip, sheetName)
+  const entry = path ? zip.file(path) : null
+  if (!entry) return null
+  const xml = await entry.async('string')
+  let shared: string[] | null = null
+  const out: Record<string, SheetCellValue> = {}
+  for (const ref of refs) {
+    const m = new RegExp(`<c r="${ref}"([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/c>)`).exec(xml)
+    const attrs = m?.[1] ?? ''
+    const inner = m?.[2] ?? ''
+    const type = /\bt="([^"]*)"/.exec(attrs)?.[1] ?? 'n'
+    if (type === 'inlineStr') {
+      out[ref] = { kind: 'string', value: textOfStringItem(inner) }
+      continue
+    }
+    // 前後に空白を持つ文字は <v xml:space="preserve"> になる
+    const v = /<v\b[^>]*>([^<]*)<\/v>/.exec(inner)?.[1]
+    if (v === undefined || v === '') {
+      out[ref] = { kind: 'empty' }
+    } else if (type === 'b') {
+      out[ref] = { kind: 'boolean', value: v === '1' }
+    } else if (type === 's') {
+      shared ??= await readSharedStrings(zip)
+      const text = shared[Number(v)]
+      out[ref] = text === undefined ? { kind: 'error' } : { kind: 'string', value: text }
+    } else if (type === 'str') {
+      out[ref] = { kind: 'string', value: unescapeXml(v) }
+    } else if (type === 'e' || !Number.isFinite(Number(v))) {
+      out[ref] = { kind: 'error' }
+    } else {
+      out[ref] = { kind: 'number', value: Number(v) }
+    }
+  }
+  return out
+}
+
+/** `xl/sharedStrings.xml` の `<si>` を順に文字へ。ファイルが無ければ空配列 */
+async function readSharedStrings(zip: JSZip): Promise<string[]> {
+  const entry = zip.file('xl/sharedStrings.xml')
+  if (!entry) return []
+  const xml = await entry.async('string')
+  return [...xml.matchAll(/<si\b[^>]*?(?:\/>|>([\s\S]*?)<\/si>)/g)].map((m) => textOfStringItem(m[1] ?? ''))
+}
+
+/** `<si>` / `<is>` の中身から `<t>` 本体だけを繋ぐ。ふりがな (`<rPh>…</rPh>`) は先に落とす */
+function textOfStringItem(inner: string): string {
+  const body = inner.replace(/<rPh\b[\s\S]*?<\/rPh>/g, '')
+  return [...body.matchAll(/<t\b[^>]*>([^<]*)<\/t>/g)].map((m) => unescapeXml(m[1] ?? '')).join('')
+}
+
+function unescapeXml(s: string): string {
+  return s.replace(/&(amp|lt|gt|quot|apos);/g, (_full, name: string) => XML_UNESCAPE[name] ?? '')
+}
+
+const XML_UNESCAPE: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
 
 /** `yyyy-mm-dd` → Excel serial (1899-12-30 起点)。形式違いは throw */
 function ymdToExcelSerial(ymd: string): number {
