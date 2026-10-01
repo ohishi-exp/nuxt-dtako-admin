@@ -13,7 +13,7 @@
  * - 給与・賞与名 は "2026年 1月" 形式。賞与など年月にならない行はスキップして警告
  */
 
-import type { WageReportRow, WageRow } from './restraint-wage-view'
+import type { WageReportRow } from './restraint-wage-view'
 import { fmtMinutes, fmtYen, isOver60hPremiumMonth } from './restraint-wage-view'
 import { SCHEDULED_HOURS_PER_DAY } from './profit-wage-mix'
 
@@ -473,39 +473,37 @@ export interface SalaryComparisonRow {
   csvTotal: number
   /** CSV の 支給合計額 列 (無ければ null、項目合計との検算用)。 */
   csvReportedTotal: number | null
-  /** 計算側は CSV の【 補助 】単価 (基本単価=日額、残業単価=時給) ×
-   * システム集計で出す (**単価マスタは使わない** — 単価マスタとの比較は
-   * 「最低賃金チェック」タブの責務、Refs #268)。単価が無い行は null
-   * (「単価なし」— 独自の按分計算はしない)。 */
+  /**
+   * 基本給(計算) = **単価マスタ × 法定時間内** (wage report の `wage.amounts.statutory`)。給与区分に関わらず同じ式。
+   * 単価が無い月 (金額が出ていない月) は null (「単価なし」— 独自の按分計算はしない)。
+   */
   sysBase: number | null
+  /**
+   * 残業(計算) = **最低賃金ベースの残業代** (wage report の `minWageOvertimePay + minWageNightOvertimePay`。
+   * 最低賃金を基礎額に割増を掛けた絶対下限、時間は `overtimeMinutes`)。最低賃金が引けない月は null。
+   * 明細の残業単価は使わない。
+   */
   sysOvertime: number | null
+  /** 総支給(計算) = 基本給(計算) + 残業(計算)。どちらかが null なら null。 */
   sysTotal: number | null
-  /** 基本給(計算) の根拠 (`computeSysBase` が返したもの)。掛けた単価・区分・量を運ぶだけで計算は変えない。 */
-  sysBaseBasis: SysBaseBasis
-  /** 残業(計算) に掛けた残業単価 (時給、円/h)。掛けた量は `overtimeMinutes`。単価が無ければ null。 */
-  sysOvertimeRate: number | null
-  /** 計算根拠の表示用: システム稼働日数 (デジタコ・打刻から数えた日数)。 */
-  sysWorkDays: number
   /**
    * その月の残業時間 (分)。**wage report (`report.wage`) の `overtimeMinutes + nightOvertimeMinutes`
-   * が唯一の出どころ** (時間外 + 時間外深夜 + 週 40 時間超)。残業(計算)・37条・残業(最低賃金) の
-   * 3 つが同じこの値を使う — 給与比較の側で時間を数え直さない。
+   * が唯一の出どころ** (時間外 + 時間外深夜 + 週 40 時間超)。残業(計算)・37条の
+   * 2 つが同じこの値を使う — 給与比較の側で時間を数え直さない。
    */
   overtimeMinutes: number
   /**
    * **固定残業 (みなし残業) の人か** (給与区分 = 月給、Refs #449)。
    *
-   * 月給者の残業扱い項目は役職手当のような**定額**で、「残業単価 × 実残業時間」で
-   * 払われたものではない。そのため `diffOvertime` (残業計(給与) − 残業(計算)) は
-   * 「単価×時間より定額が大きい」以上の意味を持たず、**正の差を「多く払っている
-   * = 問題なし」と読むと誤る** (2026-07-26 指摘)。この人たちの判定は
-   * `diffCsvVsBaseRateOvertime` (労基法37条) だけが効く。
+   * 月給者の残業扱い項目は役職手当のような**定額**で、実残業時間で払われたものではない。
+   * 残業(計算) が最低賃金ベースの残業代なので、`diffOvertime` はこの人にも出す (定額が
+   * 最低賃金ベースの割増を下回っていないかの比較)。ただし**正の差は「多く払っている = 問題なし」
+   * ではない** (定額と時間の対応が無い) ので、画面は注記を添える。37条の判定は `diffCsvVsBaseRateOvertime`。
    */
   overtimeFixed: boolean
   /** CSV − システム (システム側が null なら null)。 */
   diffBase: number | null
-  /** `overtimeFixed` の人は **null** — 定額と単価×時間の差に意味が無いため
-   * (画面に出すと誤読される)。 */
+  /** 残業(計算) が無い (最低賃金が引けない) 月は null。固定残業の人も他と同じく出す。 */
   diffOvertime: number | null
   diffTotal: number | null
   /** 割増基礎に算入する支給項目の合計 (base + premium-base-only、Refs #278)。 */
@@ -531,18 +529,9 @@ export interface SalaryComparisonRow {
    * computeOvertimePayAtRate)。baseRateActual が null なら null。 */
   baseRateOvertimePay: number | null
   /** csvOvertime (支払残業代) − baseRateOvertimePay。負 = 実際の基礎単価に
-   * 対する法定割増を下回っている (**主判定・37条**)。残業(最低賃金) は
-   * 絶対下限の併記に回る (Refs #278)。 */
+   * 対する法定割増を下回っている (**主判定・37条**)。残業(計算) は
+   * 最低賃金を基礎額にした絶対下限の併記 (Refs #278)。 */
   diffCsvVsBaseRateOvertime: number | null
-  /** 残業の最低賃金換算理論値 (wage-report の minWageOvertimePay+
-   * minWageNightOvertimePay)。単価マスタとは独立で、最低賃金未設定等で
-   * どちらか欠ければ null。「最低賃金チェック」タブの最低賃金換算と同じ理論値。 */
-  minWageOvertimePay: number | null
-  /** csvOvertime (実際の給与明細の残業代、真の支払い実績) − minWageOvertimePay。
-   * 負 = 実際に支払われた残業代が最低賃金換算の理論値を下回っている。
-   * 「最低賃金チェック」タブが単価マスタ設定の事前チェックなのに対し、
-   * こちらは支払い実績の事後チェック (Refs #268)。 */
-  diffCsvVsMinWageOvertime: number | null
   /**
    * 勤怠日数の突合 (Refs #433)。`sys` は打刻から数えた日数
    * (`countWorkKinds` 相当、タイムカード由来の行だけ非ゼロ)、`csv` は給与明細の
@@ -558,21 +547,13 @@ export interface SalaryComparisonRow {
   }
   /** 計算に使った単価と最低賃金 (表示用の写し、Refs #1133)。 */
   rateBasis: SalaryRateBasis
-  /** デジタコの労働時間 (表示用の写し、Refs #1133)。**wage report の欄をそのまま運ぶだけ** — ここで足し引きしない。 */
-  hours: {
-    workDays: number
-    /** 実働 (分)。`report.summary.workingMinutes` (無ければ 0) */
-    workingMinutes: number
-    /** 法定区分ごとの分 (`report.wage.minutes`) */
-    minutes: WageRow['minutes']
-  }
-  /** 単価マスタ × 法定内時間の金額 (`report.wage.amounts.statutory`)。単価か金額が無ければ null。基本給の最低賃金との比較に使う。 */
-  wageStatutoryAmount: number | null
+  /** 基本給(計算) の根拠に出す法定時間内 (分)。**wage report の `wage.minutes.statutory` をそのまま運ぶだけ** — ここで足し引きしない。 */
+  statutoryMinutes: number
 }
 
 /** 給与明細の【 勤怠 】項目名 → 突合する軸 (Refs #433)。給与大臣の様式に合わせた
  * 名前で、無い様式もあるので**引けなければ undefined のまま**にする。 */
-export const CSV_ATTENDANCE_LABELS = {
+const CSV_ATTENDANCE_LABELS = {
   work: '出勤日数',
   publicHoliday: '公休日数',
   paidLeave: '有休日数',
@@ -581,7 +562,7 @@ export const CSV_ATTENDANCE_LABELS = {
 
 /** 給与明細の残業時間の項目名 (`KINDATA`)。本番実データで 0100/0200/0300 の 3 社とも
  * この名前 (Refs #447)。 */
-export const CSV_OVERTIME_HOURS_LABEL = '残業時間'
+const CSV_OVERTIME_HOURS_LABEL = '残業時間'
 
 /** 給与明細の支給項目のうち「基本給」そのものの項目名。区分 base には割増基礎に入る手当も混ざるので、
  * 基本給の明細の内訳 (うち基本給 / 手当) を分けるのに使う (Refs #1133)。 */
@@ -815,8 +796,7 @@ export const PAY_KUBUN_DAILY = 2
 export const PAY_KUBUN_HOURLY = 3
 export const PAY_KUBUN_OTHER = 4
 
-/** 給与区分 → 式の種類。**区分の数値はここ 1 か所だけが知っている** (`computeSysBase` の基本給と
- * `computeBaseRate` の基礎単価が同じ対応を使う)。`days` = 日給 / `hours` = 時給 /
+/** 給与区分 → 式の種類。**区分の数値はここ 1 か所だけが知っている** (`computeBaseRate` の基礎単価が使う)。`days` = 日給 / `hours` = 時給 /
  * `monthly` = 月給・その他 / `unknown` = 区分が取れていない。 */
 export type PayKubunKind = 'days' | 'hours' | 'monthly' | 'unknown'
 
@@ -828,52 +808,6 @@ export function payKubunKind(payKubun: number | null): PayKubunKind {
     case PAY_KUBUN_OTHER: return 'monthly'
     default: return 'unknown'
   }
-}
-
-/** 基本給(計算) の根拠の種類。`days` = 日額 × 日数 / `hours` = 時給 × 分 / `monthly` = 月給・その他 (計算なし) /
- * `unknown` = 給与区分が取れていない (計算なし) / `norate` = 単価なし。 */
-export type SysBaseKind = PayKubunKind | 'norate'
-
-export interface SysBaseBasis {
-  kind: SysBaseKind
-  /** 掛けた基本単価 (日額 or 時給)。`norate` は null。 */
-  rate: number | null
-  /** 掛けた量 (`days` は日数、`hours` は分)。それ以外は null。 */
-  quantity: number | null
-}
-
-export interface SysBaseResult extends SysBaseBasis {
-  value: number | null
-}
-
-/**
- * 「基本給(計算)」= 給与明細の【補助】基本単価 × システム集計。**単価の単位が
- * 給与区分で変わる**ので掛ける相手を変える (Refs #429)。
- *
- * | 区分 | 計算 |
- * |---|---|
- * | 2 日給 | 日額 × 稼働日数 |
- * | 3 時給 | 時給 × 実働時間 |
- * | 1 月給 / 4 その他 / 不明 | **value = null (計算なし)** |
- *
- * 月給を null にするのは、月額に稼働日数を掛けても実額に対応しないため。実額
- * (`csvBase`) 側だけが残り、意味のない差が出なくなる。**不明も null に倒す**のが
- * 要点で、既定を日給にすると月給者へ日額計算を掛ける今回の壊れ方が再発する。
- *
- * 時給の実働時間はタイムカード由来なら「拘束 − 中抜け − 昼休憩」(Refs #424 PR-B)、
- * デジタコ由来なら CSV の実働がそのまま入る。
- */
-export function computeSysBase(
-  baseRate: number | null,
-  payKubun: number | null,
-  workDays: number,
-  workingMinutes: number,
-): SysBaseResult {
-  if (baseRate === null) return { value: null, rate: null, kind: 'norate', quantity: null }
-  const kind = payKubunKind(payKubun)
-  if (kind === 'days') return { value: Math.round(baseRate * workDays), rate: baseRate, kind, quantity: workDays }
-  if (kind === 'hours') return { value: Math.round((baseRate * workingMinutes) / 60), rate: baseRate, kind, quantity: workingMinutes }
-  return { value: null, rate: baseRate, kind, quantity: null }
 }
 
 /** 法定の月平均所定労働時間 = 週 40 時間 × 365 日 ÷ 7 日 ÷ 12 か月 (≒ 173.81h)。
@@ -895,19 +829,19 @@ export interface BaseRateDays {
  * 日給の基礎単価の分母の日数。**明細の 出勤日数 + 有休日数** (片方だけ在ればその値) —
  * 明細の基本給が 日額 × (出勤 + 有休) で組まれているので、割る側も同じ日数にする。
  * 明細に日数が無い行と、複数会社を合算した行 (`mergeSalaryCsvRows` は attendance を先頭会社ぶんしか
- * 持たない) はデジタコの稼働日数 (`sysWorkDays`) に倒す。倒したことは `source` で運び、画面が注記する。
+ * 持たない) はデジタコの稼働日数 (`hours.workDays`) に倒す。倒したことは `source` で運び、画面が注記する。
  */
-export function baseRateDaysOf(csv: SalaryCsvRow, merged: boolean, sysWorkDays: number): BaseRateDays {
-  if (merged) return { value: sysWorkDays, source: 'merged' }
+export function baseRateDaysOf(csv: SalaryCsvRow, merged: boolean, workDays: number): BaseRateDays {
+  if (merged) return { value: workDays, source: 'merged' }
   const attendance = csv.attendance ?? {}
   const work = attendance[CSV_ATTENDANCE_LABELS.work]
   const paidLeave = attendance[CSV_ATTENDANCE_LABELS.paidLeave]
-  if (work === undefined && paidLeave === undefined) return { value: sysWorkDays, source: 'sys' }
+  if (work === undefined && paidLeave === undefined) return { value: workDays, source: 'sys' }
   return { value: (work ?? 0) + (paidLeave ?? 0), source: 'csv' }
 }
 
 /** 日給の分母の日数の出どころの呼び名 (`明細` / `デジタコ稼働`)。根拠の文字列と時間セルが同じ呼び名を使う。 */
-export function baseRateDaysSourceLabel(source: BaseRateDays['source'] | null): string {
+function baseRateDaysSourceLabel(source: BaseRateDays['source'] | null): string {
   return source === 'csv' ? '明細' : 'デジタコ稼働'
 }
 
@@ -943,7 +877,7 @@ export const BASE_RATE_NONE_LABELS: Record<NonNullable<BaseRateBasis['none']>, s
 }
 
 /** 時間の表示 (`173.8h`、小数 1 桁)。 */
-export const fmtHoursOneDecimal = (hours: number): string => `${(Math.round(hours * 10) / 10).toFixed(1)}h`
+const fmtHoursOneDecimal = (hours: number): string => `${(Math.round(hours * 10) / 10).toFixed(1)}h`
 
 const monthlyAvgText = fmtHoursOneDecimal(STATUTORY_MONTHLY_AVG_HOURS)
 
@@ -1122,34 +1056,26 @@ export function compareSalaryMonth(
     const base = sums.buckets['base'].total
     const overtime = sums.buckets['overtime'].total
     const workDays = report.summary.workDays
-    const workingMinutes = report.summary.workingMinutes ?? 0
     // 残業時間は wage report が正本 (時間外 + 時間外深夜 + 週 40 時間超)。ここで summary から数え直さない —
-    // 残業(計算)・37条・残業(最低賃金) が同じ月で違う時間になるため
+    // 残業(計算)・37条が同じ月で違う時間になるため
     const overtimeMinutes = report.wage.overtimeMinutes + report.wage.nightOvertimeMinutes
 
-    // 計算側: CSV の単価 × システム集計。単価が無い行は独自の按分計算をせず null
-    // (「単価なし」— 最低賃金比較は既存の最低賃金チェックタブに任せる、Refs #253)。
-    //
-    // **基本単価の掛け方は給与区分で変わる** (Refs #429)。以前は全員を日給者と
-    // みなして `単価 × 稼働日数` にしていたため、月給者では桁が 1 つ以上ずれた値が
-    // 「差」として並んでいた (実データで基本給 165,000 の月給者に 2,640,000)。
-    // 残業側は区分に関わらず時給単価なので従来どおり。
-    const { value: sysBase, ...sysBaseBasis } = computeSysBase(csv.rates.base, report.pay_kubun ?? null, workDays, workingMinutes)
-    const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
-    // 月給者 = 固定残業とみなす (Refs #449)。定額と「単価×時間」の差は判定に使えない
-    const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
-    const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
-
-    // 支払い実績 (csvOvertime) と直接比較する最低賃金理論値。時間軸は
-    // 「最低賃金チェック」タブと同じ (時間外+時間外深夜+週40超過 = 上の overtimeMinutes)。
-    const minWageOvertimePay
+    // 基本給(計算) は wage report の 単価マスタ × 法定時間内 (給与区分に関わらず同じ式)。単価が無い月は null。
+    // 明細の基本単価 × 日数は使わない — 日数を掛ければ明細の基本給の項目そのものになり、比較にならない
+    const sysBase = report.wage.amounts?.statutory ?? null
+    // 残業(計算) は wage report の最低賃金ベースの残業代 (最低賃金を基礎額にした割増。時間軸は
+    // 「最低賃金チェック」タブと同じ 時間外+時間外深夜+週40超過 = 上の overtimeMinutes)。最低賃金が引けない月は null
+    const sysOvertime
       = report.wage.minWageOvertimePay !== null && report.wage.minWageNightOvertimePay !== null
         ? report.wage.minWageOvertimePay + report.wage.minWageNightOvertimePay
         : null
+    // 月給者 = 固定残業とみなす (Refs #449)。注記と みなし時間数 の表示に使う。差は出す (計算が最低賃金ベースなので、定額が最低賃金ベースの割増を下回っていないかを見る比較そのもの)
+    const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
+    const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
 
     // 基礎単価(実績) の分母は所定労働時間 (労基則 19 条)。式は給与区分で変わる (`computeBaseRate`)。
     // それを基礎額にした割増残業代の理論値が労基法37条の主判定 (Refs #278)。時間軸は
-    // 残業(計算)・残業(最低賃金) と同じ overtimeMinutes。日給の分母の日数は明細の 出勤 + 有休 (`baseRateDaysOf`)。
+    // 残業(計算) と同じ overtimeMinutes。日給の分母の日数は明細の 出勤 + 有休 (`baseRateDaysOf`)。
     const { value: baseRateActual, basis: baseRateBasis } = computeBaseRate(
       report.pay_kubun ?? null,
       sums.premiumBase.total,
@@ -1176,13 +1102,10 @@ export function compareSalaryMonth(
       sysBase,
       sysOvertime,
       sysTotal,
-      sysBaseBasis,
-      sysOvertimeRate: csv.rates.overtime,
-      sysWorkDays: workDays,
       overtimeMinutes,
       overtimeFixed,
       diffBase: sysBase === null ? null : base - sysBase,
-      diffOvertime: sysOvertime === null || overtimeFixed ? null : overtime - sysOvertime,
+      diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,
       diffTotal: sysTotal === null ? null : sums.total - sysTotal,
       csvPremiumBase: sums.premiumBase.total,
       csvPremiumBaseItems: sums.premiumBase.items,
@@ -1192,8 +1115,6 @@ export function compareSalaryMonth(
       baseRateBasis,
       baseRateOvertimePay,
       diffCsvVsBaseRateOvertime: baseRateOvertimePay === null ? null : overtime - baseRateOvertimePay,
-      minWageOvertimePay,
-      diffCsvVsMinWageOvertime: minWageOvertimePay === null ? null : overtime - minWageOvertimePay,
       attendanceDays: buildAttendanceDays(report, csv),
       rateBasis: {
         // 欄が無い (古い保存物・応答) はどれも null — 判定は unknown になり、一致扱いにしない
@@ -1204,8 +1125,7 @@ export function compareSalaryMonth(
         minWagePrefecture: report.wage.minWage?.prefecture ?? null,
         minWageEffectiveFrom: report.wage.minWage?.rateEffectiveFrom ?? null,
       },
-      hours: { workDays, workingMinutes, minutes: report.wage.minutes },
-      wageStatutoryAmount: report.wage.amounts?.statutory ?? null,
+      statutoryMinutes: report.wage.minutes.statutory,
     })
   }
 
