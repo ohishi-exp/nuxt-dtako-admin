@@ -93,7 +93,6 @@ import {
   rateBasisLabel,
   rateBasisPeriods,
   rateBasisStatus,
-  isBaseRateBelowMinWage,
   salaryRowCells,
   splitPayrollTargets,
   type LitigationRegisterCandidate,
@@ -853,9 +852,9 @@ const salaryNeedsMaterials = computed(() => salaryRows.value.some(r => r.message
 // 労基法37条 (基礎単価 × 割増) の理論値を、明細の残業代が下回った行の数 (差が負の行)
 const salaryShortfall37Count = computed(() =>
   salaryRows.value.filter(r => (r.compared?.diffCsvVsBaseRateOvertime ?? 0) < 0).length)
-// 37条の基礎単価 (÷ 所定労働時間) がその月の最低賃金を下回る行 — エラー (0 件でも出す)
-const salaryBelowMinWage37Count = computed(() =>
-  salaryRows.value.filter(r => r.compared && isBaseRateBelowMinWage(r.compared)).length)
+// 37条の逆算の基礎単価 (÷ wage report の法定時間内) が最低賃金を下回り、最低賃金で計算した行 (0 件でも出す)
+const salaryFloored37Count = computed(() =>
+  salaryRows.value.filter(r => r.compared?.baseRateBasis.floored).length)
 // 明細の基本給が 単価マスタ × 法定内時間 (wage report の金額) を下回る行 — エラー (0 件でも出す)。比べられない行は数えない
 const salaryBaseBelowMinWageCount = computed(() =>
   salaryRows.value.filter(r => (r.compared?.diffBase ?? 0) < 0).length)
@@ -1738,7 +1737,7 @@ function fmtDateTime(iso: string): string {
           <div class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-summary">
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
             / <span data-testid="litigation-salary-shortfall37">37条で不足 {{ salaryShortfall37Count }} 件</span>
-            / <span :class="salaryBelowMinWage37Count > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-below-minwage37">37条の基礎単価が最低賃金を下回る {{ salaryBelowMinWage37Count }} 件</span>
+            / <span :class="salaryFloored37Count > 0 ? 'text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-floored37">逆算の基礎単価が最低賃金を下回り最低賃金で計算した月 {{ salaryFloored37Count }} 件</span>
             / <span :class="salaryBaseBelowMinWageCount > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-base-below-minwage">基本給が 単価 × 法定時間内 を下回る {{ salaryBaseBelowMinWageCount }} 件 (比べられない {{ salaryBaseMinWageUnknownCount }} 件)</span>
             / <span :class="salaryRateBasisCounts.mismatch > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-rate-mismatch">単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件</span>
             / <span data-testid="litigation-salary-rate-unknown">単価 判定できない {{ salaryRateBasisCounts.unknown }} 件</span>
@@ -1804,7 +1803,7 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium text-right" title="明細 = 割増基礎に入る支給 (区分 base: 基本給の項目 + 手当) の合計 / 計算 = 単価マスタ (最低賃金) × 法定時間内 (wage report の金額。単価が無い月は計算なし)。差 = 明細 − 計算 (明細が下回る月は赤太字)">基本給</th>
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
-                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 明細の (出勤日数 + 有休日数) × 1 日の所定。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無ければデジタコの稼働日数、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
+                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 逆算の単価と最低賃金の高いほう。逆算の単価 = 割増の基礎に入る支給 ÷ wage report の法定時間内 (実働を週 40 時間で頭打ちにした時間。時給の人は明細の時給そのもの)。逆算が最低賃金を下回る月は最低賃金を採用する (根拠の行が赤)。理論値 = 残業(計算) × 基礎単価 ÷ 最低賃金 (割増の規則は wage report のもの)">残業代 (37条)</th>
                   <th class="px-3 py-2 font-medium" title="計算に使った単価 = 単価マスタ (最低賃金の一括設定で入れた額)。その月の最低賃金と違う月はエラー">単価 (最低賃金)</th>
                 </tr>
               </thead>
@@ -1989,7 +1988,7 @@ function fmtDateTime(iso: string): string {
           <template v-else>
             <div class="litigation-print-meta">
               <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
-              / 37条で不足 {{ salaryShortfall37Count }} 件 / 37条の基礎単価が最低賃金を下回る {{ salaryBelowMinWage37Count }} 件
+              / 37条で不足 {{ salaryShortfall37Count }} 件 / 逆算の基礎単価が最低賃金を下回り最低賃金で計算した月 {{ salaryFloored37Count }} 件
               / 基本給が 単価 × 法定時間内 を下回る {{ salaryBaseBelowMinWageCount }} 件 (比べられない {{ salaryBaseMinWageUnknownCount }} 件)
               / 単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件 / 単価 判定できない {{ salaryRateBasisCounts.unknown }} 件
               / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})

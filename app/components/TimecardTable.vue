@@ -136,7 +136,7 @@ const kindSummary = computed(() => {
     <div v-if="counts.punchError > 0" class="py-0.5 font-semibold text-red-600 dark:text-red-400">
       打刻エラー {{ counts.punchError }} 日 ({{ fmtMinutes(counts.punchErrorMinutes) }})
     </div>
-    <!-- 残業の「拘束時間 vs 給与換算時間」比較 (Refs #441)。給与側は基礎単価(実績) が
+    <!-- 残業の「拘束時間 vs 給与換算時間」比較 (Refs #441)。給与側は基礎単価 が
          無い (給与比較タブで CSV 未取り込み等) と "-" になる -->
     <div
       v-if="overtimeCompare && (overtimeCompare.sysMinutes > 0 || (overtimeCompare.paidMinutes ?? 0) > 0)"

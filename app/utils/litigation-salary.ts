@@ -17,7 +17,7 @@
 import { fmtMinutes, fmtYen, nextYm, WAGE_COLUMNS } from './restraint-wage-view'
 import type { WageCategoryKey, WageReportResponse, WageReportRow } from './restraint-wage-view'
 import {
-  BASE_RATE_NONE_LABELS, baseRateBasisNotes, baseRateBasisText, compareSalaryMonth,
+  BASE_RATE_NONE_LABELS, baseRateBasisText, compareSalaryMonth,
   CSV_BASE_SALARY_ITEM_LABEL, suggestCdMapEntries,
 } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
@@ -260,14 +260,10 @@ export interface LitigationSalaryOver37 {
   diff: number | null
   /** 明細の残業代が理論値を下回った (差が負) — 太字にするのはこれだけ */
   shortfall: boolean
-  /** 基礎単価の根拠 (`baseRateBasisText`。拘束×賃金の給与比較と同じ文字列)。分母は所定労働時間 */
+  /** 基礎単価の根拠 (`baseRateBasisText`。拘束×賃金の給与比較と同じ文字列)。分母は wage report の法定時間内 */
   rateBasis: string
-  /** 根拠に添える注記 (`baseRateBasisNotes`: 日数をデジタコ稼働に倒した / 所定を引けず法定 8 時間)。無ければ空 */
-  rateNotes: string[]
-  /** 37条の基礎単価がその月の最低賃金を下回る — **エラー** (赤太字)。最低賃金が引けない月は false */
-  belowMinWage: boolean
-  /** `belowMinWage` の比べた相手 (その月の最低賃金、円/h)。引けない月は null */
-  minWageRate: number | null
+  /** 逆算の基礎単価が最低賃金を下回り、最低賃金で計算した月 — 根拠の行を赤にする (太字にはしない) */
+  floored: boolean
 }
 
 export interface LitigationSalaryRowCells {
@@ -339,17 +335,10 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
           diff: c.diffCsvVsBaseRateOvertime,
           shortfall: (c.diffCsvVsBaseRateOvertime ?? 0) < 0,
           rateBasis: baseRateBasisText(c),
-          rateNotes: baseRateBasisNotes(c.baseRateBasis),
-          belowMinWage: isBaseRateBelowMinWage(c),
-          minWageRate: c.rateBasis.minWageRate,
+          floored: c.baseRateBasis.floored,
         },
     over37NoneReason: c.baseRateBasis.none === null ? '' : `(${BASE_RATE_NONE_LABELS[c.baseRateBasis.none]})`,
   }
-}
-
-/** 37条の基礎単価がその月の最低賃金を下回るか (どちらかが無い月は false — 判定しない)。 */
-export function isBaseRateBelowMinWage(c: Pick<SalaryComparisonRow, 'baseRateActual' | 'rateBasis'>): boolean {
-  return c.baseRateActual !== null && c.rateBasis.minWageRate !== null && c.baseRateActual < c.rateBasis.minWageRate
 }
 
 // --- 計算に使った単価 (単価マスタ) と最低賃金 (Refs #1133) ---
