@@ -91,6 +91,51 @@ describe('buildLitigationOutputSnapshot / parseLitigationOutputSnapshot', () => 
     expect(parseLitigationOutputSnapshot(stored)).toEqual(snapshot)
   })
 
+  // 行の元の 5 欄 (c1133-46) はどれも無くてよい。版の形の番号は上げていない
+  it('★ 行の元の欄つきの結果は、欄ごと読み戻る (勤怠の元 / 運行の元へ倒した結果)', () => {
+    const kintai: LitigationOutputResult = {
+      ...OK,
+      source: 'kintai',
+      excludedReasons: { no_non_working: 2, overlap: 1 },
+      excluded: [{ date: '2024-03-04', reason: 'no_non_working' }],
+      missingMonths: ['2024-05'],
+    }
+    const alc: LitigationOutputResult = { ...FAILED, status: 'empty', rows: 0, source: 'alc', sourceReason: 'out_of_scope', excludedReasons: {}, excluded: [], missingMonths: [] }
+    const snapshot = buildLitigationOutputSnapshot(CHUNKS, [kintai, alc], { finished: true, rows: 4 })
+    const parsed = parseLitigationOutputSnapshot(roundTrip(snapshot))
+    expect(parsed).toEqual(snapshot)
+    expect(parsed!.results[0]).toMatchObject({ source: 'kintai', excludedReasons: { no_non_working: 2, overlap: 1 }, missingMonths: ['2024-05'] })
+  })
+
+  it('★ 欄の無い旧い版は今までどおり読めて、戻した結果に行の元の欄を足さない (= 運行の元として表示される)', () => {
+    const snapshot = buildLitigationOutputSnapshot(CHUNKS, [OK, FAILED], { finished: true, rows: 4 })
+    const parsed = parseLitigationOutputSnapshot(roundTrip(snapshot))!
+    expect(parsed).toEqual(snapshot)
+    for (const k of ['source', 'sourceReason', 'excludedReasons', 'excluded', 'missingMonths']) {
+      expect(parsed.results[0]).not.toHaveProperty(k)
+    }
+  })
+
+  it.each<[string, Record<string, unknown>]>([
+    ['知らない元', { source: 'gcp' }],
+    ['元が文字列でない', { source: null }],
+    ['知らない倒した理由', { sourceReason: 'because' }],
+    ['理由ごとの件数がオブジェクトでない', { excludedReasons: [] }],
+    ['理由ごとの件数に数でない値', { excludedReasons: { overlap: '1' } }],
+    ['理由ごとの件数が負', { excludedReasons: { overlap: -1 } }],
+    ['行を作れなかった勤務が配列でない', { excluded: {} }],
+    ['行を作れなかった勤務の要素がオブジェクトでない', { excluded: ['2024-03-04'] }],
+    ['行を作れなかった勤務の日付が無い', { excluded: [{ reason: 'overlap' }] }],
+    ['行を作れなかった勤務の理由が無い', { excluded: [{ date: '2024-03-04' }] }],
+    ['記録の無い月が配列でない', { missingMonths: '2024-05' }],
+    ['記録の無い月に文字列でないもの', { missingMonths: [202405] }],
+  ])('★ 行の元の欄が在って型が違う版は全体を null にする: %s', (_name, bad) => {
+    const stored = roundTrip(buildLitigationOutputSnapshot(CHUNKS, [OK, FAILED], { finished: true, rows: 4 })) as { results: Record<string, unknown>[] }
+    expect(parseLitigationOutputSnapshot(stored)).not.toBeNull()
+    stored.results[0] = { ...stored.results[0], ...bad }
+    expect(parseLitigationOutputSnapshot(stored)).toBeNull()
+  })
+
   it('組み立ては渡した配列を写す (後から元の配列を書き換えても保存する値は変わらない)', () => {
     const results: (LitigationOutputResult | null)[] = [OK, null]
     const snapshot = buildLitigationOutputSnapshot(CHUNKS, results, { finished: true, rows: 1 })

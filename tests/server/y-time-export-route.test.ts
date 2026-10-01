@@ -16,15 +16,18 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { requireAuthMock, alcProxyFetchMock, readBodyMock, setResponseHeaderMock, writeYTimeRowsMock } = vi.hoisted(() => ({
+const { requireAuthMock, alcProxyFetchMock, sendToScraperRelayMock, readBodyMock, setResponseHeaderMock, writeYTimeRowsMock } = vi.hoisted(() => ({
   requireAuthMock: vi.fn(),
   alcProxyFetchMock: vi.fn(),
+  sendToScraperRelayMock: vi.fn(),
   readBodyMock: vi.fn(),
   setResponseHeaderMock: vi.fn(),
   writeYTimeRowsMock: vi.fn(),
 }))
 vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 vi.mock('../../server/utils/alc-proxy', () => ({ alcProxyFetch: alcProxyFetchMock }))
+// 行を取る util (`server/utils/y-time-rows.ts`) は本物を通す。肩代わりするのはその先の relay と上流だけ
+vi.mock('../../server/utils/scraper-relay', () => ({ sendToScraperRelay: sendToScraperRelayMock }))
 vi.mock('~/utils/y-time-xlsx', () => ({
   writeYTimeRows: writeYTimeRowsMock,
   buildFilename: (cd: string, from: string, to: string) => `y-time_${cd}_${from}_${to}.xlsx`,
@@ -58,7 +61,8 @@ const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { 
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin', tenant_id: 'tenant-a' })
+  sendToScraperRelayMock.mockReset()
   readBodyMock.mockReset()
   readBodyMock.mockResolvedValue({ ...BODY })
   alcProxyFetchMock.mockReset()
@@ -261,7 +265,7 @@ describe('POST /api/y-time-export — period_rewrite と件数ヘッダ (Refs #1
     expect(decodeURIComponent(String(headers['x-y-time-warnings'])).split(' / ')).toHaveLength(5)
   })
 
-  it('rows 0 でも件数ヘッダは 0 で載る (「運行 0 件」を画面が言い分ける材料)', async () => {
+  it('rows 0 でも件数ヘッダは 0 で載る (何の 0 件かを画面が言い分ける材料)', async () => {
     await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
     const headers = Object.fromEntries(setResponseHeaderMock.mock.calls.map(c => [c[1], c[2]]))
     expect(headers['x-y-time-rows']).toBe('0')
@@ -269,7 +273,7 @@ describe('POST /api/y-time-export — period_rewrite と件数ヘッダ (Refs #1
     expect(headers['x-y-time-warnings-count']).toBe('0')
   })
 
-  it('★ period_rewrite: true でも、付ける応答ヘッダは今までの 7 本だけで、本文は writeYTimeRows の bytes そのまま (時間の集計は載せない、Refs #1133 c1133-36)', async () => {
+  it('★ period_rewrite: true でも、付ける応答ヘッダは今までの 7 本と行の元だけで、本文は writeYTimeRows の bytes そのまま (時間の集計は載せない、Refs #1133 c1133-36)', async () => {
     readBodyMock.mockResolvedValue({ ...BODY, period_rewrite: true })
     writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: ['2026-07-05'] })
     alcProxyFetchMock.mockResolvedValue({
@@ -284,8 +288,117 @@ describe('POST /api/y-time-export — period_rewrite と件数ヘッダ (Refs #1
       'x-y-time-warnings-count',
       'x-y-time-missing-dates',
       'x-y-time-warnings',
+      // relay の binding が無い環境 = 運行の元へ倒した
+      'x-y-time-source',
+      'x-y-time-source-reason',
       'content-type',
       'content-disposition',
     ])
+  })
+})
+
+describe('POST /api/y-time-export — 行の元 (勤怠の勤務の記録、Refs #1133 c1133-46)', () => {
+  const REWRITE = { ...BODY, period_rewrite: true }
+  const SHIFTS = [{ start: '2026-07-01 08:00:00', end: '2026-07-01 17:00:00', non_working: [], note: null }]
+  const ROWS = [{ date: '2026-07-01' }, { date: '2026-07-02' }]
+  const relayEnv = () => okEnv({ DTAKO_R2: templateR2(), SCRAPER_RELAY: { fetch: vi.fn() } })
+  const headersSet = () => Object.fromEntries(setResponseHeaderMock.mock.calls.map(c => [c[1], c[2]])) as Record<string, string>
+  const upstreamPaths = () => alcProxyFetchMock.mock.calls.map(c => (c[1] as { path: string }).path)
+
+  function kintaiUpstream(excluded: { start: string, end: string, reason: string }[] = []) {
+    sendToScraperRelayMock.mockResolvedValue({ tenant_id: 'tenant-a', shifts: SHIFTS, missing_months: ['2026-08'] })
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', json: async () => ({ rows: ROWS, warnings: [], excluded }),
+    })
+  }
+
+  it('★ 勤怠の元: 上流の rows をそのまま writeYTimeRows に渡し、元・行を作れなかった勤務・記録の無い月をヘッダで返す', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    kintaiUpstream([
+      { start: '2026-07-03 08:00:00', end: '2026-07-03 17:00:00', reason: 'no_non_working' },
+      { start: '2026-07-04T08:00:00', end: '2026-07-04T17:00:00', reason: 'overlap' },
+    ])
+    const res = await call(eventWith(relayEnv()))
+    expect(res).toBe(XLSX_BYTES)
+    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-rows'])
+    expect(writeYTimeRowsMock.mock.calls[0]![1]).toBe(ROWS)
+    expect(headersSet()).toMatchObject({
+      'x-y-time-rows': '2',
+      'x-y-time-source': 'kintai',
+      'x-y-time-excluded-reasons': 'no_non_working=1,overlap=1',
+      'x-y-time-excluded': '2026-07-03:no_non_working,2026-07-04:overlap',
+      'x-y-time-missing-months': '2026-08',
+    })
+    expect(headersSet()).not.toHaveProperty('x-y-time-source-reason')
+  })
+
+  it('★ relay へ渡す tenant は requireAuth の結果。利用者の body に tenant_id を入れても使われない', async () => {
+    readBodyMock.mockResolvedValue({ ...REWRITE, tenant_id: 'tenant-b' })
+    kintaiUpstream()
+    await call(eventWith(relayEnv()))
+    expect(sendToScraperRelayMock).toHaveBeenCalledWith(
+      expect.anything(), { sharedSecret: 'secret' }, '/kintai-relay/y-time-shifts',
+      { driver_cd: '0001', from: '2026-07-01', to: '2026-07-31', tenant_id: 'tenant-a' },
+    )
+    // 認証は 1 回だけ (relay の定型の認証を重ねて呼ばない)
+    expect(requireAuthMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('★ 倒した 2 通り: 勤怠の記録が無い会社 (out_of_scope) / 勤怠の設定が無い (not_configured) は運行の GET で作る', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', json: async () => ({ rows: [{}], warnings: [] }),
+    })
+    sendToScraperRelayMock.mockRejectedValue(Object.assign(new Error('relay'), { statusCode: 403, data: { error: 'kintai_out_of_scope' } }))
+    await call(eventWith(relayEnv()))
+    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-export'])
+    expect(headersSet()).toMatchObject({ 'x-y-time-rows': '1', 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'out_of_scope' })
+
+    setResponseHeaderMock.mockClear()
+    sendToScraperRelayMock.mockRejectedValue(Object.assign(new Error('relay'), { statusCode: 503, data: { error: 'kintai-relay not configured', reason: 'kintai_comp_id_unset' } }))
+    await call(eventWith(relayEnv()))
+    expect(headersSet()).toMatchObject({ 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'not_configured' })
+    for (const name of ['x-y-time-excluded-reasons', 'x-y-time-excluded', 'x-y-time-missing-months']) {
+      expect(headersSet()).not.toHaveProperty(name)
+    }
+  })
+
+  it('★ 倒さない失敗は Excel を作らずに投げる (テンプレにも触らない)', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    sendToScraperRelayMock.mockRejectedValue(Object.assign(new Error('relay'), { statusCode: 502, data: { error: 'gcp kintai shift-days 2026-07: failed' } }))
+    const r2 = templateR2()
+    await expect(call(eventWith(okEnv({ DTAKO_R2: r2, SCRAPER_RELAY: { fetch: vi.fn() } })))).rejects.toMatchObject({
+      statusCode: 502, data: { source: 'kintai', stage: 'relay', status: 502 },
+    })
+    expect(alcProxyFetchMock).not.toHaveBeenCalled()
+    expect(r2.get).not.toHaveBeenCalled()
+    expect(writeYTimeRowsMock).not.toHaveBeenCalled()
+  })
+
+  it('★ period_rewrite の無い呼び出しは relay を呼ばず、認証結果に tenant が無くても今までどおり運行の元で作る', async () => {
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
+    await call(eventWith(relayEnv()))
+    expect(sendToScraperRelayMock).not.toHaveBeenCalled()
+    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-export'])
+    expect(headersSet()).toMatchObject({ 'x-y-time-source': 'alc' })
+    expect(headersSet()).not.toHaveProperty('x-y-time-source-reason')
+  })
+
+  it('period_rewrite: true で認証結果に tenant が無ければ 500 (relay も上流も呼ばない)', async () => {
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
+    readBodyMock.mockResolvedValue(REWRITE)
+    await expect(call(eventWith(relayEnv()))).rejects.toMatchObject({ statusCode: 500, data: { source: 'kintai', stage: 'auth' } })
+    expect(sendToScraperRelayMock).not.toHaveBeenCalled()
+    expect(alcProxyFetchMock).not.toHaveBeenCalled()
+  })
+
+  it('★ 行を作れなかった勤務が 20 件を超えるとき、一覧は 20 件・理由ごとの件数は全件', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    kintaiUpstream(Array.from({ length: 23 }, (_, i) => ({
+      start: `2026-07-${String(i + 1).padStart(2, '0')} 08:00:00`, end: 'e', reason: i < 21 ? 'no_non_working' : 'night_bands',
+    })))
+    await call(eventWith(relayEnv()))
+    expect(headersSet()['x-y-time-excluded']!.split(',')).toHaveLength(20)
+    expect(headersSet()['x-y-time-excluded-reasons']).toBe('no_non_working=21,night_bands=2')
   })
 })

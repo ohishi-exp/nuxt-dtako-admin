@@ -16,14 +16,23 @@
  * | status | 意味 | 根拠 |
  * | --- | --- | --- |
  * | `ok` | xlsx ができた | 2xx かつ `x-y-time-rows` > 0 |
- * | `empty` | その期間に運行が 0 件 (alc に取り込まれていない可能性) | 2xx かつ `x-y-time-rows` = 0 |
+ * | `empty` | 行が 0 件。**何の 0 件かは元で違う** ({@link litigationEmptyMessage}) | 2xx かつ `x-y-time-rows` = 0 |
  * | `not_found` | 乗務員CD が alc に登録されていない | 404 かつ本文の `data.upstream = 'alc'` |
  * | `error` | それ以外の失敗 (通信・認証・テンプレ不在・500 等) | — |
  *
  * **404 だけでは `not_found` にしない** — R2 にテンプレが無いときも 404 になる。
  * `data.upstream` は `server/api/y-time-export.post.ts` が上流由来のエラーにだけ付ける。
  * alc の dtako は 2024-04〜2025-12 が 0 件 (nuxt-dtako-admin-map skill「Y時間 エクスポート」)
- * なので、`empty` は「働いていない」ではなく「alc に材料が無い」と読ませる。
+ * なので、運行から作った `empty` は「働いていない」ではなく「alc に材料が無い」と読ませる。
+ *
+ * ## 行の元 (Refs #1133 c1133-46)
+ *
+ * Excel の行は、勤怠の勤務の記録 (wage report と同じ元) から作る。勤怠の記録が無い会社・勤怠の設定が
+ * 無い環境だけ、運行 (デジタコ) から作る。どちらで作ったか・行を作れなかった勤務・勤務の記録の無い月は
+ * サーバが応答ヘッダで返し ({@link yTimeSourceFromHeaders})、結果の 5 欄 (どれも optional) に持つ。
+ * **この欄の無い結果 (前に保存した版) は運行から作ったものとして読む**
+ * (`litigation-errors.ts` の `litigationResultFromKintai` が、元を決めるただ 1 つの場所)。
+ * 冊ごとに画面と紙面へ出す行は {@link litigationOutputSourceLines} が組む。
  *
  * ## 月ごとの時間の表 (Refs #1133 c1133-36)
  *
@@ -39,8 +48,18 @@ import { daysInMonth } from './timecard-view'
 import { LITIGATION_CASE_MAX_MONTHS } from './litigation-case-form'
 import { fmtTimecardCompareMinutes } from './timecard-compare-view'
 import { fmtJstDateTime } from './litigation-changes'
-import { litigationCheckedAtKey, litigationChunkMonths, litigationDriverMonthKey, sameLitigationDriverCd } from './litigation-errors'
+import {
+  LITIGATION_REFOLD_NOTICE,
+  litigationCheckedAtKey,
+  litigationChunkMonths,
+  litigationDriverMonthKey,
+  litigationExcludedReasonLabel,
+  litigationExcludedSummary,
+  litigationResultFromKintai,
+  sameLitigationDriverCd,
+} from './litigation-errors'
 import type { LitigationFetched } from './litigation-errors'
+import type { YTimeSource, YTimeSourceReason } from '~/types'
 
 /** 京都ソフト案件の Y時間 テンプレ (y-time-export.vue の既定と同じ R2 key) */
 export const LITIGATION_TEMPLATE_KEY = 'templates/kyoto-soft/base.xlsx'
@@ -62,9 +81,32 @@ export interface LitigationOutputChunk {
 
 export type LitigationOutputStatus = 'ok' | 'empty' | 'not_found' | 'error'
 
+/** 行を作れなかった勤務 1 本 (始業の日付と理由)。サーバが返すのは先頭だけ */
+export interface YTimeExcludedDay {
+  /** 始業の日付 `YYYY-MM-DD` */
+  date: string
+  reason: string
+}
+
+/**
+ * Y時間 の行の元 (応答ヘッダから読む 5 欄)。**サーバが元を返さなかった応答は全部の欄を持たない**
+ * (= 運行の元として読む)。元を返した応答は、件数が 0 でも下の 3 欄を空で持つ。
+ */
+export interface YTimeSourceInfo {
+  source?: YTimeSource
+  /** 勤怠の元を試して運行の元へ倒した理由 */
+  sourceReason?: YTimeSourceReason
+  /** 行を作れなかった勤務の、理由ごとの件数 (**全件ぶん**。合計はここから出す) */
+  excludedReasons?: Record<string, number>
+  /** 行を作れなかった勤務 (サーバがヘッダで返す先頭 20 件まで) */
+  excluded?: YTimeExcludedDay[]
+  /** 勤務の記録が 1 本も無い月 `YYYY-MM` */
+  missingMonths?: string[]
+}
+
 /** 区切り 1 つの結果 (エラータブ #c1133-5 が読む)。「ZIP を作る」のたびに、版の結果として relay に保存する
  * (`litigation-output-version.ts`、#c1133-34) */
-export interface LitigationOutputResult {
+export interface LitigationOutputResult extends YTimeSourceInfo {
   driverCd: string
   from: string
   to: string
@@ -88,7 +130,10 @@ export interface HeaderReader {
   get(name: string): string | null
 }
 
-export const LITIGATION_EMPTY_MESSAGE = 'この期間に運行が 0 件 (alc に取り込まれていない可能性)'
+/** 運行から作った冊の 0 件 */
+export const LITIGATION_EMPTY_ALC_MESSAGE = 'この期間に運行が 0 件 (alc に取り込まれていない可能性)'
+/** 勤怠の勤務の記録から作った冊の 0 件 (勤務そのものが無い) */
+export const LITIGATION_EMPTY_KINTAI_MESSAGE = 'この期間に勤務が 0 件'
 export const LITIGATION_NOT_FOUND_MESSAGE = 'この乗務員CD は alc に登録が無い'
 
 /**
@@ -144,6 +189,86 @@ function parseCount(raw: string | null): number | null {
   return Number(raw)
 }
 
+const SOURCES: readonly unknown[] = ['kintai', 'alc'] satisfies YTimeSource[]
+const SOURCE_REASONS: readonly unknown[] = ['out_of_scope', 'not_configured'] satisfies YTimeSourceReason[]
+
+/**
+ * 応答ヘッダから Y時間 の行の元を読む (書く側は `server/utils/y-time-rows.ts` の `yTimeSourceHeaders`)。
+ * 冊を引数に取らない — 訴訟準備の出力タブ以外 (Y時間 の単独のページ) も同じ読み方をするため。
+ * `x-y-time-source` が無い・知らない値の応答は何も返さない (元を言えない結果を、勤怠の元に見せない)。
+ */
+export function yTimeSourceFromHeaders(headers: HeaderReader): YTimeSourceInfo {
+  const source = headers.get('x-y-time-source')
+  if (!SOURCES.includes(source)) return {}
+  const info: YTimeSourceInfo = { source: source as YTimeSource, excludedReasons: {}, excluded: [], missingMonths: [] }
+  const reason = headers.get('x-y-time-source-reason')
+  if (SOURCE_REASONS.includes(reason)) info.sourceReason = reason as YTimeSourceReason
+  for (const part of (headers.get('x-y-time-excluded-reasons') ?? '').split(',')) {
+    const at = part.indexOf('=')
+    const n = parseCount(part.slice(at + 1))
+    if (at > 0 && n !== null) info.excludedReasons![part.slice(0, at)] = n
+  }
+  for (const part of (headers.get('x-y-time-excluded') ?? '').split(',')) {
+    const at = part.indexOf(':')
+    if (at > 0) info.excluded!.push({ date: part.slice(0, at), reason: part.slice(at + 1) })
+  }
+  info.missingMonths = (headers.get('x-y-time-missing-months') ?? '').split(',').filter(Boolean)
+  return info
+}
+
+/**
+ * 行が 0 件の冊に出す 1 文。**何の 0 件かを元で言い分ける** — 勤怠の元の 0 件を「運行が 0 件」と
+ * 言わない (運行を取り込んでも直らない)。行を作れなかった勤務が在るなら、勤務が無いとは言わない。
+ */
+export function litigationEmptyMessage(result: Pick<LitigationOutputResult, 'source' | 'excludedReasons'>): string {
+  if (!litigationResultFromKintai(result)) return LITIGATION_EMPTY_ALC_MESSAGE
+  const { total } = litigationExcludedSummary(result)
+  return total > 0 ? `行を作れた勤務が 0 件 (行を作れなかった勤務 ${total} 件)` : LITIGATION_EMPTY_KINTAI_MESSAGE
+}
+
+/** 冊ごとに、結果の文の下へ出す 1 行。`kind` で見た目を分ける (`refold` は目立たせる) */
+export interface LitigationOutputSourceLine {
+  kind: 'source' | 'excluded' | 'refold' | 'missingMonths'
+  text: string
+}
+
+const SOURCE_LINE_KINTAI = '勤怠の記録から作成'
+const SOURCE_LINE_ALC = '運行から作成'
+const SOURCE_REASON_TEXT: Record<YTimeSourceReason, string> = {
+  out_of_scope: 'この会社は勤怠の記録が無い',
+  not_configured: 'この環境は勤怠の設定が無い',
+}
+
+/**
+ * 冊ごとの表示 (どの元で作ったか・行を作れなかった勤務・畳み直しの案内・勤務の記録の無い月) を組む。
+ * 出力タブの表と紙面の両方がこれを使う。**行を作れなかった勤務を黙って落とさない** — 件数と理由を必ず言う。
+ * 失敗・未登録の冊は何も作っていないので、元を言わない (空)。
+ */
+export function litigationOutputSourceLines(result: LitigationOutputResult): LitigationOutputSourceLine[] {
+  if (result.status === 'error' || result.status === 'not_found') return []
+  const lines: LitigationOutputSourceLine[] = []
+  if (litigationResultFromKintai(result)) lines.push({ kind: 'source', text: SOURCE_LINE_KINTAI })
+  else if (result.sourceReason) lines.push({ kind: 'source', text: `${SOURCE_LINE_ALC} (${SOURCE_REASON_TEXT[result.sourceReason]})` })
+  else lines.push({ kind: 'source', text: SOURCE_LINE_ALC })
+  const excluded = litigationExcludedSummary(result)
+  if (excluded.total > 0) {
+    const listed = result.excluded ?? []
+    const days = listed.map(e => `${e.date} (${litigationExcludedReasonLabel(e.reason)})`).join(', ')
+    const more = excluded.total > listed.length ? ' ほか' : ''
+    lines.push({
+      kind: 'excluded',
+      text: `行を作れなかった勤務 ${excluded.total} 件 (${excluded.reasonsText}) — 始業の日付: ${days}${more}`,
+    })
+  }
+  if (excluded.refold > 0) {
+    lines.push({ kind: 'refold', text: `${LITIGATION_REFOLD_NOTICE} (まだ畳み直していない勤務 ${excluded.refold} 件)` })
+  }
+  if (result.missingMonths && result.missingMonths.length > 0) {
+    lines.push({ kind: 'missingMonths', text: `勤務の記録が無い月: ${result.missingMonths.join(', ')}` })
+  }
+  return lines
+}
+
 /**
  * 2xx の応答ヘッダから結果を作る。`x-y-time-rows` が 0 なら `empty`。
  * **件数ヘッダが読めないときは `ok` のまま rows を null にし、0 件かどうか判定できないと
@@ -158,9 +283,10 @@ export function litigationResultFromHeaders(
   const rawWarnings = headers.get('x-y-time-warnings')
   const warnings = rawWarnings ? decodeURIComponent(rawWarnings).split(' / ') : []
   const status: LitigationOutputStatus = rows === 0 ? 'empty' : 'ok'
+  const source = yTimeSourceFromHeaders(headers)
   let message: string
   if (rows === null) message = '行数が返らなかった (0 件かどうか判定できない)'
-  else if (rows === 0) message = LITIGATION_EMPTY_MESSAGE
+  else if (rows === 0) message = litigationEmptyMessage(source)
   else message = `${rows} 行`
   return {
     driverCd: chunk.driverCd,
@@ -173,6 +299,7 @@ export function litigationResultFromHeaders(
     warnings,
     warningsCount: parseCount(headers.get('x-y-time-warnings-count')) ?? warnings.length,
     message,
+    ...source,
   }
 }
 
@@ -221,7 +348,7 @@ export function countLitigationResults(
  * | --- | --- |
  * | `included` | 入る (作った / 作れる) |
  * | `pending` | まだ作っていない — 「ZIP を作る」で Y時間 Excel を作る |
- * | `excluded` | 入らない (0 件・未登録・失敗。理由は `detail`) |
+ * | `excluded` | 入らない (行が 0 件・未登録・失敗。理由は `detail`) |
  */
 export interface LitigationZipSummaryItem {
   filename: string

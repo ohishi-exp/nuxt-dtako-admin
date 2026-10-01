@@ -1206,6 +1206,13 @@ branches = true
 path = "server/utils/scraper-relay.ts"
 branches = true
 
+# Y時間 の Excel に書く行を取ってくる util (Refs #1133 c1133-46)。勤怠の勤務の記録から作る経路
+# (relay → 応答の tenant の照合 → 上流の POST) と、運行の経路へ倒す 3 つの形・倒さない失敗の
+# 投げ方・行の元の応答ヘッダを持つ。1 社固定の認可がここに在るので gate に載せる。
+[[files]]
+path = "server/utils/y-time-rows.ts"
+branches = true
+
 # 設定未確認車輛の抽出 (`GET /api/vehicle-settings/unconfirmed`)。
 # **上流 (`/alc-proxy`) が未ログインを 401 にする B 段だったが、それを待つ間に
 # R2 listing が走ってしまう**ので A 段に上げた口 (詳細はファイル冒頭の JSDoc)。

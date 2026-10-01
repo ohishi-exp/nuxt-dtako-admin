@@ -559,12 +559,12 @@ describe('案件を開いたとき: 最新の版の結果を戻す', () => {
     ]
     const w = await mountPage()
     await openCase(w, CASE_A.name)
-    expect(statuses(w)).toEqual(['作成', '運行 0 件'])
+    expect(statuses(w)).toEqual(['作成', '0 件'])
     expect(outputTable(w).text()).toContain('99 行')
     expect(outputTable(w).text()).toContain('テンプレに行が無く書けなかった日 1 日')
     expect(w.find('[data-testid="litigation-output-restored"]').text()).toContain('2026-09-29 01:30 に出力して保存した結果を表示しています')
     expect(w.find('[data-testid="litigation-output-progress"]').text()).toContain('2 / 2 冊')
-    expect(w.find('[data-testid="litigation-output-progress"]').text()).toContain('作成 1 / 運行 0 件 1')
+    expect(w.find('[data-testid="litigation-output-progress"]').text()).toContain('作成 1 / 0 件 1')
     const summary = w.find('[data-testid="litigation-zip-summary"]')
     expect(summary.find(`[data-zip-file="${A_BOOK_1}"]`).text()).toContain('入る')
     expect(summary.find(`[data-zip-file="${A_BOOK_2}"]`).text()).toContain('入らない')
@@ -811,6 +811,122 @@ describe('版の一覧', () => {
     expect(error).toContain('保存した結果を読めませんでした')
     expect(error).toContain('出力の版が見つかりません')
     expect(outputTable(w).text()).toContain('99 行')
+    w.unmount()
+  })
+})
+
+describe('行の元 (勤怠の勤務の記録 / 運行、Refs #1133 c1133-46)', () => {
+  const lines = (w: VueWrapper, i: number) => outputTable(w).findAll('tbody tr')[i]!.findAll('[data-output-line]').map(d => `${d.attributes('data-output-line')}: ${d.text()}`)
+  const resultCell = (w: VueWrapper, i: number) => outputTable(w).findAll('tbody tr')[i]!.findAll('td')[4]!.text()
+  const errorCell = (w: VueWrapper, row: string, check: string) => w.find(`tr[data-row="${row}"] td[data-check="${check}"]`).text()
+  const importButtons = (w: VueWrapper) => w.findAll('[data-testid="litigation-import"]')
+
+  async function run(w: VueWrapper) {
+    await openCase(w, CASE_A.name)
+    await buttonByText(w, 'ZIP を作る').trigger('click')
+    await settle()
+  }
+
+  it('★ 勤怠の元: 元・行を作れなかった勤務 (理由ごとの件数)・畳み直しの案内・記録の無い月が表と紙面に出る。0 件の冊は「運行」と言わない', async () => {
+    exportHandler = body => body.from === '2024-01-01'
+      ? new Response('xlsx', {
+          status: 200,
+          headers: {
+            'x-y-time-rows': '5',
+            'x-y-time-source': 'kintai',
+            'x-y-time-excluded-reasons': 'no_non_working=2,overlap=1',
+            'x-y-time-excluded': '2024-03-04:no_non_working,2024-03-05:no_non_working,2024-06-01:overlap',
+            'x-y-time-missing-months': '2024-08,2024-09',
+          },
+        })
+      : new Response('xlsx', { status: 200, headers: { 'x-y-time-rows': '0', 'x-y-time-source': 'kintai' } })
+    const w = await mountPage()
+    await run(w)
+    expect(statuses(w)).toEqual(['作成', '0 件'])
+    expect(lines(w, 0)).toEqual([
+      'source: 勤怠の記録から作成',
+      'excluded: 行を作れなかった勤務 3 件 (まだ畳み直していない 2 件・別の勤務と時間が重なる 1 件) — 始業の日付: 2024-03-04 (まだ畳み直していない), 2024-03-05 (まだ畳み直していない), 2024-06-01 (別の勤務と時間が重なる)',
+      'refold: 勤怠の畳み直しが要ります (まだ畳み直していない勤務 2 件)',
+      'missingMonths: 勤務の記録が無い月: 2024-08, 2024-09',
+    ])
+    expect(resultCell(w, 1)).toContain('この期間に勤務が 0 件')
+    expect(lines(w, 1)).toEqual(['source: 勤怠の記録から作成'])
+    expect(outputTable(w).text()).not.toContain('運行')
+    expect(w.find('[data-testid="litigation-output-progress"]').text()).toContain('作成 1 / 0 件 1')
+    // 0 件の冊は ZIP に入らず、理由は勤務の語で出る
+    expect(w.find(`[data-zip-file="${A_BOOK_2}"]`).text()).toContain('入らない: この期間に勤務が 0 件')
+    const sheet = w.find('[data-testid="litigation-print-output"]').text()
+    expect(sheet).toContain('5 行 / 勤怠の記録から作成 / 行を作れなかった勤務 3 件')
+    expect(sheet).toContain('勤怠の畳み直しが要ります (まだ畳み直していない勤務 2 件) / 勤務の記録が無い月: 2024-08, 2024-09')
+    expect(sheet).toContain('この期間に勤務が 0 件 / 勤怠の記録から作成')
+
+    // エラータブ: 勤怠の元の 0 件では「alc の運行」を異常ありにせず、運行の取り込みのボタンを出さない
+    await buttonByText(w, 'エラー').trigger('click')
+    await settle()
+    expect(errorCell(w, '1001|2025-01', 'alcOps')).toContain('未実行')
+    expect(errorCell(w, '1001|2025-01', 'yTime')).toContain('書けなかった日なし (この冊は勤務 0 件)')
+    expect(importButtons(w)).toHaveLength(0)
+    // 行を作れなかった勤務の在る冊は「Y時間の欠け」が異常あり
+    expect(errorCell(w, '1001|2024-02', 'yTime')).toContain('異常あり')
+    expect(errorCell(w, '1001|2024-02', 'yTime')).toContain('この冊で行を作れなかった勤務 3 件 (出力タブの結果): まだ畳み直していない 2 件・別の勤務と時間が重なる 1 件 — 勤怠の畳み直しが要ります')
+    w.unmount()
+  })
+
+  it('★ 運行の元へ倒した 2 通り: 理由つきで「運行から作成」と出て、0 件の冊は今までどおり運行の文と取り込みのボタン', async () => {
+    exportHandler = body => body.from === '2024-01-01'
+      ? new Response('xlsx', { status: 200, headers: { 'x-y-time-rows': '5', 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'out_of_scope' } })
+      : new Response('xlsx', { status: 200, headers: { 'x-y-time-rows': '0', 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'not_configured' } })
+    const w = await mountPage()
+    await run(w)
+    expect(lines(w, 0)).toEqual(['source: 運行から作成 (この会社は勤怠の記録が無い)'])
+    expect(lines(w, 1)).toEqual(['source: 運行から作成 (この環境は勤怠の設定が無い)'])
+    expect(resultCell(w, 1)).toContain('この期間に運行が 0 件 (alc に取り込まれていない可能性)')
+    await buttonByText(w, 'エラー').trigger('click')
+    await settle()
+    expect(errorCell(w, '1001|2025-01', 'alcOps')).toContain('この冊の期間の運行が 0 件 (出力タブの結果)')
+    expect(importButtons(w)).toHaveLength(1)
+    w.unmount()
+  })
+
+  it('★ 倒さない失敗は「失敗」と理由の 1 文で出る (元の行は出さず、alc に未登録とも言わない)', async () => {
+    exportHandler = () => Response.json({
+      error: true,
+      statusCode: 502,
+      statusMessage: 'kintai y-time rows failed (relay)',
+      message: '勤怠の勤務の記録を読めませんでした (relay 502: gcp kintai shift-days 2024-03: failed)',
+      data: { source: 'kintai', stage: 'relay', status: 502, error: 'gcp kintai shift-days 2024-03: failed' },
+    }, { status: 502 })
+    const w = await mountPage()
+    await run(w)
+    expect(statuses(w)).toEqual(['失敗', '失敗'])
+    expect(resultCell(w, 0)).toContain('502 勤怠の勤務の記録を読めませんでした (relay 502: gcp kintai shift-days 2024-03: failed)')
+    expect(lines(w, 0)).toEqual([])
+    w.unmount()
+  })
+
+  it('★ 行の元の欄の無い旧い版を開いても壊れず、運行から作ったものとして出る', async () => {
+    versions['case-a'] = [storedVersion('ver-1', '2026-09-20T01:00:00.000Z', snapshotForA(11))]
+    const w = await mountPage()
+    await openCase(w, CASE_A.name)
+    expect(statuses(w)).toEqual(['作成', '0 件'])
+    expect(lines(w, 0)).toEqual(['source: 運行から作成'])
+    expect(lines(w, 1)).toEqual(['source: 運行から作成'])
+    expect(resultCell(w, 1)).toContain('この期間に運行が 0 件 (alc に取り込まれていない可能性)')
+    expect(w.find('[data-testid="litigation-print-output"]').text()).toContain('11 行 / 運行から作成')
+    w.unmount()
+  })
+
+  it('★ 行の元の欄つきで保存した版は、開き直しても同じ行が戻る', async () => {
+    const snapshot = snapshotForA(11) as { results: Record<string, unknown>[] }
+    snapshot.results[0] = { ...snapshot.results[0], source: 'kintai', excludedReasons: { no_non_working: 1 }, excluded: [{ date: '2024-03-04', reason: 'no_non_working' }], missingMonths: [] }
+    versions['case-a'] = [storedVersion('ver-1', '2026-09-20T01:00:00.000Z', snapshot)]
+    const w = await mountPage()
+    await openCase(w, CASE_A.name)
+    expect(lines(w, 0)).toEqual([
+      'source: 勤怠の記録から作成',
+      'excluded: 行を作れなかった勤務 1 件 (まだ畳み直していない 1 件) — 始業の日付: 2024-03-04 (まだ畳み直していない)',
+      'refold: 勤怠の畳み直しが要ります (まだ畳み直していない勤務 1 件)',
+    ])
     w.unmount()
   })
 })

@@ -428,7 +428,7 @@ relay の機械用の口 `POST /kintai-relay/y-time-shifts` — body `{driver_cd
 `{tenant_id, shifts: [{start, end, non_working, note: null}], missing_months}`。勤怠の
 `GET /api/kintai/shift-days` (乗務員 1 人・1 か月) を **`from` の月の前月 〜 `to` の月ぶん並列**で読んで束ねる。
 **読んで渡すだけ** — 行の規則・休憩の配り方・時間の計算は上流 (`POST /api/dtako/y-time-rows`) が持つ。
-この PR の時点で呼び手は居ない (front の route が呼ぶのは次の PR)。
+呼び手は front の `server/utils/y-time-rows.ts` (下の節)。
 
 - 置き場: 判定は全部 100% gate の内 — `src/kintai-relay.ts` (`judgeKintaiGate` / `judgeYTimeShiftsRequest` /
   `bundleYTimeShifts` / `relayKintaiYTimeShifts`) と `src/gcp-day-summaries.ts` (`parseGcpShiftDays`)。
@@ -447,6 +447,43 @@ relay の機械用の口 `POST /kintai-relay/y-time-shifts` — body `{driver_cd
   「行を作れなかった勤務」に数えないように)。`missing_months` は `from`〜`to` の月だけを見る
 - 手元の確認: relay を `wrangler dev --local` で起こし、`AUTH_WORKER` を `/ichibanboshi-proxy/api/kintai/shift-days`
   を返すスタブの worker へ向けて curl する (`dev-login-local-verify` の relay の行)
+
+### 訴訟準備の Y時間 の Excel は勤怠の勤務の記録から作る (Refs #1133 c1133-46)
+
+`POST /api/y-time-export` の行の元は 2 つ。**どちらで作るか・倒し方・1 社固定の認可・失敗の形は
+`server/utils/y-time-rows.ts` の `fetchYTimeRows` が持つ** (route は呼んで Excel に書くだけ)。
+
+| 元 | 経路 | いつ |
+|---|---|---|
+| `kintai` | relay `POST /kintai-relay/y-time-shifts` → 上流 `POST /api/dtako/y-time-rows` | `period_rewrite: true` (訴訟準備の出力) |
+| `alc` | 上流 `GET /api/dtako/y-time-export` (運行 = デジタコ) | `period_rewrite` の無い呼び出し (`/y-time-export` ページ)、と下の 3 つの形 |
+
+- **行の規則・休憩の配り方・時間の計算をこの repo に書かない。** relay の `shifts` をそのまま上流へ、
+  上流の `rows` をそのまま `writeYTimeRows` へ (wage report と同じ元。2 つ目の計算を置かない)
+- **運行の経路へ倒すのは 3 つの形だけ**: `SCRAPER_RELAY` の binding が無い (手元の dev。**relay を呼ぶ前に見る**) /
+  relay 503 + `reason: kintai_comp_id_unset` (どちらも `not_configured`) / relay 403 + `error: kintai_out_of_scope`
+  (`out_of_scope`)。**それ以外の失敗は倒さず投げる** (読めなかったことを運行の元にすり替えない)
+- **1 社固定の認可**: relay へ渡す `tenant_id` は `requireAuth` の結果 (利用者の body からは取らない)。
+  **relay の応答の `tenant_id` が認証結果と一致してから**上流へ渡す (違えば 500・上流を呼ばない)。
+  認証結果に `tenant_id` が無ければ relay も呼ばず 500 (勤怠を試す呼び出しだけ)
+- 勤怠の経路の失敗は `data: {source: 'kintai', stage, status, error, reason}` で、**`upstream: 'alc'` を付けない**
+  (画面は 404 + `upstream: 'alc'` を「乗務員CD が alc に未登録」と読む)。画面に出す 1 文は `message`、
+  `statusMessage` は ASCII。利用者へ返す status は、上流の 401 / 403 と 5xx だけそのまま、relay の 4xx と
+  上流のほかの 4xx は 502 (利用者が送った内容の話ではないため)
+- 応答ヘッダ (`yTimeSourceHeaders`。値は ASCII の決まった語だけ): `x-y-time-source` /
+  `-source-reason` / `-excluded-reasons` (`reason=件数`、全件) / `-excluded` (先頭 20 件の `始業の日付:reason`) /
+  `-missing-months`。読む側は `app/utils/litigation-output.ts` の `yTimeSourceFromHeaders` (冊を引数に取らない)
+- 画面: 結果の 5 欄 (`source` / `sourceReason` / `excludedReasons` / `excluded` / `missingMonths`) は**どれも optional**。
+  **欄の無い結果 (前に保存した版) は運行から作ったものとして読む** — 元を決めるのは
+  `litigation-errors.ts` の `litigationResultFromKintai` 1 か所。行が 0 件の文は `litigationEmptyMessage`、
+  冊ごとの表示 (元・行を作れなかった勤務・「勤怠の畳み直しが要ります」・勤務の記録が無い月) は
+  `litigationOutputSourceLines` (出力タブの表と紙面が共用)。版の形の番号は上げていない
+- エラータブ: 出力タブの結果からの早回り (検知の前に「alc の運行」を異常ありにして取り込みのボタンを出す) は
+  **運行の元のときだけ**。勤怠の元の 0 件は未実行のまま。行を作れなかった勤務が在る冊は「Y時間の欠け」が異常あり
+- **検知の列 (「検知を実行」= 運行の経路のプレビュー) と `/y-time-export` ページはまだ運行の元** — 出力タブ (勤怠の元) と
+  物差しが違う。そろえるのは次の作業 (同じ util を使う)
+- 手元の確認: front の dev は `SCRAPER_RELAY` の binding が無いので必ず `not_configured` に倒れる。勤怠の元を見るには、
+  relay と上流を肩代わりするスタブの worker を別 port で立てて service binding で向ける (`dev-login-local-verify`)
 
 ## NET780 ビューア (`/net780` ページ)
 

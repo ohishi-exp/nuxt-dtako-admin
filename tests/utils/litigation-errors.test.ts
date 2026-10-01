@@ -120,8 +120,17 @@ describe('alcOpsCell (alc の運行)', () => {
     expect(alcOpsCell(entry, null)).toEqual({ state: 'unknown', message: '乗務員CD が alc に未登録 (404) — 運行を数えられない' })
   })
 
-  it('月単位を読む前でも、出力タブで冊ごと 0 件なら異常あり', () => {
-    expect(alcOpsCell(undefined, result({ status: 'empty', rows: 0 }))).toEqual({ state: 'ng', message: 'この冊の期間の運行が 0 件 (出力タブの結果)' })
+  it('月単位を読む前でも、運行から作った出力タブの結果が冊ごと 0 件なら異常あり (元の欄の無い旧い結果も運行の元)', () => {
+    const ng = { state: 'ng', message: 'この冊の期間の運行が 0 件 (出力タブの結果)' }
+    expect(alcOpsCell(undefined, result({ status: 'empty', rows: 0 }))).toEqual(ng)
+    expect(alcOpsCell(undefined, result({ status: 'empty', rows: 0, source: 'alc', sourceReason: 'out_of_scope' }))).toEqual(ng)
+    expect(alcOpsCell(undefined, result({ status: 'empty', rows: 0, source: 'alc', sourceReason: 'not_configured' }))).toEqual(ng)
+  })
+
+  it('★ 勤怠の元の 0 件 (勤務が無い・全部の勤務で行を作れなかった) は運行が無いことを意味しない — 未実行のまま', () => {
+    const pending = { state: 'pending', message: '未実行 — 「検知を実行」で調べます' }
+    expect(alcOpsCell(undefined, result({ status: 'empty', rows: 0, source: 'kintai', excludedReasons: {} }))).toEqual(pending)
+    expect(alcOpsCell(undefined, result({ status: 'empty', rows: 0, source: 'kintai', excludedReasons: { no_non_working: 4 } }))).toEqual(pending)
   })
 
   it('何も読んでいなければ未実行 (出力タブが ok でも月単位は分からない)', () => {
@@ -215,8 +224,37 @@ describe('yTimeCell (Y時間の欠け)', () => {
     })
   })
 
-  it('運行 0 件の冊は欠けなしだが、alc の運行の列を見るよう添える', () => {
+  it('運行から作った 0 件の冊は欠けなしだが、alc の運行の列を見るよう添える', () => {
     expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0 })).message).toContain('「alc の運行」の列を見てください')
+    expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0, source: 'alc', sourceReason: 'out_of_scope' })))
+      .toEqual({ state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「alc の運行」の列を見てください)' })
+  })
+
+  it('★ 勤怠の元で除外が 0 の 0 件の冊は「勤務 0 件」と言い、alc の運行の列へ案内しない', () => {
+    expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0, source: 'kintai', excludedReasons: {} })))
+      .toEqual({ state: 'ok', message: '書けなかった日なし (この冊は勤務 0 件)' })
+  })
+
+  it('★ 行を作れなかった勤務が 1 件でも在れば異常あり (件数は冊単位・理由ごと)。まだ畳み直していない勤務が在れば畳み直しを案内する', () => {
+    expect(yTimeCell('2025-01', result({ source: 'kintai', excludedReasons: { no_non_working: 2, overlap: 1 } }))).toEqual({
+      state: 'ng',
+      message: 'この冊で行を作れなかった勤務 3 件 (出力タブの結果): まだ畳み直していない 2 件・別の勤務と時間が重なる 1 件 — 勤怠の畳み直しが要ります',
+    })
+    expect(yTimeCell('2025-01', result({ source: 'kintai', excludedReasons: { three_days: 1 } }))).toEqual({
+      state: 'ng',
+      message: 'この冊で行を作れなかった勤務 1 件 (出力タブの結果): 3 暦日以上にまたがる 1 件',
+    })
+    // 行が 0 件の冊でも同じ (「書けなかった日なし」にしない)
+    expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0, source: 'kintai', excludedReasons: { no_non_working: 1 } })).state).toBe('ng')
+    // プレビューが異常なしでも、出力タブ側の異常を出す
+    expect(yTimeCell('2025-01', result({ source: 'kintai', excludedReasons: { overlap: 1 } }), { ok: true, days: 20, dropped: [] }).state).toBe('ng')
+  })
+
+  it('判定の順は今までどおり: 失敗 → 未登録 → 書けなかった日 → 判定できない、のあとに行を作れなかった勤務', () => {
+    const excluded = { source: 'kintai' as const, excludedReasons: { overlap: 1 } }
+    expect(yTimeCell('2025-01', result({ ...excluded, status: 'error', message: '500 …' }))).toEqual({ state: 'unknown', message: '500 …' })
+    expect(yTimeCell('2025-01', result({ ...excluded, missingDates: ['2025-01-05'], missingCount: 1 })).message).toBe('テンプレに行が無く書けなかった日: 2025-01-05')
+    expect(yTimeCell('2025-03', result({ ...excluded, missingDates: ['2025-01-05'], missingCount: 31 })).state).toBe('unknown')
   })
 })
 
@@ -332,6 +370,27 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     expect(counts.invariants.pending).toBe(4)
     expect(rows.some(litigationRowNeedsAttention)).toBe(false)
     expect(rows.every(r => !r.canImport)).toBe(true)
+  })
+
+  it('★ 検知の前: 勤怠の元の出力が 0 件の冊では運行の取り込みのボタンを出さない。運行の元 (と元の欄の無い旧い結果) は今までどおり出す', () => {
+    const empty = { status: 'empty' as const, rows: 0 }
+    const rows = buildLitigationErrorRows(input({
+      results: [
+        result({ ...empty, source: 'kintai', excludedReasons: { no_non_working: 2 }, message: '行を作れた勤務が 0 件 (行を作れなかった勤務 2 件)' }),
+        result({ ...empty, driverCd: '2000' }),
+      ],
+    }))
+    const at = (d: string, m: string) => rows.find(r => r.driverCd === d && r.month === m)!
+    for (const m of ['2025-01', '2025-02']) {
+      expect(at('1078', m).cells.alcOps.state).toBe('pending')
+      expect(at('1078', m).canImport).toBe(false)
+      // 行を作れなかった勤務は「Y時間の欠け」の列に異常ありで出る
+      expect(at('1078', m).cells.yTime.state).toBe('ng')
+      expect(at('2000', m).cells.alcOps).toEqual({ state: 'ng', message: 'この冊の期間の運行が 0 件 (出力タブの結果)' })
+      expect(at('2000', m).canImport).toBe(true)
+    }
+    const alc = buildLitigationErrorRows(input({ results: [result({ ...empty, source: 'alc', sourceReason: 'not_configured' }), null] }))
+    expect(alc.find(r => r.driverCd === '1078')!.canImport).toBe(true)
   })
 
   it('乗務員 × 月の素材を正しい行に配り、alc 0 件の行だけ取り込みボタンを出す', () => {

@@ -2,8 +2,10 @@
  * Y時間 Excel 追記エクスポート (Cloudflare Worker 上で実行される Nitro server route)。
  *
  * 1. body から `{ driver_cd, from, to, template_key }` を受け取る
- * 2. backend (rust-alc-api) `/api/dtako/y-time-export` を auth-worker `/alc-proxy`
- *    経由で叩いて JSON 取得 (OIDC mint は auth-worker、Cloud Run IAM lockdown 対応)
+ * 2. Y時間 の行を取る (`server/utils/y-time-rows.ts` の `fetchYTimeRows`)。元は 2 つ:
+ *    運行 (rust-alc-api `/api/dtako/y-time-export` を auth-worker `/alc-proxy` 経由で GET) と、
+ *    勤怠の勤務の記録 (下の「行の元」)。**どちらの元か・倒し方・1 社固定の認可・失敗の形は
+ *    util が持つ** — ここには書かない
  * 3. R2 binding (`env.DTAKO_R2`) でテンプレ xlsx を fetch
  * 4. ExcelJS で Y時間 シートに書き込み
  * 5. xlsx binary を octet-stream で return
@@ -49,14 +51,25 @@
  *
  * `x-y-time-missing-dates` は先頭 30 件、`x-y-time-warnings` は先頭 5 件で切るので、
  * **切った後の件数だけ見ると「全部で何件か」が読めない**。本当の件数を別に載せる。
- * `x-y-time-rows` は上流が返した行数で、**0 = その期間に運行が 0 件**
- * (404 = 乗務員CD が alc に無い、とは別物) を画面が言い分けるのに使う。
+ * `x-y-time-rows` は上流が返した行数 (元に関わらず)。**0 が何の 0 件かは元で違う** —
+ * 運行の元なら「その期間に運行が無い」、勤怠の元なら「行を作れた勤務が無い」
+ * (`x-y-time-source` と `-excluded-reasons` を合わせて画面が言い分ける。
+ * 404 = 乗務員CD が alc に無い、とは別物)。
+ *
+ * ## 行の元 (`x-y-time-source` ほか、Refs #1133 c1133-46)
+ *
+ * `period_rewrite: true` (訴訟準備の出力) のときだけ、勤怠の勤務の記録 (wage report と同じ元) から
+ * 行を作る。`period_rewrite` の無い呼び出し (`/y-time-export` ページ) は運行の元のまま
+ * (プレビューと一緒に切り替えるまで、同じページで Excel とプレビューの元を食い違わせない)。
+ * どの元で作ったかと、行を作れなかった勤務・勤務の記録の無い月は応答ヘッダで返す
+ * (`yTimeSourceHeaders`。値は ASCII の決まった語だけ)。
  *
  * ## 上流の 404 だけ `data.upstream = 'alc'` を付ける
  *
- * 404 は 2 か所から出る: 上流 (`driver_cd not found`、alc の NotFound はこれだけ) と、
+ * 404 は 2 か所から出る: 運行の経路の上流 (`driver_cd not found`、alc の NotFound はこれだけ) と、
  * R2 にテンプレが無いとき。**画面が「乗務員CD が alc に未登録」と言ってよいのは前者だけ**
  * なので、上流由来のエラーに印を付けて区別させる (本文の文言で当てない)。
+ * 印を付けるのは util の運行の経路だけで、勤怠の経路の失敗には付かない。
  */
 
 import {
@@ -67,10 +80,9 @@ import {
 } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
 import { assertAllowedRole } from '../utils/require-role'
-import type { YTimeExportResponse } from '~/types'
 import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
-import { alcProxyFetch } from '../utils/alc-proxy'
 import { cfEnv, resolveSecret } from '../utils/cf-env'
+import { fetchYTimeRows, yTimeSourceHeaders } from '../utils/y-time-rows'
 
 interface RequestBody {
   driver_cd: string
@@ -122,22 +134,13 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // 1. backend JSON 取得 — #434 step 3 (方式 B): rust-alc-api を直叩きせず
-  //    auth-worker `/alc-proxy` に委譲する。introspect / ACL / OIDC mint /
-  //    identity 注入は auth-worker 側で行われ、Cloud Run IAM lockdown 後も通る。
-  const apiRes = await alcProxyFetch(event, {
-    path: '/api/dtako/y-time-export',
-    query: { driver_cd: body.driver_cd, from: body.from, to: body.to },
-  })
-  if (!apiRes.ok) {
-    const text = await apiRes.text().catch(() => '')
-    throw createError({
-      statusCode: apiRes.status,
-      statusMessage: `backend error: ${text || apiRes.statusText}`,
-      data: { upstream: 'alc' },
-    })
-  }
-  const data = (await apiRes.json()) as YTimeExportResponse
+  // 1. Y時間 の行。勤怠の元を試すのは訴訟準備の出力 (`period_rewrite: true`) だけ。
+  //    relay へ渡す tenant は認証結果の値 (利用者の body からは取らない)。
+  const data = await fetchYTimeRows(
+    event,
+    { driverCd: body.driver_cd, from: body.from, to: body.to },
+    { tryKintai: body.period_rewrite === true, tenantId: auth.tenant_id, sharedSecret },
+  )
 
   // 2. R2 binding でテンプレ取得
   const r2 = env.DTAKO_R2
@@ -183,6 +186,7 @@ export default defineEventHandler(async (event) => {
       encodeURIComponent(data.warnings.slice(0, 5).join(' / ')),
     )
   }
+  for (const [name, value] of Object.entries(yTimeSourceHeaders(data))) setResponseHeader(event, name, value)
 
   // 4. response
   setResponseHeader(

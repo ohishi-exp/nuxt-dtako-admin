@@ -32,6 +32,7 @@ import {
   buildLitigationZipSummary,
   countLitigationResults,
   litigationResultFromFailure,
+  litigationOutputSourceLines,
   litigationResultFromHeaders,
   litigationZipFilename,
   LITIGATION_TEMPLATE_KEY,
@@ -578,7 +579,7 @@ async function runOutputChunk(chunk: LitigationOutputChunk): Promise<{ result: L
       return { result: litigationResultFromFailure(chunk, res.status, body, reason) }
     }
     const result = litigationResultFromHeaders(chunk, res.headers)
-    // 運行 0 件の冊は ZIP に入れない (空の Excel を「働いていない」と読ませない)
+    // 行が 0 件の冊は ZIP に入れない (空の Excel を「働いていない」と読ませない)
     const bytes = result.status === 'ok' ? await res.arrayBuffer() : undefined
     return { result, bytes }
   }
@@ -1669,10 +1670,11 @@ function printCase() {
   nextTick(() => window.print())
 }
 
-/** 状態の短い名前。**0 件・未登録・失敗を同じ見た目にしない** (map skill「PR の基準」(7)) */
+/** 状態の短い名前。**0 件・未登録・失敗を同じ見た目にしない** (map skill「PR の基準」(7))。
+ * `empty` は元 (勤怠 / 運行) を言わない語にする — 何の 0 件かは冊ごとの結果の文が言う */
 const OUTPUT_STATUS_LABEL: Record<LitigationOutputStatus, string> = {
   ok: '作成',
-  empty: '運行 0 件',
+  empty: '0 件',
   not_found: 'alc に未登録',
   error: '失敗',
 }
@@ -1928,7 +1930,8 @@ function fmtDateTime(iso: string): string {
           <p class="text-sm text-gray-600 dark:text-gray-400">
             案件の乗務員 × 期間ぶんの Y時間 Excel (京都ソフト案件のテンプレ) を作り、1 つの ZIP でダウンロードします。
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
-            1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
+            1 冊あたり 5〜15 秒かかります。0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
+            Excel の行は勤怠の勤務の記録から作ります (勤怠の記録が無い会社は運行から)。どちらで作ったかは冊ごとに下の表に出ます。
             ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
             下の「月ごとの時間」は、給与比較と同じ wage report の月ごとの時間 (暦月) です。ZIP を作る前から出ます。
             ダウンロードのあと、同じファイルと結果を版として保存します (出力するたびに 1 版)。元のデータが後から変わっても、その時点で出力した Excel を下の「保存した版」からダウンロードできます。案件を開き直すと、最新の版の結果を表示します。
@@ -1945,7 +1948,7 @@ function fmtDateTime(iso: string): string {
             <span v-if="outputRunning || outputFinished || restoredOutput" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-output-progress">
               {{ outputDoneCount }} / {{ outputChunks.length }} 冊
               <template v-if="outputFinished || restoredOutput">
-                (作成 {{ outputCounts.ok }} / 運行 0 件 {{ outputCounts.empty }} / alc に未登録 {{ outputCounts.not_found }} / 失敗 {{ outputCounts.error }})
+                (作成 {{ outputCounts.ok }} / 0 件 {{ outputCounts.empty }} / alc に未登録 {{ outputCounts.not_found }} / 失敗 {{ outputCounts.error }})
               </template>
             </span>
             <span v-if="outputSaveProgress" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-output-save-progress">
@@ -2013,6 +2016,13 @@ function fmtDateTime(iso: string): string {
                   <td class="px-4 py-2">
                     <template v-if="shownOutputResults[i]">
                       <div>{{ shownOutputResults[i]!.message }}</div>
+                      <div
+                        v-for="line in litigationOutputSourceLines(shownOutputResults[i]!)"
+                        :key="line.kind"
+                        class="text-xs mt-1"
+                        :class="line.kind === 'refold' ? 'font-bold text-red-700 dark:text-red-400' : line.kind === 'source' ? 'text-gray-500' : 'text-amber-700 dark:text-amber-400'"
+                        :data-output-line="line.kind"
+                      >{{ line.text }}</div>
                       <div v-if="shownOutputResults[i]!.missingCount > 0" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
                         テンプレに行が無く書けなかった日 {{ shownOutputResults[i]!.missingCount }} 日
                         ({{ shownOutputResults[i]!.missingDates.join(', ') }}<template v-if="shownOutputResults[i]!.missingCount > shownOutputResults[i]!.missingDates.length"> ほか</template>)
@@ -2462,7 +2472,7 @@ function fmtDateTime(iso: string): string {
               <td>{{ shownOutputResults[i] ? OUTPUT_STATUS_LABEL[shownOutputResults[i]!.status] : '未実行' }}</td>
               <td>
                 <template v-if="shownOutputResults[i]">
-                  {{ shownOutputResults[i]!.message }}<template v-if="shownOutputResults[i]!.missingCount > 0"> / 書けなかった日 {{ shownOutputResults[i]!.missingCount }} 日</template><template v-if="shownOutputResults[i]!.warningsCount > 0"> / 警告 {{ shownOutputResults[i]!.warningsCount }} 件</template>
+                  {{ shownOutputResults[i]!.message }}<template v-for="line in litigationOutputSourceLines(shownOutputResults[i]!)" :key="line.kind"> / {{ line.text }}</template><template v-if="shownOutputResults[i]!.missingCount > 0"> / 書けなかった日 {{ shownOutputResults[i]!.missingCount }} 日</template><template v-if="shownOutputResults[i]!.warningsCount > 0"> / 警告 {{ shownOutputResults[i]!.warningsCount }} 件</template>
                 </template>
               </td>
             </tr>
