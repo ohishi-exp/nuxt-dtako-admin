@@ -112,7 +112,8 @@ export function buildLitigationCheckListStatement(compId: string, caseId: string
   };
 }
 
-/** 案件の削除に合わせて消す。 */
+/** 案件ぶんを全部消す。案件の削除では消さない (復活で戻すため) — 削除から 30 日を過ぎた
+ * 案件の掃除 (litigation-output.ts) だけが使う。 */
 export function buildLitigationCheckDeleteStatement(compId: string, caseId: string): D1Statement {
   return {
     sql: `DELETE FROM litigation_check_results WHERE comp_id = ? AND case_id = ?`,

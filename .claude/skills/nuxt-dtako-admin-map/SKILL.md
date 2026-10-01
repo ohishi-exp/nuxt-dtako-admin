@@ -729,11 +729,34 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   `GET/PUT /restraint-api/employee-master`、勤務設定 (下記) は
   `GET/PUT /restraint-api/{work-schedule|holiday-work}`
 - **訴訟準備の取り込み `POST /restraint-api/litigation/alc-upload-driver`** (#1133 c1133-5):
-  `/restraint-api/*` で**唯一 role を見る口** (運行を消して入れ直す書き込みのため)。
+  `/restraint-api/*` で **role を見る口** の 1 本目 (運行を消して入れ直す書き込みのため。下の c1133-32 の 8 口も role を見る)。
   保存済み theearth セッションを使わず毎回 introspect し、`viewerRole` が admin / payroll の
   ときだけ `scraper-comp-{record.compId}` の `/cron/dtako/alc-upload-driver` へ転送する
   (body の comp_id は捨てる)。dev の短絡 (`RESTRAINT_DEV_VIEWER_COMP`) は role を持たないので
   ローカルでは 403 しか出ない — 成功経路は `test/do-litigation-alc-upload.test.ts` が担保
+- **訴訟準備の 案件の削除・復活 と 出力の版** (#1133 c1133-32、migration 0019、pure は `src/litigation-output.ts`):
+  **role を見る口が 8 本増えた** (上の alc-upload-driver と同じく保存済み theearth セッションより前で分け、
+  前置きは `authorizeLitigationAdmin` 1 本 = 毎回 introspect → 401 → `canRunLitigationUpload` → 403。
+  対象の一覧は `isLitigationAdminRoute`。会社は helper が返す record の `compId` だけ)
+  - 案件: `DELETE /restraint-api/litigation-cases?case_id=` (**物理削除でなく `litigation_deleted_cases` への移動**。
+    検知結果と版は消さない) / `GET …/litigation-cases/deleted` (30 日以内) / `POST …/litigation-cases/restore` `{caseId}`
+    (無い・期限切れ 404、同じ案件が在れば 409)。案件の `PUT` は caseId が在って案件が無ければ 404 (役割は見ない)
+  - 出力: `POST …/litigation-outputs` `{caseId, results}` → `{versionId, createdAt}` / `PUT …/litigation-outputs/file?case_id=&version_id=&name=&label=`
+    (body = バイト列。1 通信 1 ファイル、20MB・1 版 300 個まで。sha256 を刻む) / `GET …/litigation-outputs?case_id=` (新しい順 50、results なし)
+    / `GET …/litigation-outputs?case_id=&version_id=` (results つき) / `GET …/litigation-outputs/file?case_id=&version_id=&name=`。
+    どれも「案件が cases に在る」が前提 (削除済みの案件の版は復活するまで 404)
+  - 表: `litigation_deleted_cases` / `litigation_output_versions` (版。`r2_prefix` を持つ) / `litigation_output_files` (1 ファイル 1 行)
+  - R2 のキー: `{RESTRAINT_R2_PREFIX}/{comp}/litigation/{case_id}/{version_id}/{保存用の名前}`。**`/csv/` を含まず `v-` で始まる要素を
+    持たない**ことを `buildLitigationOutputR2Key` が確かめる (役割の制限が無い `archive/csv` の口と 7 日 prune に当たらない)。
+    `putVersionedR2` は使わない (あちらは同内容なら版を増やさない・7 日で消える)
+  - **env の軸**: D1 と bucket は env 共用なので、版とファイルの口は `r2_prefix = 自 env の RESTRAINT_R2_PREFIX` の行だけを扱う
+    (他 env の版は一覧に出ない)。案件 (cases / deleted) は env 共用のまま
+  - **30 日の掃除**: 契機は `GET /restraint-api/litigation-cases` (`ctx.waitUntil`、cron ではない)。1 回 3 版まで
+    R2 → ファイルの行 → 版の行の順に消し、版が無くなった期限切れの案件の 検知結果と deleted の行を消す。全 prefix が対象。
+    R2 の削除に失敗した版は行を残す。誰も一覧を開かない会社は消えない (30 日は下限)
+  - テスト: `test/litigation-output.test.ts` (pure) / `test/do-litigation-output.test.ts` (DO)。D1 は fake でなく
+    **migrations 0017〜0019 を当てた実物の SQLite** (`test/helpers/litigation-d1.ts`、`node:sqlite`)。
+    dev の短絡は role を持たないので、`wrangler dev --local` では 8 口とも 403 になる
 
 ### 勤務設定 (D1、所定労働時間 + 休日出勤の承認、Refs #424 PR-C)
 
