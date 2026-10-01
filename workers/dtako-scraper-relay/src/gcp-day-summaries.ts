@@ -51,12 +51,21 @@ export interface GcpDayPart {
   nightMinutes: number;
   /** 時間外に重なる深夜。`overtimeMinutes` とは排他。 */
   overtimeNightMinutes: number;
+  /** 法内残業 (所定の労働時間を超え、1 日 8 時間までの実働)。上流の
+   * `within_statutory_overtime_minutes`。**欄が無い・数でない応答は null (欠測)** —
+   * 0 に倒すと「法内残業が無い日」と区別が付かなくなる。 */
+  withinStatutoryOvertimeMinutes: number | null;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** 欠測 (null) を 0 にしない足し算。片方でも欠測なら欠測。 */
+function addOrMissing(a: number | null, b: number | null): number | null {
+  return a === null || b === null ? null : a + b;
 }
 
 /**
@@ -66,6 +75,8 @@ function num(v: unknown): number {
  * - 暦日が `YYYY-MM-DD` でないキーは捨てる (置き場が無い)
  * - 乗務員CD 0 は捨てる (社員マスタに居ない番号が実測で返る)
  * - **同じ暦日に複数の勤務があれば足し合わせる** (キーは開始時刻まで含むので複数来る)
+ * - 法内残業 (`within_statutory_overtime_minutes`) だけは `num()` で 0 に倒さない —
+ *   欄が無い・数でない勤務が 1 つでも在る暦日は欠測 (null) にする
  */
 export function parseGcpDaySummaries(body: unknown): Map<string, Map<string, GcpDayPart>> {
   const out = new Map<string, Map<string, GcpDayPart>>();
@@ -88,6 +99,11 @@ export function parseGcpDaySummaries(body: unknown): Map<string, Map<string, Gcp
       overtimeMinutes: Math.max(0, num(r.overtime_minutes) - overtimeNightMinutes),
       nightMinutes: num(r.night_minutes) + num(r.legal_holiday_night_minutes),
       overtimeNightMinutes,
+      withinStatutoryOvertimeMinutes:
+        typeof r.within_statutory_overtime_minutes === "number" &&
+        Number.isFinite(r.within_statutory_overtime_minutes)
+          ? r.within_statutory_overtime_minutes
+          : null,
     };
     const driverCd = String(cd);
     let byDate = out.get(driverCd);
@@ -106,6 +122,10 @@ export function parseGcpDaySummaries(body: unknown): Map<string, Map<string, Gcp
     cur.overtimeMinutes += part.overtimeMinutes;
     cur.nightMinutes += part.nightMinutes;
     cur.overtimeNightMinutes += part.overtimeNightMinutes;
+    cur.withinStatutoryOvertimeMinutes = addOrMissing(
+      cur.withinStatutoryOvertimeMinutes,
+      part.withinStatutoryOvertimeMinutes,
+    );
   }
   return out;
 }
@@ -349,6 +369,8 @@ export function overlayGcpDayTimes(
       overtimeMinutes: p?.overtimeMinutes ?? 0,
       nightMinutes: p?.nightMinutes ?? 0,
       overtimeNightMinutes: p?.overtimeNightMinutes ?? 0,
+      // GCP に勤務が無い日は実働 0 なので法内残業も 0。勤務が在る日は上流の値のまま (欠測は null)
+      withinStatutoryOvertimeMinutes: p ? p.withinStatutoryOvertimeMinutes : 0,
     };
   });
   const seen = new Set(summary.days.map((d) => d.day));
@@ -362,6 +384,7 @@ export function overlayGcpDayTimes(
       overtimeMinutes: p.overtimeMinutes,
       nightMinutes: p.nightMinutes,
       overtimeNightMinutes: p.overtimeNightMinutes,
+      withinStatutoryOvertimeMinutes: p.withinStatutoryOvertimeMinutes,
       holidayKind: isSunday(`${ym}-${String(day).padStart(2, "0")}`) ? "legal" : "weekday",
     });
   }
