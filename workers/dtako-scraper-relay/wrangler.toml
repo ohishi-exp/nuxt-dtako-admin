@@ -61,8 +61,8 @@ binding = "AUTH_WORKER_RPC"
 service = "auth-worker"
 entrypoint = "InternalEntrypoint"
 
-# 給与閲覧の認可確認 (Refs ohishi-exp/rust-ichibanboshi#322)。auth-worker の給与認可 RPC (authorize)
-# を RPC で直接呼ぶ。切替 env var が worker のときだけ使われる (未設定 = オンプレ)。切替は vars に書かない。
+# 給与閲覧の認可確認 (Refs ohishi-exp/rust-ichibanboshi#322)。auth-worker の給与用 RPC entrypoint (authorize)
+# に聞く (給与閲覧の認可確認で常に使う)。許可リストの正は auth-worker の KV `kyuyo-allowed-emails`。
 [[services]]
 binding = "AUTH_KYUYO"
 service = "auth-worker"
