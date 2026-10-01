@@ -85,6 +85,15 @@ export function litigationDriverMonthKey(driverCd: string, month: string): strin
   return `${driverCd}|${month}`
 }
 
+/**
+ * 乗務員CD が同じか (数にして比べる。先頭の 0 の違いを吸収する)。wage report の行を案件の乗務員へ
+ * 引き当てるところ (給与比較・出力タブの月ごとの時間) が同じこの関数を通る — 片方だけ厳密一致にすると、
+ * 同じ行が片方には出て片方では「行が無い」になる。
+ */
+export function sameLitigationDriverCd(a: string, b: string): boolean {
+  return String(Number(a)) === String(Number(b))
+}
+
 /** `YYYY-MM` の初日と末日 (`YYYY-MM-DD`)。 */
 export function litigationMonthBounds(month: string): { from: string, to: string } {
   const [y, m] = month.split('-').map(Number) as [number, number]

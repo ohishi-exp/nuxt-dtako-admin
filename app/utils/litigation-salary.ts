@@ -24,7 +24,7 @@ import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, 
 import { splitCdMapKey } from './employee-master'
 import type { EmployeeMasterEntry, KyuyoEmployeesResponse } from './employee-master'
 import type { LitigationFetched } from './litigation-errors'
-import { litigationDriverMonthKey } from './litigation-errors'
+import { litigationDriverMonthKey, sameLitigationDriverCd } from './litigation-errors'
 
 export type LitigationSalaryState = 'ok' | 'pending' | 'unknown' | 'noPayroll'
 
@@ -68,7 +68,7 @@ function isLoadingPayMonth(payMonth: string, loading: string | ReadonlySet<strin
   return typeof loading === 'string' ? payMonth === loading : loading?.has(payMonth) === true
 }
 
-const sameCd = (a: string, b: string) => String(Number(a)) === String(Number(b))
+const sameCd = sameLitigationDriverCd
 
 /** 表の行を作る。並びは乗務員ごと・月の古い順 (エラータブと同じ)。 */
 export function buildLitigationSalaryRows(input: LitigationSalaryInput): LitigationSalaryRow[] {

@@ -369,6 +369,16 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
     expect(buildLitigationHoursBooks([], new Map(), NONE)).toEqual([])
   })
 
+  it('★ 乗務員CD は給与比較と同じ比べ方 (数にして比べる): 応答の行の CD に先頭の 0 が付いていても値として出る (「拘束の記録なし」にしない)', () => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-07'), new Map([
+      ['9101|2024-06', got('2024-06', [wageRow('09101')])],
+      // 陽性対照: 別の乗務員の行は引かない
+      ['9101|2024-07', got('2024-07', [wageRow('19101')])],
+    ]), NONE)
+    expect(book!.rows.map(r => r.note ?? r.cells[6])).toEqual(['230:00', '拘束の記録なし'])
+    expect(book!.valueMonths).toBe(1)
+  })
+
   it('最終取得は、その冊の月の wage report を取った時刻のうちいちばん新しいもの (JST)。ほかの検知の時刻・ほかの冊の月は見ない', () => {
     const chunks = chunksOf('2024-01', '2025-01')
     const checkedAt = new Map([

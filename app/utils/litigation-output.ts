@@ -39,7 +39,7 @@ import { daysInMonth } from './timecard-view'
 import { LITIGATION_CASE_MAX_MONTHS } from './litigation-case-form'
 import { fmtTimecardCompareMinutes } from './timecard-compare-view'
 import { fmtJstDateTime } from './litigation-changes'
-import { litigationCheckedAtKey, litigationChunkMonths, litigationDriverMonthKey } from './litigation-errors'
+import { litigationCheckedAtKey, litigationChunkMonths, litigationDriverMonthKey, sameLitigationDriverCd } from './litigation-errors'
 import type { LitigationFetched } from './litigation-errors'
 
 /** 京都ソフト案件の Y時間 テンプレ (y-time-export.vue の既定と同じ R2 key) */
@@ -376,7 +376,7 @@ function hoursOfMonth(
 ): { minutes: HoursMinutes } | { note: string, fetch: boolean } {
   if (!entry) return { note: LITIGATION_HOURS_PENDING, fetch: true }
   if (!entry.ok) return { note: `${LITIGATION_HOURS_FAILED}: ${entry.reason}`, fetch: true }
-  const rows = entry.value.rows.filter(r => r.summary.driverCd === driverCd)
+  const rows = entry.value.rows.filter(r => sameLitigationDriverCd(r.summary.driverCd, driverCd))
   if (rows.length === 0) return { note: LITIGATION_HOURS_NO_ROW, fetch: false }
   if (rows.some(r => r.restraint_missing)) return { note: LITIGATION_HOURS_MISSING, fetch: false }
   const minutes = hoursMinutes(rows[0]!.wage, month)
