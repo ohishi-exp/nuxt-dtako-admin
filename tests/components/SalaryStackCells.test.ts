@@ -36,20 +36,43 @@ describe('SalaryAmountCell', () => {
 })
 
 describe('SalaryOver37Cell', () => {
-  const over37 = { rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: -1, shortfall: true }
+  const over37 = {
+    rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: -1, shortfall: true,
+    rateBasis: '割増基礎 200,000 円 ÷ (20 日 × 7h30m)', scheduledNote: null as string | null, belowMinWage: false, minWageRate: 1000 as number | null,
+  }
 
-  it('5 段。差が負のときだけ太字', () => {
+  it('基礎単価の次に根拠を積み、5 段。差が負のときだけ太字', () => {
     const w = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
-    expect(lines(w)).toEqual(['rate', 'minutes', 'theory', 'paid', 'diff37'])
+    expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
+    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ (20 日 × 7h30m)')
     expect(w.find('[data-salary-line="diff37"]').classes()).toContain('font-bold')
     const ok = mount(SalaryOver37Cell, { props: { over37: { ...over37, diff: 5, shortfall: false }, noneReason: '', compact: true } })
     expect(ok.find('[data-salary-line="diff37"]').classes()).not.toContain('font-bold')
   })
 
+  it('所定を引けなかった注記は、あるときだけ根拠の下に出る', () => {
+    const note = '所定未設定のため法定 8 時間で計算'
+    const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, scheduledNote: note }, noneReason: '' } })
+    expect(lines(w)).toEqual(['rate', 'rate-basis', 'scheduled-note', 'minutes', 'theory', 'paid', 'diff37'])
+    expect(w.find('[data-salary-line="scheduled-note"]').text()).toBe(note)
+  })
+
+  it('★ 37条の基礎単価が最低賃金を下回る月: 基礎単価が赤太字で、最低賃金の額つきのエラー行が出る (画面も紙面も)', () => {
+    for (const compact of [false, true]) {
+      const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, rate: 900, belowMinWage: true }, noneReason: '', compact } })
+      expect(lines(w)).toEqual(['rate', 'below-minwage', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
+      expect(w.find('[data-salary-line="rate"]').classes()).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
+      expect(w.find('[data-salary-line="below-minwage"]').text()).toBe('37条の基礎単価が最低賃金 1,000 円/h を下回る')
+    }
+    const ok = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
+    expect(ok.find('[data-salary-line="rate"]').classes()).not.toContain('font-bold')
+    expect(ok.find('[data-salary-line="below-minwage"]').exists()).toBe(false)
+  })
+
   it('出せないときは理由 1 行', () => {
-    const w = mount(SalaryOver37Cell, { props: { over37: null, noneReason: '(法定内時間が 0)' } })
+    const w = mount(SalaryOver37Cell, { props: { over37: null, noneReason: '(給与区分が不明)' } })
     expect(lines(w)).toEqual(['none'])
-    expect(w.text()).toBe('- (法定内時間が 0)')
+    expect(w.text()).toBe('- (給与区分が不明)')
     expect(mount(SalaryOver37Cell, { props: { over37: null, noneReason: 'x', compact: true } }).html()).not.toContain('text-xs')
   })
 })

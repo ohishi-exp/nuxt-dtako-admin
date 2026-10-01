@@ -230,7 +230,7 @@ describe('diffSignClass (差の符号で文字色)', () => {
   })
 })
 
-import { salaryRowCells } from '~/utils/litigation-salary'
+import { isBaseRateBelowMinWage, salaryRowCells } from '~/utils/litigation-salary'
 import type { SalaryComparisonRow } from '~/utils/salary-compare'
 
 describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の組み立て)', () => {
@@ -240,7 +240,9 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     csvTotal: 250000, sysTotal: 205000, diffTotal: 45000,
     overtimeFixed: false,
     baseRateActual: 1333.3, baseRateOvertimePay: 16667, diffCsvVsBaseRateOvertime: 13333,
-    minWageOvertimeMinutes: 600, statutoryMinutes: 9000,
+    minWageOvertimeMinutes: 600, csvPremiumBase: 200000,
+    baseRateBasis: { kind: 'days', hours: 150, workDays: 20, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null },
+    rateBasis: { hourlyRate: 1000, minWageRate: 1000 },
     sysWorkDays: 20, sysOvertimeMinutes: 605,
     sysBaseBasis: { kind: 'days', rate: 9500, quantity: 20 }, sysOvertimeRate: 1500,
   } as unknown as SalaryComparisonRow
@@ -269,17 +271,52 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     expect(salaryRowCells({ ...base, sysOvertimeMinutes: 630 }).amounts[1]!.basis).toBe('1,500 円/h × 10h30m')
   })
 
-  it('37条は理論値があれば 5 項目、差が負のときだけ shortfall', () => {
-    expect(salaryRowCells(base).over37).toEqual({ rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: 13333, shortfall: false })
+  it('37条は理論値があれば 5 項目 + 根拠、差が負のときだけ shortfall', () => {
+    expect(salaryRowCells(base).over37).toEqual({
+      rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: 13333, shortfall: false,
+      rateBasis: '割増基礎 200,000 円 ÷ (20 日 × 7h30m)', scheduledNote: null, belowMinWage: false, minWageRate: 1000,
+    })
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: -1 }).over37!.shortfall).toBe(true)
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: null }).over37!.shortfall).toBe(false)
   })
 
-  it('37条が出せないときは null と理由 (法定内時間が 0 / 割増の基礎に入る支給が 0)', () => {
-    const none = { ...base, baseRateOvertimePay: null }
-    expect(salaryRowCells(none).over37).toBeNull()
-    expect(salaryRowCells({ ...none, statutoryMinutes: 0 } as SalaryComparisonRow).over37NoneReason).toBe('(法定内時間が 0)')
-    expect(salaryRowCells(none as SalaryComparisonRow).over37NoneReason).toBe('(割増の基礎に入る支給が 0)')
+  it('★ 基礎単価の根拠の文字列: 日給 = 日数 × 1 日の所定 / 時給 = 明細の時給 / 月給・その他 = 法定の月平均', () => {
+    const text = (b: Partial<SalaryComparisonRow['baseRateBasis']>) =>
+      salaryRowCells({ ...base, baseRateBasis: { ...base.baseRateBasis, ...b } }).over37!.rateBasis
+    expect(text({})).toBe('割増基礎 200,000 円 ÷ (20 日 × 7h30m)')
+    expect(text({ kind: 'hours', hourlyRate: 1200, hours: null, workDays: null, dailyMinutes: null, scheduled: null }))
+      .toBe('明細の時給 1,200 円/h')
+    expect(text({ kind: 'monthly', hours: (40 * 365) / 7 / 12, workDays: null, dailyMinutes: null, scheduled: null }))
+      .toBe('割増基礎 200,000 円 ÷ 法定の月平均 173.8h')
+  })
+
+  it('★ 日給で所定を引けなかった理由: 未設定と読めなかったは別の文言、引けたら null', () => {
+    const note = (scheduled: SalaryComparisonRow['baseRateBasis']['scheduled']) =>
+      salaryRowCells({ ...base, baseRateBasis: { ...base.baseRateBasis, scheduled, dailyMinutes: 480 } }).over37!.scheduledNote
+    expect(note('resolved')).toBeNull()
+    expect(note('unset')).toBe('所定未設定のため法定 8 時間で計算')
+    expect(note('unread')).toBe('所定を読めなかったため法定 8 時間で計算 (古い保存物なら拘束の材料を取り直す)')
+    expect(note(null)).toBeNull()
+  })
+
+  it('★ belowMinWage: 基礎単価 < その月の最低賃金のときだけ true。等しい・上回る・最低賃金が引けない月は false', () => {
+    const cell = (baseRateActual: number | null, minWageRate: number | null) =>
+      salaryRowCells({ ...base, baseRateActual, rateBasis: { ...base.rateBasis, minWageRate } } as SalaryComparisonRow).over37!
+    expect(cell(999.9, 1000)).toMatchObject({ belowMinWage: true, minWageRate: 1000 })
+    expect(cell(1000, 1000).belowMinWage).toBe(false)
+    expect(cell(1200, 1000).belowMinWage).toBe(false)
+    expect(cell(500, null)).toMatchObject({ belowMinWage: false, minWageRate: null })
+    expect(isBaseRateBelowMinWage({ baseRateActual: null, rateBasis: { minWageRate: 1000 } as SalaryComparisonRow['rateBasis'] })).toBe(false)
+  })
+
+  it('37条が出せないときは null と理由 (給与区分が不明 / 明細に時給の単価が無い / 割増の基礎に入る支給が 0 / 出勤日数が 0)', () => {
+    const reason = (none: SalaryComparisonRow['baseRateBasis']['none']) =>
+      salaryRowCells({ ...base, baseRateOvertimePay: null, baseRateBasis: { ...base.baseRateBasis, none } }).over37NoneReason
+    expect(salaryRowCells({ ...base, baseRateOvertimePay: null }).over37).toBeNull()
+    expect(reason('unknown-kind')).toBe('(給与区分が不明)')
+    expect(reason('no-hourly-rate')).toBe('(明細に時給の単価が無い)')
+    expect(reason('no-premium-base')).toBe('(割増の基礎に入る支給が 0)')
+    expect(reason('no-denominator')).toBe('(出勤日数が 0)')
     expect(salaryRowCells({ ...base, overtimeFixed: true }).overtimeFixed).toBe(true)
   })
 })

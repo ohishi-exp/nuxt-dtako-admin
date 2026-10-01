@@ -93,6 +93,7 @@ import {
   rateBasisLabel,
   rateBasisPeriods,
   rateBasisStatus,
+  isBaseRateBelowMinWage,
   salaryRowCells,
   splitPayrollTargets,
   type LitigationRegisterCandidate,
@@ -852,6 +853,9 @@ const salaryNeedsMaterials = computed(() => salaryRows.value.some(r => r.message
 // 労基法37条 (基礎単価 × 割増) の理論値を、明細の残業代が下回った行の数 (差が負の行)
 const salaryShortfall37Count = computed(() =>
   salaryRows.value.filter(r => (r.compared?.diffCsvVsBaseRateOvertime ?? 0) < 0).length)
+// 37条の基礎単価 (÷ 所定労働時間) がその月の最低賃金を下回る行 — エラー (0 件でも出す)
+const salaryBelowMinWage37Count = computed(() =>
+  salaryRows.value.filter(r => r.compared && isBaseRateBelowMinWage(r.compared)).length)
 // 計算に使った単価が、その月の最低賃金と違う行 (上下どちらも) / 判定できない行 (Refs #1133)
 const salaryRateBasisCounts = computed(() => {
   let mismatch = 0
@@ -1728,6 +1732,7 @@ function fmtDateTime(iso: string): string {
           <div class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-salary-summary">
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
             / <span data-testid="litigation-salary-shortfall37">37条で不足 {{ salaryShortfall37Count }} 件</span>
+            / <span :class="salaryBelowMinWage37Count > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-below-minwage37">37条の基礎単価が最低賃金を下回る {{ salaryBelowMinWage37Count }} 件</span>
             / <span :class="salaryRateBasisCounts.mismatch > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-rate-mismatch">単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件</span>
             / <span data-testid="litigation-salary-rate-unknown">単価 判定できない {{ salaryRateBasisCounts.unknown }} 件</span>
             / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
@@ -1792,7 +1797,7 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium text-right">基本給</th>
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
-                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 法定内時間。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
+                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 出勤日数 × 1 日の所定、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
                   <th class="px-3 py-2 font-medium text-right">勤務日 / 時間外</th>
                   <th class="px-3 py-2 font-medium" title="計算に使った単価 = 単価マスタ (最低賃金の一括設定で入れた額)。その月の最低賃金と違う月はエラー">単価 (最低賃金)</th>
                 </tr>
@@ -1979,7 +1984,7 @@ function fmtDateTime(iso: string): string {
           <template v-else>
             <div class="litigation-print-meta">
               <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
-              / 37条で不足 {{ salaryShortfall37Count }} 件
+              / 37条で不足 {{ salaryShortfall37Count }} 件 / 37条の基礎単価が最低賃金を下回る {{ salaryBelowMinWage37Count }} 件
               / 単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件 / 単価 判定できない {{ salaryRateBasisCounts.unknown }} 件
               / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
             </div>

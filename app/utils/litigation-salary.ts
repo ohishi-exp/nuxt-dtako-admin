@@ -15,7 +15,7 @@
  */
 import { fmtMinutes, fmtYen, nextYm } from './restraint-wage-view'
 import type { WageReportResponse, WageReportRow } from './restraint-wage-view'
-import { compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
+import { BASE_RATE_NONE_LABELS, compareSalaryMonth, suggestCdMapEntries } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
 import { splitCdMapKey } from './employee-master'
 import type { EmployeeMasterEntry, KyuyoEmployeesResponse } from './employee-master'
@@ -254,6 +254,14 @@ export interface LitigationSalaryOver37 {
   diff: number | null
   /** 明細の残業代が理論値を下回った (差が負) — 太字にするのはこれだけ */
   shortfall: boolean
+  /** 基礎単価の根拠 (`割増基礎 N 円 ÷ (D 日 × 8h)` / `明細の時給` / `÷ 法定の月平均`)。分母は所定労働時間 */
+  rateBasis: string
+  /** 日給で所定を引けなかった理由 (法定 8 時間で計算した旨)。引けた・日給でないときは null */
+  scheduledNote: string | null
+  /** 37条の基礎単価がその月の最低賃金を下回る — **エラー** (赤太字)。最低賃金が引けない月は false */
+  belowMinWage: boolean
+  /** `belowMinWage` の比べた相手 (その月の最低賃金、円/h)。引けない月は null */
+  minWageRate: number | null
 }
 
 export interface LitigationSalaryRowCells {
@@ -282,6 +290,21 @@ function sysBaseBasisText(b: SalaryComparisonRow['sysBaseBasis']): string {
   }
 }
 
+/** 37条の基礎単価の根拠の文字列 (分母は所定労働時間)。基礎単価が出ている行 (= 区分不明でない) だけが呼ぶ。 */
+function baseRateBasisText(c: SalaryComparisonRow): string {
+  const b = c.baseRateBasis
+  if (b.kind === 'hours') return `明細の時給 ${yen(b.hourlyRate!)} 円/h`
+  if (b.kind === 'monthly') return `割増基礎 ${yen(c.csvPremiumBase)} 円 ÷ 法定の月平均 ${(Math.round(b.hours! * 10) / 10).toFixed(1)}h`
+  return `割増基礎 ${yen(c.csvPremiumBase)} 円 ÷ (${b.workDays} 日 × ${fmtMinutes(b.dailyMinutes)})`
+}
+
+/** 日給の所定を引けなかったときの注記 (法定 8 時間で計算した)。**未設定と読めなかったは別の文言**。 */
+function scheduledNoteText(b: SalaryComparisonRow['baseRateBasis']): string | null {
+  if (b.scheduled === 'unset') return '所定未設定のため法定 8 時間で計算'
+  if (b.scheduled === 'unread') return '所定を読めなかったため法定 8 時間で計算 (古い保存物なら拘束の材料を取り直す)'
+  return null
+}
+
 /**
  * 比較済みの 1 行を、表示用のセル一式にする。画面と印刷の紙面は同じ縦に積んだセル
  * (明細 / 計算 / 差 + 根拠) をこれで組む。
@@ -306,11 +329,20 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
           paid: c.csvOvertime,
           diff: c.diffCsvVsBaseRateOvertime,
           shortfall: (c.diffCsvVsBaseRateOvertime ?? 0) < 0,
+          rateBasis: baseRateBasisText(c),
+          scheduledNote: scheduledNoteText(c.baseRateBasis),
+          belowMinWage: isBaseRateBelowMinWage(c),
+          minWageRate: c.rateBasis.minWageRate,
         },
-    over37NoneReason: c.statutoryMinutes > 0 ? '(割増の基礎に入る支給が 0)' : '(法定内時間が 0)',
+    over37NoneReason: c.baseRateBasis.none === null ? '' : `(${BASE_RATE_NONE_LABELS[c.baseRateBasis.none]})`,
     workDays: c.sysWorkDays,
     overtimeHours: Math.round(c.sysOvertimeMinutes / 6) / 10,
   }
+}
+
+/** 37条の基礎単価がその月の最低賃金を下回るか (どちらかが無い月は false — 判定しない)。 */
+export function isBaseRateBelowMinWage(c: Pick<SalaryComparisonRow, 'baseRateActual' | 'rateBasis'>): boolean {
+  return c.baseRateActual !== null && c.rateBasis.minWageRate !== null && c.baseRateActual < c.rateBasis.minWageRate
 }
 
 // --- 計算に使った単価 (単価マスタ) と最低賃金 (Refs #1133) ---

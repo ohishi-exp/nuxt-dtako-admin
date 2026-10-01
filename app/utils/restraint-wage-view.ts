@@ -148,6 +148,10 @@ export interface WageReportRow {
    * 社員マスタに無い / 未取り込みなら null。給与比較が「基本給(計算)」の
    * 単価の掛け方を決めるのに使う。 */
   pay_kubun?: number | null
+  /** 1 日の所定 (分、所定マスタ = `work_schedules`)。37条の基礎単価 (日給の分母) に使う (Refs #1133)。
+   * **3 状態**: 数値 = 引けた / `null` = 所定マスタを読めたが該当なし (法定 8 時間で計算) /
+   * **キー無し** = 読めなかった (D1 binding 無し・読み失敗・古い relay・古い保存物。法定 8 時間で計算)。 */
+  daily_work_minutes?: number | null
   /** `restraint_source: 'gcp'` の応答で、GCP `day_summaries` にこの乗務員 × この月の
    * 行が無かった (= 欠測)。`current` の応答では常に false / 未定義。
    * **0 分ではない** ので、金額・最低賃金割れの判定は出さずに「-」で表示する。 */

@@ -14,7 +14,8 @@
  */
 
 import type { WageReportRow } from './restraint-wage-view'
-import { isOver60hPremiumMonth } from './restraint-wage-view'
+import { fmtMinutes, isOver60hPremiumMonth } from './restraint-wage-view'
+import { SCHEDULED_HOURS_PER_DAY } from './profit-wage-mix'
 
 /**
  * 支給項目の区分 (Refs #278)。法令上の除外集合は 2 軸で別物のため、
@@ -512,12 +513,14 @@ export interface SalaryComparisonRow {
   csvMinWageEligible: number
   /** csvMinWageEligible の内訳。 */
   csvMinWageEligibleItems: SalaryItemAmount[]
-  /** デジタコ法定内時間 (wage-report の minutes.statutory、分)。 */
-  statutoryMinutes: number
-  /** 基礎単価(実績) = csvPremiumBase ÷ 法定内時間 (円/h、丸めなし)。
-   * 法定内時間 0 や割増基礎算入分 0 の行は null (算出不可)。
-   * 単価マスタの時給との検算にもなる (Refs #278)。 */
+  /** 基礎単価(実績) (円/h、丸めなし)。分母は**所定労働時間** (労基則 19 条) で、実際に働いた
+   * 時間ではない — 分母を実働にすると長く働いた月ほど単価が低く出る。給与区分で式が変わる
+   * (`baseRateBasis` が根拠を運ぶ): 日給 = 割増基礎の月合計 ÷ (出勤日数 × 1 日の所定) /
+   * 時給 = 明細の時給の単価そのもの / 月給・その他 = 割増基礎の月合計 ÷ 法定の月平均時間。
+   * 給与区分不明・分母 0・割増基礎 0・時給の単価なしは null (理由は `baseRateBasis.none`)。 */
   baseRateActual: number | null
+  /** 基礎単価(実績) の根拠 (分母の内訳)。 */
+  baseRateBasis: BaseRateBasis
   /** 基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条、
    * computeOvertimePayAtRate)。baseRateActual が null なら null。 */
   baseRateOvertimePay: number | null
@@ -795,9 +798,24 @@ export const PAY_KUBUN_DAILY = 2
 export const PAY_KUBUN_HOURLY = 3
 export const PAY_KUBUN_OTHER = 4
 
+/** 給与区分 → 式の種類。**区分の数値はここ 1 か所だけが知っている** (`computeSysBase` の基本給と
+ * `computeBaseRate` の基礎単価が同じ対応を使う)。`days` = 日給 / `hours` = 時給 /
+ * `monthly` = 月給・その他 / `unknown` = 区分が取れていない。 */
+export type PayKubunKind = 'days' | 'hours' | 'monthly' | 'unknown'
+
+export function payKubunKind(payKubun: number | null): PayKubunKind {
+  switch (payKubun) {
+    case PAY_KUBUN_DAILY: return 'days'
+    case PAY_KUBUN_HOURLY: return 'hours'
+    case PAY_KUBUN_MONTHLY:
+    case PAY_KUBUN_OTHER: return 'monthly'
+    default: return 'unknown'
+  }
+}
+
 /** 基本給(計算) の根拠の種類。`days` = 日額 × 日数 / `hours` = 時給 × 分 / `monthly` = 月給・その他 (計算なし) /
  * `unknown` = 給与区分が取れていない (計算なし) / `norate` = 単価なし。 */
-export type SysBaseKind = 'days' | 'hours' | 'monthly' | 'unknown' | 'norate'
+export type SysBaseKind = PayKubunKind | 'norate'
 
 export interface SysBaseBasis {
   kind: SysBaseKind
@@ -835,9 +853,90 @@ export function computeSysBase(
   workingMinutes: number,
 ): SysBaseResult {
   if (baseRate === null) return { value: null, rate: null, kind: 'norate', quantity: null }
-  if (payKubun === PAY_KUBUN_DAILY) return { value: Math.round(baseRate * workDays), rate: baseRate, kind: 'days', quantity: workDays }
-  if (payKubun === PAY_KUBUN_HOURLY) return { value: Math.round((baseRate * workingMinutes) / 60), rate: baseRate, kind: 'hours', quantity: workingMinutes }
-  return { value: null, rate: baseRate, kind: payKubun === PAY_KUBUN_MONTHLY || payKubun === PAY_KUBUN_OTHER ? 'monthly' : 'unknown', quantity: null }
+  const kind = payKubunKind(payKubun)
+  if (kind === 'days') return { value: Math.round(baseRate * workDays), rate: baseRate, kind, quantity: workDays }
+  if (kind === 'hours') return { value: Math.round((baseRate * workingMinutes) / 60), rate: baseRate, kind, quantity: workingMinutes }
+  return { value: null, rate: baseRate, kind, quantity: null }
+}
+
+/** 法定の月平均所定労働時間 = 週 40 時間 × 365 日 ÷ 7 日 ÷ 12 か月 (≒ 173.81h)。
+ * 月給・その他の基礎単価の分母 (労基則 19 条は月給者の所定が月で変わるときは月平均を使う)。
+ * 会社の所定が法定より短くても法定で割る (所定を引ける仕組みが無いため。ユーザー決定)。 */
+export const STATUTORY_MONTHLY_AVG_HOURS = (40 * 365) / 7 / 12
+
+/** 日給者の 1 日の所定を引けないときに使う法定の分 (`SCHEDULED_HOURS_PER_DAY` = 8 時間)。 */
+const LEGAL_DAILY_MINUTES = SCHEDULED_HOURS_PER_DAY * 60
+
+/** 基礎単価の根拠 (どの式で出したか)。 */
+export interface BaseRateBasis {
+  /** 式の種類 (給与区分から決まる)。`days` = 日給 / `hours` = 時給 / `monthly` = 月給・その他 / `unknown` = 区分不明 */
+  kind: PayKubunKind
+  /** 分母の時間 (`days` = 出勤日数 × 1 日の所定、`monthly` = 法定の月平均)。それ以外は null */
+  hours: number | null
+  /** `days` の出勤日数 */
+  workDays: number | null
+  /** `days` で分母に使った 1 日の所定 (分)。引けなければ法定 480 */
+  dailyMinutes: number | null
+  /** `days` の所定の出どころ。`resolved` = 所定マスタから引けた / `unset` = マスタは読めたが該当なし (法定 8 時間) /
+   * `unread` = 読めなかった (relay が欄を出さない: 古い relay・古い保存物・D1 読み失敗。法定 8 時間)。他の種類は null */
+  scheduled: 'resolved' | 'unset' | 'unread' | null
+  /** `hours` で使った明細の時給の単価 */
+  hourlyRate: number | null
+  /** 基礎単価を出せなかった理由 (出せたら null) */
+  none: 'unknown-kind' | 'no-hourly-rate' | 'no-premium-base' | 'no-denominator' | null
+}
+
+/** 基礎単価を出せなかった理由の文言 (`BaseRateBasis.none`)。 */
+export const BASE_RATE_NONE_LABELS: Record<NonNullable<BaseRateBasis['none']>, string> = {
+  'unknown-kind': '給与区分が不明',
+  'no-hourly-rate': '明細に時給の単価が無い',
+  'no-premium-base': '割増の基礎に入る支給が 0',
+  'no-denominator': '出勤日数が 0',
+}
+
+/** 基礎単価の分母の短い表記 (表のセルの 2 段目用)。時給は割り算をしないので「明細の時給」。 */
+export function baseRateDenominatorText(b: BaseRateBasis): string {
+  switch (b.kind) {
+    case 'days': return `÷ (${b.workDays}日 × ${fmtMinutes(b.dailyMinutes)})`
+    case 'hours': return '明細の時給'
+    case 'monthly': return `÷ 法定の月平均 ${(Math.round(b.hours! * 10) / 10).toFixed(1)}h`
+    case 'unknown': return ''
+  }
+}
+
+/** 37条の基礎単価(実績) と根拠。`premiumBaseTotal` = 割増基礎の月合計、`dailyWorkMinutes` = wage-report 行の
+ * `daily_work_minutes` (`undefined` = キーが無い = 読めなかった / `null` = 該当なし / 数値 = 分)。 */
+export function computeBaseRate(
+  payKubun: number | null,
+  premiumBaseTotal: number,
+  workDays: number,
+  dailyWorkMinutes: number | null | undefined,
+  hourlyRate: number | null,
+): { value: number | null, basis: BaseRateBasis } {
+  const kind = payKubunKind(payKubun)
+  const basis: BaseRateBasis = {
+    kind, hours: null, workDays: null, dailyMinutes: null, scheduled: null, hourlyRate: null, none: null,
+  }
+  const fail = (none: NonNullable<BaseRateBasis['none']>) => ({ value: null, basis: { ...basis, none } })
+  if (kind === 'unknown') return fail('unknown-kind')
+  if (kind === 'hours') {
+    basis.hourlyRate = hourlyRate
+    if (hourlyRate === null) return fail('no-hourly-rate')
+    if (premiumBaseTotal <= 0) return fail('no-premium-base')
+    return { value: hourlyRate, basis }
+  }
+  if (premiumBaseTotal <= 0) return fail('no-premium-base')
+  if (kind === 'monthly') {
+    basis.hours = STATUTORY_MONTHLY_AVG_HOURS
+    return { value: premiumBaseTotal / basis.hours, basis }
+  }
+  const resolved = typeof dailyWorkMinutes === 'number' && dailyWorkMinutes > 0
+  basis.workDays = workDays
+  basis.dailyMinutes = resolved ? dailyWorkMinutes : LEGAL_DAILY_MINUTES
+  basis.scheduled = resolved ? 'resolved' : dailyWorkMinutes === undefined ? 'unread' : 'unset'
+  basis.hours = (workDays * basis.dailyMinutes) / 60
+  if (basis.hours <= 0) return fail('no-denominator')
+  return { value: premiumBaseTotal / basis.hours, basis }
 }
 
 /**
@@ -970,13 +1069,16 @@ export function compareSalaryMonth(
         ? report.wage.minWageOvertimePay + report.wage.minWageNightOvertimePay
         : null
 
-    // 基礎単価(実績) = 割増基礎算入分 ÷ デジタコ法定内時間 と、それを基礎額に
-    // した割増残業代の理論値 (労基法37条の主判定、Refs #278)。時間軸は
+    // 基礎単価(実績) の分母は所定労働時間 (労基則 19 条)。式は給与区分で変わる (`computeBaseRate`)。
+    // それを基礎額にした割増残業代の理論値が労基法37条の主判定 (Refs #278)。時間軸は
     // 残業(最低賃金) と同じ — 週40超過分を含む。
-    const statutoryMinutes = report.wage.minutes.statutory
-    const baseRateActual = statutoryMinutes > 0 && sums.premiumBase.total > 0
-      ? sums.premiumBase.total / (statutoryMinutes / 60)
-      : null
+    const { value: baseRateActual, basis: baseRateBasis } = computeBaseRate(
+      report.pay_kubun ?? null,
+      sums.premiumBase.total,
+      workDays,
+      report.daily_work_minutes,
+      csv.rates.base,
+    )
     const baseRateOvertimePay = baseRateActual !== null
       ? computeOvertimePayAtRate(month, minWageOvertimeMinutes, report.wage.nightOvertimeMinutes, baseRateActual)
       : null
@@ -1008,8 +1110,8 @@ export function compareSalaryMonth(
       csvPremiumBaseItems: sums.premiumBase.items,
       csvMinWageEligible: sums.minWageEligible.total,
       csvMinWageEligibleItems: sums.minWageEligible.items,
-      statutoryMinutes,
       baseRateActual,
+      baseRateBasis,
       baseRateOvertimePay,
       diffCsvVsBaseRateOvertime: baseRateOvertimePay === null ? null : overtime - baseRateOvertimePay,
       minWageOvertimeMinutes,

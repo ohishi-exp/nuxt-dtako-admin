@@ -7,7 +7,8 @@
  *
  * - **所定労働時間** … 実働がこれを超えた分が時間外。デジタコ (theearth) 由来の
  *   乗務員は CSV が時間外をそのまま持っているので対象外 — 効くのは timecard 由来
- *   の summary だけ。
+ *   の summary だけ。ただし 37条の基礎単価の分母にだけ乗務員にも使う
+ *   (wage-report の `daily_work_minutes`)。勤怠の計算には効かせない。
  * - **休日出勤の承認** … 休日に打刻がある日のうち、この表に載っている日だけが
  *   割増賃金の対象 (休日出勤)。載っていない日は「自主出勤」として賃金計算から
  *   外す (時間は記録・表示する)。
@@ -534,6 +535,26 @@ export function scopeByDriverCdAt<A extends { effectiveFrom: string }>(
     });
   }
   return out;
+}
+
+/**
+ * 乗務員CD → 対象月の 1 日の所定 (分) を返す関数を作る。引けなければ null
+ * (所定マスタを読めたが該当なし)。スコープ (所属×職種) が社員マスタに無い乗務員は
+ * 全社既定だけを見る。タイムカードの summary 組み立て・wage-report の
+ * `daily_work_minutes` が同じ解決を使う。
+ */
+export function workScheduleMinutesResolver(
+  schedules: WorkScheduleRow[],
+  scopes: ReadonlyMap<string, WorkScheduleScope>,
+  yearMonth: string,
+): (driverCd: string) => number | null {
+  return (driverCd) => {
+    const scope = scopes.get(driverCd);
+    return (
+      resolveWorkScheduleAt(schedules, yearMonth, scope?.branchCode ?? null, scope?.jobName ?? null)
+        ?.dailyWorkMinutes ?? null
+    );
+  };
 }
 
 /** 承認済み休日出勤の判定用インデックス (`{driverCd}|{workDate}` の集合)。 */

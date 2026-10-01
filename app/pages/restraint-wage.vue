@@ -7204,7 +7204,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
                       <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × システム計算の時間外+時間外深夜。固定残業 (月給者) には当てはまらない">残業(計算)</th>
                       <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(計算)。固定残業 (月給者) は定額なので差に意味が無く「固定」と出す — 判定は右の 37条 の差を見る">差</th>
-                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="割増基礎に算入する支給項目の合計 ÷ デジタコ法定内時間 (円/h)。単価マスタの時給との検算にもなる">基礎単価(実績)</th>
+                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="37条の基礎単価 (円/h)。分母は所定労働時間: 日給 = 割増基礎に算入する支給項目の合計 ÷ (出勤日数 × 1 日の所定、引けなければ法定 8 時間) / 時給 = 給与明細の時給そのもの / 月給・その他 = 合計 ÷ 法定の月平均 (173.8h)。給与区分が不明な行は出さない">基礎単価(実績)</th>
                       <th class="px-2 py-2 text-right" title="基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条。月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)">残業(基礎単価)</th>
                       <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(基礎単価)。負なら実際の基礎単価に対する法定割増 (37条) を下回っている — 主判定">差</th>
                       <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="最低賃金を基礎額とみなした割増残業代の理論値 (単価マスタは使わず、デジタコ拘束時間データ×最低賃金で算出)。絶対下限として併記">残業(最低賃金)</th>
@@ -7271,12 +7271,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <td v-else class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
                       </td>
-                      <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700" :title="`割増基礎算入計 ${fmtYen(row.csvPremiumBase)}円 (${fmtItemsTitle(row.csvPremiumBaseItems)}) ÷ 法定内 ${fmtMinutes(row.statutoryMinutes)}`">
+                      <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700" :title="`割増基礎算入計 ${fmtYen(row.csvPremiumBase)}円 (${fmtItemsTitle(row.csvPremiumBaseItems)}) ${baseRateDenominatorText(row.baseRateBasis)}`">
                         <template v-if="row.baseRateActual !== null">
                           <div>{{ fmtRatePerHour(row.baseRateActual) }}</div>
-                          <div class="text-xs text-gray-500">÷ {{ fmtMinutes(row.statutoryMinutes) }}</div>
+                          <div class="text-xs text-gray-500">{{ baseRateDenominatorText(row.baseRateBasis) }}</div>
                         </template>
-                        <span v-else class="text-xs text-gray-500">算出不可</span>
+                        <span v-else class="text-xs text-gray-500">算出不可<template v-if="row.baseRateBasis.none"> ({{ BASE_RATE_NONE_LABELS[row.baseRateBasis.none] }})</template></span>
                       </td>
                       <td class="px-2 py-1.5 text-right">
                         <template v-if="row.baseRateOvertimePay !== null">
@@ -7332,7 +7332,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 残業単価 (時給) × システム時間外。給与明細に単価が無い行は「単価なし」(独自の按分計算はしません)。
                 基本給計/残業計にカーソルを合わせると支給項目の内訳を表示します。
                 * は 支給合計額 列と支給項目の合算が一致しない行。<br>
-                基礎単価(実績) = 割増基礎に算入する支給項目 (支給項目区分タブで「割増基礎○」の区分) の合計 ÷ デジタコ法定内時間。
+                基礎単価(実績) = 割増基礎に算入する支給項目 (支給項目区分タブで「割増基礎○」の区分) の合計 ÷ 所定労働時間 (労基則19条。実際に働いた時間ではない)。日給 = ÷ (出勤日数 × 1日の所定。勤務設定の所定を引けなければ法定8時間)、時給 = 給与明細の時給そのもの (割り算なし)、月給・その他 = ÷ 法定の月平均 173.8h。給与区分が不明な行は出しません。
                 残業(基礎単価) = 基礎単価(実績) を基礎額とした割増残業代の理論値 (時間外+時間外深夜+週40超過、月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)。
                 <b>「残業計(給与) − 残業(基礎単価)」が労基法37条の主判定です</b> — 負なら実際の基礎単価に対する法定割増を下回っています。
                 <b>これは違反の検出ではなく、賃金の内訳を見直すための材料です</b> — 割増基礎 (基本給 + 算入手当) が高いほど理論値も上がるため、
