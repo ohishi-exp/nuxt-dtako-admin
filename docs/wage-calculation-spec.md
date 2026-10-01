@@ -154,7 +154,7 @@ front は `computeOvertimePayAtRate` / `compareSalaryMonth` が勤務月を必�
   最低賃金割れバナー・行ハイライト) は**全廃**した。表は「対象時間 / @計算単価 /
   単価マスタ換算の金額」のみのシンプル表示。
   - worker (`computeWageRow`) は minWage 系フィールドを従来通り計算して返す
-    (表示だけ削除。給与比較タブの 残業(最低賃金) 列が引き続き利用する)。
+    (表示だけ削除。給与比較タブの 残業(計算) 列が引き続き利用する)。
   - 最低賃金の設定カード (全社共通履歴) も同タブに残る — 給与比較タブの絶対下限
     チェック用の入力。
   - 訴訟準備の給与比較では、その運用が崩れた月 (単価 ≠ その月の最低賃金、上下どちらも) を
@@ -173,12 +173,16 @@ front は `computeOvertimePayAtRate` / `compareSalaryMonth` が勤務月を必�
 給与比較 (拘束×賃金の給与比較タブ・訴訟準備の給与比較、`compareSalaryMonth`) は時間を数え直さない。
 
 - **残業時間は wage report が唯一の出どころ**: `WageRow.overtimeMinutes + nightOvertimeMinutes`
-  (= 時間外 + 時間外深夜 + 週40超過、§5 §6)。残業(計算)・残業(基礎単価、37条)・残業(最低賃金) の 3 つが
+  (= 時間外 + 時間外深夜 + 週40超過、§5 §6)。残業(計算)・残業(基礎単価、37条) の 2 つが
   同じ値 (`SalaryComparisonRow.overtimeMinutes`) を使う。
   - タイムカード表の残業時間だけは別 (kosoku 日別の合算。日別には週40超過が無い)。
 - **基本給(計算) = 単価マスタ × 法定時間内** (wage report の `wage.amounts.statutory`、`SalaryComparisonRow.sysBase`)。
   給与区分 (月給・日給・時給・不明) に関わらず同じ式で、単価が無い月は計算なし。明細の基本単価 × 日数は使わない
   (日数を掛ければ明細の基本給の項目そのものになり、比較にならない)。差 = 明細の基本給 − 計算 (負 = 明細が下回る)。
+- **残業(計算) = 最低賃金ベースの残業代** (wage report の `minWageOvertimePay + minWageNightOvertimePay`、
+  `SalaryComparisonRow.sysOvertime`)。最低賃金を基礎額に割増を掛けた絶対下限で、時間は `overtimeMinutes`。
+  最低賃金が引けない月は計算なし。明細の残業単価 × 残業時間は使わない。差 = 明細の残業代 − 計算
+  (月給 = 固定残業の人は差を出さない)。以前の「残業(最低賃金)」列は残業(計算) と同じ値なので 1 つに畳んだ。
   総支給(計算) = 基本給(計算) + 残業(計算)。
 - **37条の基礎単価** (`computeBaseRate`) の分母は所定労働時間 (労基則19条)。
   - 日給: 割増基礎の月合計 ÷ **min(日数 × 1 日の所定, 法定の月平均 173.8h)**。

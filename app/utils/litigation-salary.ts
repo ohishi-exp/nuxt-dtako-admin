@@ -17,8 +17,8 @@
 import { fmtMinutes, fmtYen, nextYm, WAGE_COLUMNS } from './restraint-wage-view'
 import type { WageCategoryKey, WageReportResponse, WageReportRow } from './restraint-wage-view'
 import {
-  BASE_RATE_NONE_LABELS, baseRateBasisNotes, baseRateBasisText, baseRateDaysSourceLabel, compareSalaryMonth,
-  CSV_ATTENDANCE_LABELS, CSV_BASE_SALARY_ITEM_LABEL, CSV_OVERTIME_HOURS_LABEL, fmtHoursOneDecimal, suggestCdMapEntries,
+  BASE_RATE_NONE_LABELS, baseRateBasisNotes, baseRateBasisText, compareSalaryMonth,
+  CSV_BASE_SALARY_ITEM_LABEL, suggestCdMapEntries,
 } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
 import { splitCdMapKey } from './employee-master'
@@ -246,39 +246,10 @@ export interface LitigationSalaryAmountCell {
   csv: number
   sys: number | null
   diff: number | null
-  /** 「計算」の根拠 (基本給 = `最低賃金 1,000 円/h × 法定時間内 150h00m`、残業 = `1,500 円/h × 10h00m`)。総支給は null (基本給と残業の和なので根拠を持たない) */
+  /** 「計算」の根拠 (基本給 = `最低賃金 1,000 円/h × 法定時間内 150h00m`、残業 = `最低賃金ベース × 残業時間 10h00m`)。総支給は null (基本給と残業の和なので根拠を持たない) */
   basis: string | null
   /** 基本給の明細の内訳 (`うち基本給 N / 手当 M`)。基本給だけ。 */
   breakdown: string | null
-  /** 残業だけ: 最低賃金ベースの残業代との比較。基本給の単価 × 法定内時間は「計算」そのものなのでここに出さない。基本給・総支給は null */
-  minWage: LitigationSalaryMinWageLine | null
-}
-
-/** 最低賃金ベースの比較の 1 行。`diff` は明細 − 最低賃金ベース (負 = 明細が下回る)。比べられないときは理由を `text` に、`diff` は null。 */
-export interface LitigationSalaryMinWageLine {
-  text: string
-  diff: number | null
-  /** 明細が下回った (`diff` が負) — **エラー** (赤) */
-  shortfall: boolean
-}
-
-/** 時間セルの 1 行 (ラベル + 値)。`key` は `data-salary-line` に入る。 */
-export interface LitigationSalaryHoursLine {
-  key: string
-  label: string
-  value: string
-}
-
-/** 「勤務日 / 時間外」列の中身 (計算で使った労働時間)。 */
-export interface LitigationSalaryHours {
-  /** デジタコ: 稼働日数 / 実働 / 法定区分 (0 の区分は出さない。法定内と実働は 0 でも出す) — wage report の欄をそのまま */
-  digitaco: LitigationSalaryHoursLine[]
-  /** 明細: 出勤日数 / 有休日数 / 残業時間 (在るものだけ) */
-  csv: LitigationSalaryHoursLine[]
-  /** 明細に 出勤日数 も 有休日数 も無い (37条の分母がデジタコの稼働日数に倒れる月) — 「明細に日数なし」と言う */
-  csvNoDays: boolean
-  /** 37条の分母 (`所定 150.0h (= 明細 20 日 × 7h30m)`)。日給以外・出せない行は null */
-  denominator: string | null
 }
 
 export interface LitigationSalaryOver37 {
@@ -307,8 +278,6 @@ export interface LitigationSalaryRowCells {
   /** 37条の比較。出せないときは null と、その理由 */
   over37: LitigationSalaryOver37 | null
   over37NoneReason: string
-  /** 計算で使った労働時間 (画面の列と紙面の列が同じ部品で出す) */
-  hours: LitigationSalaryHours
 }
 
 const yen = (v: number) => v.toLocaleString('ja-JP')
@@ -330,40 +299,16 @@ function baseBasisText(c: SalaryComparisonRow): string {
   const rate = c.rateBasis.hourlyRate
   if (c.sysBase === null || rate === null) return '単価なし (単価マスタに単価が無い)'
   const name = rateBasisStatus(c.rateBasis).status === 'ok' ? '最低賃金' : '単価マスタ'
-  return `${name} ${yen(rate)} 円/h × ${WAGE_LABEL.statutory} ${fmtMinutes(c.hours.minutes.statutory)}`
+  return `${name} ${yen(rate)} 円/h × ${WAGE_LABEL.statutory} ${fmtMinutes(c.statutoryMinutes)}`
 }
 
-function overtimeMinWageLine(c: SalaryComparisonRow): LitigationSalaryMinWageLine {
-  if (c.minWageOvertimePay === null) return { text: '最低賃金ベースの残業代なし (最低賃金が引けない)', diff: null, shortfall: false }
-  return {
-    text: `最低賃金ベース ${yen(c.minWageOvertimePay)}`,
-    diff: c.diffCsvVsMinWageOvertime,
-    shortfall: (c.diffCsvVsMinWageOvertime ?? 0) < 0,
-  }
-}
-
-/** 時間セルの行。時間は全部 wage report の欄 (`row.hours`)・明細の勤怠・37条の分母 (`baseRateBasis`) を並べるだけ。 */
-function hoursCell(c: SalaryComparisonRow): LitigationSalaryHours {
-  const digitaco: LitigationSalaryHoursLine[] = [
-    { key: 'work-days', label: '稼働日数', value: `${c.hours.workDays} 日` },
-    { key: 'working', label: '実働', value: fmtMinutes(c.hours.workingMinutes) },
-  ]
-  for (const col of WAGE_COLUMNS) {
-    const m = c.hours.minutes[col.key]
-    if (m > 0 || col.key === 'statutory') digitaco.push({ key: col.key, label: col.label, value: fmtMinutes(m) })
-  }
-  const csvDays = c.attendanceDays.csv
-  const csv: LitigationSalaryHoursLine[] = []
-  if (csvDays.work !== undefined) csv.push({ key: 'csv-work', label: CSV_ATTENDANCE_LABELS.work, value: `${csvDays.work} 日` })
-  if (csvDays.paidLeave !== undefined) csv.push({ key: 'csv-paid-leave', label: CSV_ATTENDANCE_LABELS.paidLeave, value: `${csvDays.paidLeave} 日` })
-  if (c.csvOvertimeHours !== null) csv.push({ key: 'csv-overtime', label: CSV_OVERTIME_HOURS_LABEL, value: `${c.csvOvertimeHours} h` })
-  const b = c.baseRateBasis
-  const denominator = b.kind === 'days' && b.none === null && b.hours !== null
-    ? b.capped
-      ? `所定 ${fmtHoursOneDecimal(b.hours)} (頭打ち)`
-      : `所定 ${fmtHoursOneDecimal(b.hours)} (= ${baseRateDaysSourceLabel(b.daysSource)} ${b.days} 日 × ${fmtMinutes(b.dailyMinutes)})`
-    : null
-  return { digitaco, csv, csvNoDays: csvDays.work === undefined && csvDays.paidLeave === undefined, denominator }
+/**
+ * 残業(計算) の根拠。計算 = wage report の最低賃金ベースの残業代 (最低賃金を基礎額にした割増。ここで掛け算しない)。
+ * 時間は行の `overtimeMinutes` (足し直さない)。最低賃金ベースなので単価マスタの名前は出さない。
+ */
+function overtimeBasisText(c: SalaryComparisonRow): string {
+  if (c.sysOvertime === null) return '最低賃金ベースの残業代なし (最低賃金が引けない)'
+  return `最低賃金ベース × 残業時間 ${fmtMinutes(c.overtimeMinutes)}`
 }
 
 /**
@@ -375,14 +320,13 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
     amounts: [
       {
         key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: baseBasisText(c),
-        breakdown: baseBreakdownText(c.csvBaseItems), minWage: null,
+        breakdown: baseBreakdownText(c.csvBaseItems),
       },
       {
         key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime,
-        basis: c.sysOvertimeRate === null ? '単価なし' : `${yen(c.sysOvertimeRate)} 円/h × ${fmtMinutes(c.overtimeMinutes)}`,
-        breakdown: null, minWage: overtimeMinWageLine(c),
+        basis: overtimeBasisText(c), breakdown: null,
       },
-      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal, basis: null, breakdown: null, minWage: null },
+      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal, basis: null, breakdown: null },
     ],
     overtimeFixed: c.overtimeFixed,
     over37: c.baseRateOvertimePay === null
@@ -400,7 +344,6 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
           minWageRate: c.rateBasis.minWageRate,
         },
     over37NoneReason: c.baseRateBasis.none === null ? '' : `(${BASE_RATE_NONE_LABELS[c.baseRateBasis.none]})`,
-    hours: hoursCell(c),
   }
 }
 

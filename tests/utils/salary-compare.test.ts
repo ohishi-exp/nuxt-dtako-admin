@@ -67,27 +67,27 @@ describe('overtimeFixed — 固定残業の人は残業(計算)との差を出�
   it('月給者は overtimeFixed が立ち diffOvertime を出さない', () => {
     const cmp = compareSalaryMonth(
       [csvRow({ driverCd: '1', cdKey: '1', driverName: '甲', amounts: { 残業手当: 130000 }, rates: { base: null, overtime: 806 } })],
-      [reportRow('1', '甲', { payKubun: 1, overtimeMinutes: 4760 })],
+      [reportRow('1', '甲', { payKubun: 1, overtimeMinutes: 4760, minWageOvertimePay: 50000, minWageNightOvertimePay: 0 })],
       { items: { 残業手当: 'overtime' } },
       '2023-04',
       { entries: {} },
     )
     expect(cmp.rows[0]).toMatchObject({ overtimeFixed: true, diffOvertime: null })
-    // 金額そのもの (単価×時間) は残す — 桁感の目安としては読めるため
-    expect(cmp.rows[0]!.sysOvertime).not.toBeNull()
+    // 金額そのもの (最低賃金ベース) は残す — 桁感の目安としては読めるため
+    expect(cmp.rows[0]!.sysOvertime).toBe(50000)
   })
 
   it('日給・時給・区分なしは従来どおり差を出す', () => {
     for (const payKubun of [2, 3, null]) {
       const cmp = compareSalaryMonth(
         [csvRow({ driverCd: '1', cdKey: '1', driverName: '甲', amounts: { 残業手当: 130000 }, rates: { base: null, overtime: 806 } })],
-        [reportRow('1', '甲', { payKubun, overtimeMinutes: 4760 })],
+        [reportRow('1', '甲', { payKubun, overtimeMinutes: 4760, minWageOvertimePay: 50000, minWageNightOvertimePay: 0 })],
         { items: { 残業手当: 'overtime' } },
         '2023-04',
         { entries: {} },
       )
       expect(cmp.rows[0]).toMatchObject({ overtimeFixed: false })
-      expect(cmp.rows[0]!.diffOvertime).not.toBeNull()
+      expect(cmp.rows[0]!.diffOvertime).toBe(130000 - 50000)
     }
   })
 })
@@ -390,6 +390,10 @@ function reportRow(
     /** 単価マスタ × 法定時間内の金額 (wage-report の `wage.amounts.statutory`、**基本給(計算) の出どころ**)。
      * 既定は `null` = 金額が出ていない (単価マスタに単価が無い月)。 */
     statutoryAmount?: number | null
+    /** 最低賃金ベースの残業代 (wage-report の `wage.minWageOvertimePay` / `minWageNightOvertimePay`、**残業(計算) の出どころ**)。
+     * 既定は `null` = 最低賃金が引けない。 */
+    minWageOvertimePay?: number | null
+    minWageNightOvertimePay?: number | null
     /** 1 日の所定 (分、wage-report の `daily_work_minutes`)。**既定は 480**。`null` = 所定マスタを読めたが
      * 該当なし / `'absent'` = キーが無い (読めなかった・古い保存物)。 */
     dailyWorkMinutes?: number | null | 'absent'
@@ -417,15 +421,15 @@ function reportRow(
     },
     pay_kubun: over.payKubun === undefined ? 2 : over.payKubun,
     ...(over.dailyWorkMinutes === 'absent' ? {} : { daily_work_minutes: over.dailyWorkMinutes === undefined ? 480 : over.dailyWorkMinutes }),
-    // 残業(最低賃金) 列の素材 (wage-report の wage 側)。単体テストでは最低賃金
+    // 残業(計算) の素材 (wage-report の wage 側)。単体テストでは最低賃金
     // 未設定 (null)・法定内 0 分を既定とし、実データ相当の値は共有 fixture テスト
     // (salary-compare-fixture.test.ts) が golden 経由で検証する。
     wage: {
       minutes: { statutory: over.statutoryMinutes ?? 0 },
       overtimeMinutes: (over.overtimeMinutes ?? 0) + (over.weekly40ExcessMinutes ?? 0),
       nightOvertimeMinutes: over.overtimeNightMinutes ?? 0,
-      minWageOvertimePay: null,
-      minWageNightOvertimePay: null,
+      minWageOvertimePay: over.minWageOvertimePay ?? null,
+      minWageNightOvertimePay: over.minWageNightOvertimePay ?? null,
       amounts: over.statutoryAmount == null ? null : { statutory: over.statutoryAmount },
     },
   } as unknown as WageReportRow
@@ -465,7 +469,7 @@ describe('compareSalaryMonth — 基本給(計算) = wage report の 単価マ�
     expect(row!.diffBase).toBeNull()
     expect(row!.sysTotal).toBeNull()
     expect(row!.diffTotal).toBeNull()
-    expect(row!.sysOvertime).toBe(0) // 残業(計算) は従来どおり 残業単価 × 残業時間
+    expect(row!.sysOvertime).toBeNull() // 残業(計算) は最低賃金が引けない月 (この行の wage には最低賃金ベースの残業代が無い)
   })
 
   it('法定時間内が 0 の月は金額 0 (null と区別する)。差 = 明細', () => {
@@ -475,13 +479,27 @@ describe('compareSalaryMonth — 基本給(計算) = wage report の 単価マ�
     expect(row!.diffBase).toBe(5000)
   })
 
-  it('残業(計算) の根拠: 残業単価が行に写る。単価なしは null', () => {
-    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', rates: { base: 10000, overtime: 1500 } })
-    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { workDays: 20, payKubun: 2 })], config, '2023-04').rows
-    expect(row!.sysOvertimeRate).toBe(1500)
-    const none = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', rates: { base: null, overtime: null } })
-    const [r2] = compareSalaryMonth([none], [reportRow('99001', '架空 花子', { payKubun: 2 })], config, '2023-04').rows
-    expect(r2!.sysOvertimeRate).toBeNull()
+  it('★ 残業(計算) = 最低賃金ベースの残業代 (時間外 + 時間外深夜の合計)。明細の残業単価 × 残業時間 (1,500 × 10h = 15,000) ではない', () => {
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 180000, 残業手当: 30000 }, rates: { base: 10000, overtime: 1500 } })
+    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { overtimeMinutes: 600, statutoryAmount: STATUTORY, minWageOvertimePay: 12000, minWageNightOvertimePay: 2500 })], config, '2023-04').rows
+    expect(row!.sysOvertime).toBe(14500)
+    expect(row!.sysOvertime).not.toBe(1500 * 10)
+    expect(row!.diffOvertime).toBe(30000 - 14500)
+    expect(row!.sysTotal).toBe(STATUTORY + 14500)
+    expect(row!.diffTotal).toBe(210000 - (STATUTORY + 14500))
+  })
+
+  it('最低賃金ベースの残業代が昼夜のどちらか欠ければ 残業(計算)・差・総支給(計算) は null (0 と区別)。明細の残業単価があっても計算しない', () => {
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 180000, 残業手当: 30000 }, rates: { base: 10000, overtime: 1500 } })
+    for (const w of [{}, { minWageOvertimePay: 12000 }, { minWageNightOvertimePay: 2500 }]) {
+      const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { overtimeMinutes: 600, statutoryAmount: STATUTORY, ...w })], config, '2023-04').rows
+      expect(row!.sysOvertime).toBeNull()
+      expect(row!.diffOvertime).toBeNull()
+      expect(row!.sysTotal).toBeNull()
+      expect(row!.sysBase).toBe(STATUTORY)
+    }
+    const [zero] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { statutoryAmount: STATUTORY, minWageOvertimePay: 0, minWageNightOvertimePay: 0 })], config, '2023-04').rows
+    expect(zero!.sysOvertime).toBe(0)
   })
 })
 
@@ -668,12 +686,12 @@ describe('suggestCdMapEntries', () => {
 describe('compareSalaryMonth', () => {
   const config: SalaryItemConfig = { items: {} }
 
-  it('乗務員CD (前ゼロ・数値同値) で突合し、基本給は 単価マスタ × 法定時間内、残業は明細の残業単価 × 残業時間 で差額を計算する', () => {
+  it('乗務員CD (前ゼロ・数値同値) で突合し、基本給は 単価マスタ × 法定時間内、残業は 最低賃金ベースの残業代 で差額を計算する', () => {
     const out = compareSalaryMonth(
-      // 残業単価 1430 円/h (基本単価は計算に使わない)
+      // 明細の基本単価・残業単価は計算に使わない
       [csvRow({ driverCd: '01239', cdKey: '1239', rates: { base: 3679, overtime: 1430 } })],
       // 稼働 22 日、時間外 90h + 時間外深夜 2h、法定時間内の金額 80,938
-      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 90 * 60, overtimeNightMinutes: 120, statutoryAmount: 80938 })],
+      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 90 * 60, overtimeNightMinutes: 120, statutoryAmount: 80938, minWageOvertimePay: 120000, minWageNightOvertimePay: 11560 })],
       config,
       '2023-04',
     )
@@ -684,7 +702,7 @@ describe('compareSalaryMonth', () => {
     expect(r.csvTotal).toBe(110000)
     expect(r.overtimeMinutes).toBe(92 * 60)
     expect(r.sysBase).toBe(80938)
-    expect(r.sysOvertime).toBe(1430 * 92) // 131,560
+    expect(r.sysOvertime).toBe(131560) // 最低賃金ベースの残業代 (昼 120,000 + 夜 11,560)
     expect(r.sysTotal).toBe(80938 + 131560)
     expect(r.diffBase).toBe(80000 - 80938)
     expect(r.diffOvertime).toBe(30000 - 131560)
@@ -721,38 +739,24 @@ describe('compareSalaryMonth', () => {
     expect(compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸')], config, '2025-01').rows[0]!.rateBasis.hourlyRate).toBeNull()
   })
 
-  // Refs #1133: 計算で使った労働時間 (表示用の写し)。wage report の欄をそのまま運び、給与比較の側で数え直さない
-  it('hours / sysBase: wage report の稼働日数・実働・法定区分ごとの分・法定内の金額をそのまま写す。金額が無ければ null', () => {
+  // Refs #1133: 基本給(計算) の根拠に出す法定時間内 (表示用の写し)。wage report の欄をそのまま運び、給与比較の側で数え直さない
+  it('statutoryMinutes / sysBase: wage report の法定時間内の分と金額をそのまま写す。金額が無ければ sysBase は null', () => {
     const fake = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 太郎' })
-    const r = reportRow('99001', '架空 太郎', { workDays: 18, workingMinutes: 8000 })
-    const minutes = { statutory: 7000, overtime: 500, night: 60, overtimeNight: 30, nonLegalHoliday: 0, nonLegalHolidayNight: 0, legalHoliday: 0, legalHolidayNight: 0, weekly40Excess: 400 }
-    r.wage = { ...r.wage, minutes, amounts: { statutory: 123456 } as never }
+    const r = reportRow('99001', '架空 太郎', { workDays: 18, workingMinutes: 8000, statutoryMinutes: 7000, statutoryAmount: 123456 })
     const hit = compareSalaryMonth([fake], [r], config, '2025-01').rows[0]!
-    expect(hit.hours).toEqual({ workDays: 18, workingMinutes: 8000, minutes })
-    expect(hit.hours.minutes).toBe(minutes) // 写し (同じ欄をそのまま運ぶ。足し引きしない)
+    expect(hit.statutoryMinutes).toBe(7000)
     expect(hit.sysBase).toBe(123456) // 基本給(計算) と同じ 1 欄 (別の欄に二重に持たない)
-    // 実働が無い (null) 行は 0、単価が無く金額が出ていない行 (amounts null) は null
-    const none = reportRow('99001', '架空 太郎', { workDays: 3, workingMinutes: null })
-    none.wage = { ...none.wage, amounts: null }
+    // 単価が無く金額が出ていない行 (amounts null) は null、時間は写る
+    const none = reportRow('99001', '架空 太郎', { workDays: 3, statutoryMinutes: 1200 })
     const row = compareSalaryMonth([fake], [none], config, '2025-01').rows[0]!
-    expect(row.hours).toMatchObject({ workDays: 3, workingMinutes: 0 })
+    expect(row.statutoryMinutes).toBe(1200)
     expect(row.sysBase).toBeNull()
-  })
-
-  it('分単位の残業は時給を按分して円未満を四捨五入する', () => {
-    const out = compareSalaryMonth(
-      [csvRow({ rates: { base: null, overtime: 1430 } })],
-      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 90 })], // 1.5h
-      config,
-      '2023-04',
-    )
-    expect(out.rows[0]!.sysOvertime).toBe(2145) // 1430 × 1.5
   })
 
   it('summary の時間外が null でも 0 として扱う', () => {
     const out = compareSalaryMonth(
       [csvRow({ rates: { base: 3679, overtime: 1430 } })],
-      [reportRow('1239', '城田 秀幸', { workDays: 10, overtimeMinutes: null, overtimeNightMinutes: null, statutoryAmount: 36790 })],
+      [reportRow('1239', '城田 秀幸', { workDays: 10, overtimeMinutes: null, overtimeNightMinutes: null, statutoryAmount: 36790, minWageOvertimePay: 0, minWageNightOvertimePay: 0 })],
       config,
       '2023-04',
     )
@@ -761,18 +765,18 @@ describe('compareSalaryMonth', () => {
   })
 
   it('★ 残業時間は wage report 由来の 1 本 (時間外 + 時間外深夜 + 週 40 時間超)。残業(計算)・総支給(計算)・37条が同じ時間を使う', () => {
-    // 明細: 日額 10,000 円・残業単価 1,500 円/h・出勤 20 日。summary の時間外 10h、週 40 時間超 6h は wage 側にだけ乗る
+    // 明細: 日額 10,000 円・出勤 20 日。summary の時間外 10h、週 40 時間超 6h は wage 側にだけ乗る
     const r = compareSalaryMonth(
       [csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 200000, 残業手当: 30000 }, reportedTotal: 230000, rates: { base: 10000, overtime: 1500 }, attendance: { 出勤日数: 20 } })],
-      [reportRow('99001', '架空 花子', { workDays: 20, overtimeMinutes: 10 * 60, weekly40ExcessMinutes: 6 * 60, statutoryAmount: 200000 })],
+      [reportRow('99001', '架空 花子', { workDays: 20, overtimeMinutes: 10 * 60, weekly40ExcessMinutes: 6 * 60, statutoryAmount: 200000, minWageOvertimePay: 20000, minWageNightOvertimePay: 0 })],
       config,
       '2023-04',
     ).rows[0]!
     expect(r.overtimeMinutes).toBe(16 * 60) // summary 由来 (10h) ではない
-    expect(r.sysOvertime).toBe(1500 * 16) // 24,000 (旧式は 1500 × 10 = 15,000)
-    expect(r.diffOvertime).toBe(30000 - 24000)
-    expect(r.sysTotal).toBe(200000 + 24000)
-    expect(r.diffTotal).toBe(230000 - 224000)
+    expect(r.sysOvertime).toBe(20000) // wage report の最低賃金ベースの残業代 (時間は wage 側の 16h で作られた値)
+    expect(r.diffOvertime).toBe(30000 - 20000)
+    expect(r.sysTotal).toBe(200000 + 20000)
+    expect(r.diffTotal).toBe(230000 - 220000)
     // 37条: 基礎単価 200,000 ÷ (20 日 × 8h) = 1,250。理論値 = 16h × 1,250 × 1.25
     expect(r.baseRateOvertimePay).toBe(16 * 1250 * 1.25)
     expect(overtimeHoursComparison({ ...r, csvOvertimeHours: 12 }).diffMinutes).toBe(16 * 60 - 12 * 60)
@@ -789,16 +793,16 @@ describe('compareSalaryMonth', () => {
     expect(r.diffTotal).toBeNull()
   })
 
-  it('単価マスタの金額が無い月は基本給(計算)のみ null、残業単価があれば残業(計算)は出る', () => {
+  it('単価マスタの金額が無い月は基本給(計算)のみ null、最低賃金ベースの残業代があれば残業(計算)は出る', () => {
     const out = compareSalaryMonth(
       [csvRow({ rates: { base: null, overtime: 1430 } })],
-      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 90 })], // 1.5h
+      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 90, minWageOvertimePay: 1800, minWageNightOvertimePay: 0 })],
       config,
       '2023-04',
     )
     const r = out.rows[0]!
     expect(r.sysBase).toBeNull()
-    expect(r.sysOvertime).toBe(2145) // 1430 × 1.5h
+    expect(r.sysOvertime).toBe(1800) // 最低賃金ベース (明細の 1430 × 1.5h = 2145 ではない)
     expect(r.sysTotal).toBeNull() // 片方 null なら合計も null
   })
 
@@ -880,7 +884,7 @@ describe('compareSalaryMonth', () => {
     expect(out.rows[0]!.mappedDriverCd).toBeNull()
   })
 
-  it('最低賃金が引けない乗務員は 残業(最低賃金) 系が null (時間軸は出る)', () => {
+  it('最低賃金が引けない乗務員は 残業(計算)・差が null (時間軸は出る)', () => {
     const out = compareSalaryMonth(
       [csvRow()],
       [reportRow('1239', '城田 秀幸', { overtimeMinutes: 60, overtimeNightMinutes: 30 })],
@@ -889,8 +893,8 @@ describe('compareSalaryMonth', () => {
     )
     const r = out.rows[0]!
     expect(r.overtimeMinutes).toBe(90)
-    expect(r.minWageOvertimePay).toBeNull()
-    expect(r.diffCsvVsMinWageOvertime).toBeNull()
+    expect(r.sysOvertime).toBeNull()
+    expect(r.diffOvertime).toBeNull()
   })
 
   it('基礎単価(実績) と 残業(基礎単価) は最低賃金設定と独立に 明細 ÷ 所定労働時間 から出る (Refs #278 / #1133)', () => {

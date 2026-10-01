@@ -2,10 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import SalaryAmountCell from '../../app/components/SalaryAmountCell.vue'
 import SalaryOver37Cell from '../../app/components/SalaryOver37Cell.vue'
-import SalaryHoursCell from '../../app/components/SalaryHoursCell.vue'
 
 // 画面と印刷の紙面が共用する縦積みセル。紙面 (compact) は同じ行を詰めた余白で出す。
-const amount = (over = {}) => ({ key: 'overtime' as const, csv: 30000, sys: 15000, diff: 15000, basis: '1,500 円/h × 10h00m', breakdown: null, minWage: null, ...over })
+const amount = (over = {}) => ({ key: 'overtime' as const, csv: 30000, sys: 15000, diff: 15000, basis: '最低賃金ベース × 残業時間 10h00m', breakdown: null, ...over })
 const lines = (w: ReturnType<typeof mount>) => w.findAll('[data-salary-line]').map(l => l.attributes('data-salary-line'))
 
 describe('SalaryAmountCell', () => {
@@ -18,6 +17,7 @@ describe('SalaryAmountCell', () => {
     const cls = (diff: number | null) => mount(SalaryAmountCell, { props: { cell: amount({ diff }) } }).find('[data-salary-line="diff"]').classes()
     expect(cls(1)).toContain('text-blue-600')
     expect(cls(-1)).toContain('text-red-600')
+    expect(cls(-1)).toContain('font-bold') // 基本給・残業の差が負 (明細が下回る) は赤太字
     expect(cls(0)).not.toContain('text-blue-600')
     expect(mount(SalaryAmountCell, { props: { cell: amount({ diff: null, sys: null }) } }).find('[data-salary-line="diff"]').text()).toBe('差-')
   })
@@ -78,66 +78,33 @@ describe('SalaryOver37Cell', () => {
   })
 })
 
-describe('SalaryAmountCell: 基本給の内訳と最低賃金ベースの比較の行', () => {
+describe('SalaryAmountCell: 基本給の内訳と計算の根拠', () => {
   const withExtra = (over = {}) => ({
-    key: 'base' as const, csv: 200000, sys: 190000, diff: 10000, basis: '9,500 円 × 20 日',
-    breakdown: 'うち基本給 190,000 / 手当 10,000', minWage: { text: '最低賃金 1,000 円/h × 法定時間内 150h00m = 150,000', diff: 50000, shortfall: false }, ...over,
+    key: 'base' as const, csv: 200000, sys: 150000, diff: 50000, basis: '最低賃金 1,000 円/h × 法定時間内 150h00m',
+    breakdown: 'うち基本給 190,000 / 手当 10,000', ...over,
   })
 
-  it('明細の下に内訳、根拠の下に最低賃金ベースの行、最後に差 (画面も紙面も同じ順)', () => {
+  it('明細の下に内訳、計算の下に根拠、最後に差。同じ数字の別行 (minwage) は無い (画面も紙面も同じ順)', () => {
     for (const compact of [false, true]) {
       const w = mount(SalaryAmountCell, { props: { cell: withExtra(), compact } })
-      expect(lines(w)).toEqual(['csv', 'breakdown', 'sys', 'basis', 'minwage', 'diff'])
+      expect(lines(w)).toEqual(['csv', 'breakdown', 'sys', 'basis', 'diff'])
       expect(w.find('[data-salary-line="breakdown"]').text()).toBe('うち基本給 190,000 / 手当 10,000')
-      expect(w.find('[data-salary-line="minwage"]').text()).toBe('最低賃金 1,000 円/h × 法定時間内 150h00m = 150,000 (明細との差 +50,000)')
+      expect(w.find('[data-salary-line="basis"]').text()).toBe('最低賃金 1,000 円/h × 法定時間内 150h00m')
     }
   })
 
-  it('★ 明細が下回る (shortfall) 月だけ赤太字。比べられない月は差を付けず理由だけ', () => {
-    const red = mount(SalaryAmountCell, { props: { cell: withExtra({ minWage: { text: 'x', diff: -1, shortfall: true } }) } }).find('[data-salary-line="minwage"]')
-    expect(red.classes()).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
-    expect(red.text()).toBe('x (明細との差 -1)')
-    const none = mount(SalaryAmountCell, { props: { cell: withExtra({ minWage: { text: '比較なし', diff: null, shortfall: false } }), compact: true } }).find('[data-salary-line="minwage"]')
-    expect(none.text()).toBe('比較なし')
-    expect(none.classes()).not.toContain('text-red-600')
+  it('★ 差が負 (明細が下回る) の基本給・残業は赤太字。0・正・総支給は太字にしない', () => {
+    const cls = (key: 'base' | 'overtime' | 'total', diff: number | null) =>
+      mount(SalaryAmountCell, { props: { cell: withExtra({ key, diff }) } }).find('[data-salary-line="diff"]').classes()
+    expect(cls('base', -1)).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
+    expect(cls('overtime', -1)).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
+    expect(cls('base', 0)).not.toContain('font-bold')
+    expect(cls('base', 5)).not.toContain('font-bold')
+    expect(cls('base', null)).not.toContain('font-bold')
+    expect(cls('total', -1)).not.toContain('font-bold')
   })
 
-  it('内訳も最低賃金の行も無ければ (総支給) 従来どおり 3 段', () => {
-    expect(lines(mount(SalaryAmountCell, { props: { cell: withExtra({ key: 'total', basis: null, breakdown: null, minWage: null }) } }))).toEqual(['csv', 'sys', 'diff'])
-  })
-})
-
-describe('SalaryHoursCell (計算で使った労働時間)', () => {
-  const hours = (over = {}) => ({
-    digitaco: [
-      { key: 'work-days', label: '稼働日数', value: '20 日' }, { key: 'working', label: '実働', value: '160h00m' },
-      { key: 'statutory', label: '法定時間内', value: '150h00m' },
-    ],
-    csv: [{ key: 'csv-work', label: '出勤日数', value: '19 日' }], csvNoDays: false,
-    denominator: '所定 150.0h (= 明細 20 日 × 7h30m)', ...over,
-  })
-
-  it('デジタコ → 明細 → 37条の分母の順に、行ごとに data-salary-line を付けて積む (画面も紙面も同じ)', () => {
-    for (const compact of [false, true]) {
-      const w = mount(SalaryHoursCell, { props: { hours: hours(), compact } })
-      expect(lines(w)).toEqual(['hours-digitaco-head', 'hours-work-days', 'hours-working', 'hours-statutory', 'hours-csv-head', 'hours-csv-work', 'hours-denominator'])
-      expect(w.find('[data-salary-line="hours-working"]').text()).toBe('実働160h00m')
-      expect(w.find('[data-salary-line="hours-denominator"]').text()).toBe('37条の分母: 所定 150.0h (= 明細 20 日 × 7h30m)')
-    }
-  })
-
-  it('明細に日数が無ければ「明細に日数なし」、分母が出せなければ分母の行は無い', () => {
-    const w = mount(SalaryHoursCell, { props: { hours: hours({ csv: [], csvNoDays: true, denominator: null }) } })
-    expect(lines(w)).toEqual(['hours-digitaco-head', 'hours-work-days', 'hours-working', 'hours-statutory', 'hours-csv-head', 'hours-csv-no-days'])
-    expect(w.find('[data-salary-line="hours-csv-no-days"]').text()).toBe('明細に日数なし')
-  })
-
-  it('紙面 (compact) は行を横に流して高さを詰める (flex-wrap)。画面は縦積みで text-xs', () => {
-    const c = mount(SalaryHoursCell, { props: { hours: hours(), compact: true } }).html()
-    expect(c).toContain('flex-wrap')
-    expect(c).not.toContain('text-xs')
-    const v = mount(SalaryHoursCell, { props: { hours: hours() } }).html()
-    expect(v).not.toContain('flex-wrap')
-    expect(v).toContain('text-xs')
+  it('内訳も根拠も無ければ (総支給) 3 段', () => {
+    expect(lines(mount(SalaryAmountCell, { props: { cell: withExtra({ key: 'total', basis: null, breakdown: null }) } }))).toEqual(['csv', 'sys', 'diff'])
   })
 })

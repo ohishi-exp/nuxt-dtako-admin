@@ -1805,7 +1805,6 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
                   <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 明細の (出勤日数 + 有休日数) × 1 日の所定。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無ければデジタコの稼働日数、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
-                  <th class="px-3 py-2 font-medium" title="計算に使った労働時間。デジタコ = 賃金計算 (wage report) の稼働日数・実働・法定区分ごとの時間 / 明細 = 給与明細の出勤日数・有休日数・残業時間 / 37条の分母 = 日給の基礎単価を割る所定 (週 40 時間相当の月平均 173.8h で頭打ち)">計算に使った時間</th>
                   <th class="px-3 py-2 font-medium" title="計算に使った単価 = 単価マスタ (最低賃金の一括設定で入れた額)。その月の最低賃金と違う月はエラー">単価 (最低賃金)</th>
                 </tr>
               </thead>
@@ -1837,15 +1836,12 @@ function fmtDateTime(iso: string): string {
                     <td class="px-3 py-2 whitespace-nowrap" data-salary-cell="over37">
                       <SalaryOver37Cell :over37="salaryRowCells(row.compared).over37" :none-reason="salaryRowCells(row.compared).over37NoneReason" />
                     </td>
-                    <td class="px-3 py-2 whitespace-nowrap" data-salary-cell="hours">
-                      <SalaryHoursCell :hours="salaryRowCells(row.compared).hours" />
-                    </td>
                     <td class="px-3 py-2 text-xs min-w-48" data-salary-cell="rate-basis" :data-rate-status="rateBasisStatus(row.compared.rateBasis).status">
                       <div data-salary-line="rate-basis">単価 {{ rateBasisLabel(row.compared.rateBasis) }}</div>
                       <div :class="RATE_BASIS_CLASS[rateBasisStatus(row.compared.rateBasis).status]" data-salary-line="rate-basis-status">{{ rateBasisStatus(row.compared.rateBasis).message }}</div>
                     </td>
                   </template>
-                  <td v-else colspan="6" class="px-3 py-2 text-xs text-gray-400">-</td>
+                  <td v-else colspan="5" class="px-3 py-2 text-xs text-gray-400">-</td>
                 </tr>
               </tbody>
             </table>
@@ -2028,7 +2024,7 @@ function fmtDateTime(iso: string): string {
               <thead>
                 <tr>
                   <th>乗務員</th><th>勤務月 (支給月)</th><th>状態</th>
-                  <th>基本給</th><th>残業</th><th>総支給</th><th>残業代 (37条)</th><th>計算に使った時間</th>
+                  <th>基本給</th><th>残業</th><th>総支給</th><th>残業代 (37条)</th>
                 </tr>
               </thead>
               <tbody>
@@ -2047,9 +2043,8 @@ function fmtDateTime(iso: string): string {
                       <SalaryAmountCell :cell="cell" :overtime-fixed="salaryRowCells(row.compared).overtimeFixed" compact />
                     </td>
                     <td><SalaryOver37Cell :over37="salaryRowCells(row.compared).over37" :none-reason="salaryRowCells(row.compared).over37NoneReason" compact /></td>
-                    <td><SalaryHoursCell :hours="salaryRowCells(row.compared).hours" compact /></td>
                   </template>
-                  <td v-else colspan="5">-</td>
+                  <td v-else colspan="4">-</td>
                 </tr>
               </tbody>
             </table>

@@ -159,7 +159,8 @@ function stubDollarFetch() {
           last_verified_at: null,
           pay_kubun: 2,
           ...(dailyWorkMinutes === 'absent' ? {} : { daily_work_minutes: dailyWorkMinutes }),
-          wage: { minutes: { statutory: 9000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: null, minWageNightOvertimePay: null, ...wageExtra[String(q.month)] },
+          // 最低賃金ベースの残業代は既定で出ている (14,000 + 深夜 1,000 = 15,000)。引けない月は wageExtra で null にする
+          wage: { minutes: { statutory: 9000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: 14000, minWageNightOvertimePay: 1000, ...wageExtra[String(q.month)] },
           invariants: OK_INV,
         }],
       }
@@ -627,8 +628,8 @@ describe('給与比較タブ', () => {
     const cell = (key: string) => w.findAll(`[data-salary-row="1078|2025-01"] [data-salary-cell="${key}"] [data-salary-line]`).map(l => l.text())
     // 基本給(計算) は 単価マスタ × 法定時間内。単価が無い月は計算なしで根拠に理由を出す (日額 × 日数は出さない)
     expect(cell('base')).toEqual(['明細200,000', 'うち基本給 200,000 / 手当 0', '計算-', '単価なし (単価マスタに単価が無い)', '差-'])
-    // 残業は 1,500 円 × 10 h = 15,000 に対して明細 30,000 → +15,000
-    expect(cell('overtime')).toEqual(['明細30,000', '計算15,000', '1,500 円/h × 10h00m', '最低賃金ベースの残業代なし (最低賃金が引けない)', '差+15,000'])
+    // 残業(計算) は wage report の最低賃金ベースの残業代 (14,000 + 深夜 1,000 = 15,000) に対して明細 30,000 → +15,000。同じ数字の別行は無い
+    expect(cell('overtime')).toEqual(['明細30,000', '計算15,000', '最低賃金ベース × 残業時間 10h00m', '差+15,000'])
     // 総支給は基本給と残業の和なので根拠の行は無い (明細 / 計算 / 差 の 3 段)
     expect(cell('total')).toHaveLength(3)
     // 差の色: 正 (残業 +15,000) は青、計算なし (基本給) は色なし
@@ -726,65 +727,38 @@ describe('給与比較タブ', () => {
     })
   })
 
-  it('★ 残業時間は 1 本: 週 40 時間超を含む wage report の時間が、残業の根拠・37条・勤務日 / 時間外 の 3 か所に同じ値で出る', async () => {
+  it('★ 残業時間は 1 本: 週 40 時間超を含む wage report の時間が、残業の根拠・37条の 2 か所に同じ値で出る', async () => {
     // summary の時間外は 10h のまま、wage report は週 40 時間超 5h を足した 15h
     wageExtra = { '2025-01': { overtimeMinutes: 900 } }
     const w = await openAfterChecks()
     await openSalaryTab(w)
     const row = w.find('[data-salary-row="1078|2025-01"]')
-    expect(row.find('[data-salary-cell="overtime"] [data-salary-line="basis"]').text()).toBe('1,500 円/h × 15h00m')
-    expect(row.find('[data-salary-cell="overtime"] [data-salary-line="sys"]').text()).toContain('22,500')
+    expect(row.find('[data-salary-cell="overtime"] [data-salary-line="basis"]').text()).toBe('最低賃金ベース × 残業時間 15h00m')
+    expect(row.find('[data-salary-cell="overtime"] [data-salary-line="sys"]').text()).toContain('15,000') // wage report の最低賃金ベースの残業代 (時間では組み直さない)
     expect(row.find('[data-salary-cell="over37"] [data-salary-line="minutes"]').text()).toContain('15h00m')
     expect(row.text()).not.toContain('10h00m')
     w.unmount()
   })
 
-  // --- 計算で使った労働時間・基本給の内訳・最低賃金との比較 (Refs #1133) ---
-  const hoursLines = (w: VueWrapper, row = '1078|2025-01') =>
-    w.findAll(`[data-salary-row="${row}"] [data-salary-cell="hours"] [data-salary-line]`).map(l => `${l.attributes('data-salary-line')}=${l.text()}`)
+  // --- 基本給・残業の計算の根拠 (Refs #1133) ---
   const FULL_WAGE = {
     hourlyRate: 1000, minWage: { rate: 1000, prefecture: '架空県', mapped: true, rateEffectiveFrom: '2024-10-01' },
     amounts: { statutory: 150000 }, minWageOvertimePay: 14000, minWageNightOvertimePay: 0,
   }
 
-  it('★ 計算に使った時間の列: デジタコ (稼働日数 / 実働 / 法定内、0 の区分は出さない) / 明細の日数 / 37条の分母 (頭打ちなし) を縦に出す', async () => {
-    const w = await openAfterChecks()
-    await openSalaryTab(w)
-    expect(hoursLines(w)).toEqual([
-      'hours-digitaco-head=デジタコ', 'hours-work-days=稼働日数20 日', 'hours-working=実働160h00m', 'hours-statutory=法定時間内150h00m',
-      'hours-csv-head=明細', 'hours-csv-work=出勤日数19 日', 'hours-csv-paid-leave=有休日数1 日',
-      'hours-denominator=37条の分母: 所定 160.0h (= 明細 20 日 × 8h00m)',
-    ])
-    w.unmount()
-  })
-
-  it('★ 日給で 明細の日数 × 8h が週 40 時間相当を超える月は「所定 173.8h (頭打ち)」', async () => {
-    payrollAttendance = { 出勤日数: 22, 有休日数: 2 }
-    const w = await openAfterChecks()
-    await openSalaryTab(w)
-    expect(hoursLines(w).at(-1)).toBe('hours-denominator=37条の分母: 所定 173.8h (頭打ち)')
-    w.unmount()
-  })
-
-  it('★ 明細に日数が無い月は「明細に日数なし」。分母はデジタコ稼働日数', async () => {
-    payrollAttendance = undefined
-    const w = await openAfterChecks()
-    await openSalaryTab(w)
-    const lines = hoursLines(w)
-    expect(lines).toContain('hours-csv-no-days=明細に日数なし')
-    expect(lines.some(l => l.startsWith('hours-csv-work'))).toBe(false)
-    expect(lines.at(-1)).toBe('hours-denominator=37条の分母: 所定 160.0h (= デジタコ稼働 20 日 × 8h00m)')
-    w.unmount()
-  })
-
-  it('★ 実働・法定区分は wage report の欄をそのまま出す (深夜・週 40 時間超など 0 でない区分だけ増える)', async () => {
+  it('★ 「計算に使った時間」の列は無い (列ごと消えた): 画面は 8 セル、見出しにも出ない。時間は 基本給・残業の根拠と 37条のセルに出る', async () => {
     wageExtra = { '2025-01': { minutes: { statutory: 9000, overtime: 600, night: 30, weekly40Excess: 300 } } }
     const w = await openAfterChecks()
     await openSalaryTab(w)
-    expect(hoursLines(w).slice(0, 8)).toEqual([
-      'hours-digitaco-head=デジタコ', 'hours-work-days=稼働日数20 日', 'hours-working=実働160h00m', 'hours-statutory=法定時間内150h00m',
-      'hours-overtime=法定時間外10h00m', 'hours-night=深夜0h30m', 'hours-weekly40Excess=週40超過5h00m', 'hours-csv-head=明細',
-    ])
+    const row = w.find('[data-salary-row="1078|2025-01"]')
+    expect(row.findAll('td')).toHaveLength(8) // 乗務員 / 勤務月 / 状態 / 基本給 / 残業 / 総支給 / 37条 / 単価
+    expect(row.find('[data-salary-cell="hours"]').exists()).toBe(false)
+    expect(row.findAll('[data-salary-line]').some(l => (l.attributes('data-salary-line') ?? '').startsWith('hours-'))).toBe(false)
+    expect(w.findAll('[data-testid="litigation-salary-table"] th').map(t => t.text())).not.toContain('計算に使った時間')
+    expect(w.find('[data-testid="litigation-salary-table"]').text()).not.toContain('37条の分母')
+    // 時間は根拠に出る (基本給 = 法定時間内、残業 = 残業時間、37条の分母は 37条のセルの根拠)
+    expect(row.find('[data-salary-cell="overtime"] [data-salary-line="basis"]').text()).toBe('最低賃金ベース × 残業時間 10h00m')
+    expect(row.find('[data-salary-cell="over37"] [data-salary-line="rate-basis"]').text()).toContain('明細 20 日')
     w.unmount()
   })
 
@@ -796,8 +770,8 @@ describe('給与比較タブ', () => {
     expect(cell).toEqual(['明細200,000', 'うち基本給 200,000 / 手当 0', '計算150,000', '最低賃金 1,000 円/h × 法定時間内 150h00m', '差+50,000'])
     expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="minwage"]').exists()).toBe(false)
     expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="diff"]').classes()).not.toContain('text-red-600')
-    const ot = w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="overtime"] [data-salary-line="minwage"]')
-    expect(ot.text()).toBe('最低賃金ベース 14,000 (明細との差 +16,000)')
+    const ot = w.findAll('[data-salary-row="1078|2025-01"] [data-salary-cell="overtime"] [data-salary-line]').map(l => l.text())
+    expect(ot).toEqual(['明細30,000', '計算14,000', '最低賃金ベース × 残業時間 10h00m', '差+16,000'])
     // 日額 × 日数 (10,000 × 20 = 200,000) はどこにも出ない
     expect(w.find('[data-salary-row="1078|2025-01"]').text()).not.toContain('10,000 円 × 20 日')
     const summary = w.find('[data-testid="litigation-salary-base-below-minwage"]')
@@ -1596,19 +1570,19 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     expect(jan).toContain('15,625')
     expect(jan).toContain('+14,375')
     expect(jan).toContain('(2025-02)')
-    // ★ 画面と同じ縦に積んだセル: 基本給・残業は 明細 / 計算 / (根拠) / 差 (基本給は最低賃金ベースの行を持たない。残業だけ持つ)、総支給は 3 段、37条は 5 段
+    // ★ 画面と同じ縦に積んだセル: 基本給・残業は 明細 / 計算 / (根拠) / 差 (最低賃金ベースの別行は無い)、総支給は 3 段、37条は 5 段
     const lines = (col: number) => janRow.findAll('td').at(col)!.findAll('[data-salary-line]').map(l => l.attributes('data-salary-line'))
     expect(lines(3)).toEqual(['csv', 'breakdown', 'sys', 'basis', 'diff'])
-    expect(lines(4)).toEqual(['csv', 'sys', 'basis', 'minwage', 'diff'])
+    expect(lines(4)).toEqual(['csv', 'sys', 'basis', 'diff'])
     expect(lines(5)).toEqual(['csv', 'sys', 'diff'])
-    // ★ 紙面の列数は 8 のまま。最後の列が計算に使った時間 (デジタコ / 明細 / 37条の分母)
-    expect(janRow.findAll('td')).toHaveLength(8)
-    expect(lines(7)).toEqual(['hours-digitaco-head', 'hours-work-days', 'hours-working', 'hours-statutory', 'hours-csv-head', 'hours-csv-work', 'hours-csv-paid-leave', 'hours-denominator'])
-    expect(janRow.findAll('td').at(7)!.text()).toContain('37条の分母: 所定 160.0h (= 明細 20 日 × 8h00m)')
+    // ★ 紙面の列数は 7 (「計算に使った時間」の列は無い)。最後の列は 37条
+    expect(janRow.findAll('td')).toHaveLength(7)
+    expect(salary.findAll('th').map(th => th.text())).not.toContain('計算に使った時間')
+    expect(janRow.findAll('[data-salary-line]').some(l => (l.attributes('data-salary-line') ?? '').startsWith('hours-'))).toBe(false)
     expect(salary.text()).toContain('基本給が 単価 × 法定時間内 を下回る 0 件 (比べられない 1 件)')
     expect(lines(6)).toEqual(['rate', 'rate-basis', 'rate-note', 'minutes', 'theory', 'paid', 'diff37'])
     expect(janRow.find('[data-salary-line="basis"]').text()).toBe('単価なし (単価マスタに単価が無い)')
-    expect(janRow.findAll('[data-salary-line="basis"]').at(1)!.text()).toBe('1,500 円/h × 10h00m')
+    expect(janRow.findAll('[data-salary-line="basis"]').at(1)!.text()).toBe('最低賃金ベース × 残業時間 10h00m')
     // 37条の基礎単価の根拠も紙面に出る (この行の stub は所定のキーが無い = 読めなかった)
     expect(janRow.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ (明細 20 日 × 8h00m)')
     expect(janRow.find('[data-salary-line="rate-note"]').text()).toContain('所定を読めなかったため法定 8 時間で計算')
@@ -1616,7 +1590,7 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     const feb = salary.find('[data-print-salary-row="1078|2025-02"]')
     expect(feb.text()).toContain('拘束の材料が取れていない')
     expect(feb.findAll('td').at(-1)!.text()).toBe('-')
-    expect(feb.findAll('td').at(-1)!.attributes('colspan')).toBe('5')
+    expect(feb.findAll('td').at(-1)!.attributes('colspan')).toBe('4')
     // 差の色は画面と同じ。正は青で、太字は 37条の負だけ
     const diff37 = janRow.find('[data-salary-line="diff37"]')
     expect(diff37.classes()).toContain('text-blue-600')
@@ -1661,9 +1635,9 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     expect(feb.text()).toContain('0 か月')
     expect(feb.classes()).not.toContain('font-bold')
     expect(salary.text()).toContain('単価が最低賃金と違う 1 件')
-    // 明細表の各行は 8 セルのまま (列を足さない): 乗務員 / 勤務月 / 状態 / 基本給 / 残業 / 総支給 / 37条 / 勤務日・時間外。
+    // 明細表の各行は 7 セル (列を足さない): 乗務員 / 勤務月 / 状態 / 基本給 / 残業 / 総支給 / 37条。
     // 金額は列の中に縦に積む (1 か月 1 行・3 列ずつ横に並べない)
-    expect(salary.find('[data-print-salary-row="1078|2025-01"]').findAll('td')).toHaveLength(8)
+    expect(salary.find('[data-print-salary-row="1078|2025-01"]').findAll('td')).toHaveLength(7)
     expect(salary.findAll('thead tr').length).toBeGreaterThan(0)
     expect(salary.findAll('th').filter(th => th.attributes('rowspan') || th.attributes('colspan'))).toHaveLength(0)
     w.unmount()

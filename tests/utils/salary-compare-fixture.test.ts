@@ -8,7 +8,7 @@
 // 支払い実績の事後チェック) で計算することをテスト構造で保証する。
 //
 // 給与比較の計算側: 基本給(計算) = wage report の 単価マスタ × 法定時間内 (給与区分に関わらず同じ式)、
-// 残業(計算) = 給与明細の【 補助 】残業単価 × 残業時間 (Refs #1133)。
+// 残業(計算) = wage report の最低賃金ベースの残業代 (Refs #1133)。
 import { describe, expect, it } from 'vitest'
 import {
   compareSalaryMonth,
@@ -24,9 +24,8 @@ import csvText from '../fixtures/restraint-wage/salary-2026-07.csv?raw'
 
 /** 共有 fixture から wage-report 相当の行を組み立てる (wage は golden = 本物の計算出力)。
  *
- * `pay_kubun` は**日給 (2)** — この fixture は乗務員 4 名で、残業(計算)を
- * `残業単価 × 残業時間` で検算するのがこのテストの主眼だから。基本給(計算) は給与区分に関わらず
- * 同じ式 (salary-compare.test.ts が区分ごとに持つ)。 */
+ * `pay_kubun` は**日給 (2)** — 基本給(計算)・残業(計算) は給与区分に関わらず wage report の金額
+ * なので値は区分で変わらない (salary-compare.test.ts が区分ごとに持つ)。月給 (1) だけ固定残業で差が消える。 */
 const reportRows: WageReportRow[] = summaries.map(s => ({
   summary: s as unknown as WageReportRow['summary'],
   fetched_at: null,
@@ -68,7 +67,7 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(result.warnings).toEqual([])
   })
 
-  it('計算側: 基本給 = golden の法定時間内の金額、残業 = 給与明細の【 補助 】残業単価 × 残業時間: 9901', () => {
+  it('計算側: 基本給 = golden の法定時間内の金額、残業 = golden の最低賃金ベースの残業代 (明細の単価は使わない): 9901', () => {
     const row = byCd['9901']!
     // 深夜手当 は suggestCategory の既定で残業扱い。通勤手当 (excluded)・
     // 住宅手当 (minwage-only) は基本給計に混入しない (Refs #278)
@@ -78,30 +77,32 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(row.sysBase).toBe(goldenByCd['9901']!.amounts!.statutory)
     expect(row.overtimeMinutes).toBe(1200 + 120)
     expect(row.overtimeMinutes).toBe(goldenByCd['9901']!.overtimeMinutes + goldenByCd['9901']!.nightOvertimeMinutes)
-    expect(row.sysOvertime).toBe(Math.round((1750 * (1200 + 120)) / 60))
-    // 単価マスタの時給 1400 円由来の値 (golden の actualOvertimePay = 39200) は
-    // sys 列に混ざらない — 明細単価 1750 円/h × 22h = 38500 になるはず
-    expect(row.sysOvertime).toBe(38500)
-    expect(row.sysOvertime).not.toBe(goldenByCd['9901']!.actualOvertimePay)
+    const g = goldenByCd['9901']!
+    expect(row.sysOvertime).toBe(g.minWageOvertimePay! + g.minWageNightOvertimePay!)
+    // 明細単価 1750 円/h × 22h = 38500 や 単価マスタ由来の actualOvertimePay (39200) は sys 列に混ざらない
+    expect(row.sysOvertime).not.toBe(38500)
+    expect(row.sysOvertime).not.toBe(g.actualOvertimePay)
+    expect(row.sysTotal).toBe(row.sysBase! + row.sysOvertime!)
+    expect(row.diffOvertime).toBe(row.csvOvertime - row.sysOvertime!)
     expect(row.diffBase).toBe(row.csvBase - row.sysBase!)
   })
 
-  it('CSV 単価なし (9904) は sys 列が null (按分計算しない)', () => {
+  it('単価マスタ未設定 (9904) は基本給(計算) と総支給(計算) が null。明細の単価が無くても残業(計算) は最低賃金ベースで出る (残業 0 なら 0)', () => {
     const row = byCd['9904']!
     expect(row.sysBase).toBeNull()
-    expect(row.sysOvertime).toBeNull()
-    expect(row.sysTotal).toBeNull()
     expect(row.diffBase).toBeNull()
-    expect(row.diffOvertime).toBeNull()
+    expect(row.sysTotal).toBeNull()
     expect(row.diffTotal).toBeNull()
+    expect(row.sysOvertime).toBe(0)
+    expect(row.diffOvertime).toBe(row.csvOvertime)
   })
 
-  it('残業時間は golden (wage report) の 通常+深夜 そのまま。残業(最低賃金) も golden の理論値と同じ値', () => {
+  it('残業時間は golden (wage report) の 通常+深夜 そのまま。残業(計算) も golden の最低賃金ベースの残業代と同じ値', () => {
     for (const cd of ['9901', '9902', '9903', '9904']) {
       const row = byCd[cd]!
       const wage = goldenByCd[cd]!
       expect(row.overtimeMinutes).toBe(wage.overtimeMinutes + wage.nightOvertimeMinutes)
-      expect(row.minWageOvertimePay).toBe(
+      expect(row.sysOvertime).toBe(
         wage.minWageOvertimePay === null || wage.minWageNightOvertimePay === null
           ? null
           : wage.minWageOvertimePay + wage.minWageNightOvertimePay,
@@ -109,18 +110,12 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     }
   })
 
-  it('9903 (月60h超): 支払われた残業代が最低賃金理論値を下回る (差が負)', () => {
+  it('9903 (月60h超): 支払われた残業代が最低賃金ベースの残業代を下回る (差が負)', () => {
     const row = byCd['9903']!
     expect(row.csvOvertime).toBe(120000)
-    expect(row.minWageOvertimePay).not.toBeNull()
-    expect(row.diffCsvVsMinWageOvertime).toBe(120000 - row.minWageOvertimePay!)
-    expect(row.diffCsvVsMinWageOvertime!).toBeLessThan(0)
-  })
-
-  it('9904 (単価マスタ未設定): 最低賃金理論値は単価マスタと独立に出る (残業 0 なら 0)', () => {
-    const row = byCd['9904']!
-    expect(row.minWageOvertimePay).toBe(0)
-    expect(row.diffCsvVsMinWageOvertime).toBe(0)
+    expect(row.sysOvertime).not.toBeNull()
+    expect(row.diffOvertime).toBe(120000 - row.sysOvertime!)
+    expect(row.diffOvertime!).toBeLessThan(0)
   })
 
   it('区分設定で 深夜手当 を基本給扱いに変えると集計が移る', () => {
@@ -180,7 +175,7 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(row.baseRateOvertimePay).toBe(64800)
     expect(row.diffCsvVsBaseRateOvertime).toBe(120000 - 64800)
     // 絶対下限 (最低賃金 956 円ベース 129060) は割れている (こちらは基礎単価に依らない)
-    expect(row.diffCsvVsMinWageOvertime!).toBeLessThan(0)
+    expect(row.diffOvertime!).toBeLessThan(0)
   })
 
   it('9904 (単価マスタ未設定): 基礎単価(実績) は明細から出る (残業 0 なら理論値 0)', () => {

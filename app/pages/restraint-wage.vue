@@ -8,7 +8,7 @@
  *    月範囲 × 乗務員範囲の一括印刷 = 月毎改ページ)
  * ② 最低賃金チェック (単価マスタ換算の理論値一覧。単価マスタ = 最低賃金の運用
  *    (2026-07-18) のため最低賃金換算との差分表示は持たない — Refs #282。
- *    最低賃金の設定カードは給与比較タブの 残業(最低賃金) 列のために同居)
+ *    最低賃金の設定カードは給与比較タブの 残業(計算) 列のために同居)
  * ③ 単価マスタ (適用開始日つき履歴、一括変更、CSV 入出力)
  * ⑥ 社員マスタ (D1、会社×給与コード → 乗務員CD + 所属/給与体系の適用開始日つき
  *    履歴。月次集計 CSV の `所属(マスタ)`・`給与体系` 列の供給元、Refs #367)
@@ -6352,7 +6352,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                      の誤読も同時に潰す**ため、等号が自明である理由まで書く。 -->
                 ⚠ <b>「最低賃金チェック」という名前ですが、この表は最低賃金との差分を出しません</b> — 当社は<b>単価マスタの基礎単価 = 最低賃金</b>で運用しており、比較しても常に等号が成立して読む意味がないためです (<b>チェックを省いているのではありません</b>)。
                 法的な最低賃金比較は「基礎単価 ≥ 最低賃金」の判定なので、見るのは<b>基本給(法定内) の @単価</b> (= 基礎単価そのもの) です。
-                下の「最低賃金」カードの額は、この表では<b>最低賃金割れの判定には使いません</b> (その判定自体が上記の理由で無い)。使うのは<b>「給与比較」タブの 残業(最低賃金) 列</b> (割増賃金の絶対下限) と、この表では<b>給与 列に出る月給者の「みなし時間数」(@n.nh = 残業代(定額) ÷ 最低賃金)</b> だけです。
+                下の「最低賃金」カードの額は、この表では<b>最低賃金割れの判定には使いません</b> (その判定自体が上記の理由で無い)。使うのは<b>「給与比較」タブの 残業(計算) 列</b> (最低賃金ベースの割増賃金 = 絶対下限) と、この表では<b>給与 列に出る月給者の「みなし時間数」(@n.nh = 残業代(定額) ÷ 最低賃金)</b> だけです。
               </p>
               <p class="text-xs text-gray-500 mt-2">
                 並びは<b>給与大臣の会社コード → 職員区分 (事務員 → 作業員 → 整備 → 乗務員 → その他) → 営業所 → 乗務員CD</b> 順。
@@ -6404,7 +6404,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   <UIcon :name="minWageCardOpen ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'" class="size-4 text-gray-500" />
                   <span class="font-semibold">最低賃金</span>
                 </button>
-                <span class="text-xs text-gray-500">基本時間単価 (会社が決めた支給額) とは別に、法定の下限として全社共通で設定します。<b>上の表の最低賃金割れ判定には使いません</b> — 使うのは「給与比較」タブの 残業(最低賃金) 列と、上の表の月給者「みなし時間数」(@n.nh) です</span>
+                <span class="text-xs text-gray-500">基本時間単価 (会社が決めた支給額) とは別に、法定の下限として全社共通で設定します。<b>上の表の最低賃金割れ判定には使いません</b> — 使うのは「給与比較」タブの 残業(計算) 列と、上の表の月給者「みなし時間数」(@n.nh) です</span>
                 <div class="flex-1" />
                 <template v-if="minWageCardOpen">
                   <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!minWageMasterLoaded" @click="loadMinWageMaster" />
@@ -7090,7 +7090,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
                 <span class="font-semibold">比較結果 ({{ fmtYm(month) }})</span>
-                <span class="text-xs text-gray-500">給与明細の区分集計 vs 計算 (基本給 = 単価マスタ × 法定時間内 / 残業 = 残業単価×時間外)</span>
+                <span class="text-xs text-gray-500">給与明細の区分集計 vs 計算 (基本給 = 単価マスタ × 法定時間内 / 残業 = 最低賃金ベースの残業代)</span>
                 <div class="flex-1" />
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="loadingReport" @click="loadWageReport" />
               </div>
@@ -7202,13 +7202,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-2 text-right" title="単価マスタ × 法定時間内 (wage report の金額)">基本給(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
-                      <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × 残業時間 (賃金計算の 時間外 + 時間外深夜 + 週40時間超。右の 残業(基礎単価)・残業(最低賃金) と同じ時間)。固定残業 (月給者) には当てはまらない">残業(計算)</th>
-                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(計算)。固定残業 (月給者) は定額なので差に意味が無く「固定」と出す — 判定は右の 37条 の差を見る">差</th>
+                      <th class="px-2 py-2 text-right" title="最低賃金を基礎額とみなした割増残業代の理論値 (単価マスタは使わず、デジタコ拘束時間データ×最低賃金で算出。時間は 時間外 + 時間外深夜 + 週40時間超で、右の 残業(基礎単価) と同じ時間)。絶対下限として併記">残業(計算)</th>
+                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(計算)。負なら実際に支払われた残業代が最低賃金換算の絶対下限すら下回っている。固定残業 (月給者) は定額なので差に意味が無く「固定」と出す — 判定は右の 37条 の差を見る">差</th>
                       <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="37条の基礎単価 (円/h)。分母は所定労働時間: 日給 = 割増基礎に算入する支給項目の合計 ÷ (明細の (出勤日数 + 有休日数) × 1 日の所定、引けなければ法定 8 時間。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無い行・複数会社を合算した行はデジタコの稼働日数) / 時給 = 給与明細の時給そのもの / 月給・その他 = 合計 ÷ 法定の月平均 (173.8h)。給与区分が不明な行は出さない">基礎単価(実績)</th>
                       <th class="px-2 py-2 text-right" title="基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条。月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)">残業(基礎単価)</th>
                       <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(基礎単価)。負なら実際の基礎単価に対する法定割増 (37条) を下回っている — 主判定">差</th>
-                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="最低賃金を基礎額とみなした割増残業代の理論値 (単価マスタは使わず、デジタコ拘束時間データ×最低賃金で算出)。絶対下限として併記">残業(最低賃金)</th>
-                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(最低賃金)。負なら実際に支払われた残業代が最低賃金換算の絶対下限すら下回っている">差</th>
                       <th class="px-2 py-2 text-right">支給計(給与)</th>
                       <th class="px-2 py-2 text-right">合計(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
@@ -7259,14 +7257,14 @@ watch([compMap, kyuyoSyncedKeys], () => {
                           <div>{{ fmtYen(row.sysOvertime) }}</div>
                           <div class="text-xs text-gray-500">{{ fmtMinutes(row.overtimeMinutes) }}</div>
                         </template>
-                        <span v-else class="text-xs text-gray-500">単価なし</span>
+                        <span v-else class="text-xs text-gray-500">最低賃金未設定</span>
                       </td>
                       <!-- 固定残業 (月給者) は定額 × 時間ではないので差を出さない (Refs #449)。
                            正の差を「多く払っている = 問題なし」と読まれるのを止める -->
                       <td
                         v-if="row.overtimeFixed"
                         class="px-2 py-1.5 text-right text-xs text-gray-500"
-                        title="月給者 = 固定残業とみなしています。定額と「単価×時間」の差は判定に使えないので出しません。労基法37条の判定は右の「残業(基礎単価)」との差を見てください"
+                        title="月給者 = 固定残業とみなしています。定額と最低賃金ベースの差は判定に使えないので出しません。労基法37条の判定は右の「残業(基礎単価)」との差を見てください"
                       >固定</td>
                       <td v-else class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
@@ -7287,16 +7285,6 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       </td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffCsvVsBaseRateOvertime ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
                         {{ fmtDiff(row.diffCsvVsBaseRateOvertime) }}
-                      </td>
-                      <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
-                        <template v-if="row.minWageOvertimePay !== null">
-                          <div>{{ fmtYen(row.minWageOvertimePay) }}</div>
-                          <div class="text-xs text-gray-500">{{ fmtMinutes(row.overtimeMinutes) }}</div>
-                        </template>
-                        <span v-else class="text-xs text-gray-500">最低賃金未設定</span>
-                      </td>
-                      <td class="px-2 py-1.5 text-right" :class="(row.diffCsvVsMinWageOvertime ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ fmtDiff(row.diffCsvVsMinWageOvertime) }}
                       </td>
                       <td class="px-2 py-1.5 text-right" :title="row.csvReportedTotal != null && row.csvReportedTotal !== row.csvTotal ? `支給合計額列は ${fmtYen(row.csvReportedTotal)} 円 (項目計と不一致)` : undefined">
                         {{ fmtYen(row.csvTotal) }}
@@ -7329,7 +7317,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </div>
               <p class="text-xs text-gray-500 mt-2">
                 差 = 給与明細 − 計算。計算 = 基本給は 単価マスタ × 法定時間内 (wage report の金額)、
-                残業は給与明細【 補助 】の 残業単価 (時給) × 残業時間 (賃金計算の 時間外 + 時間外深夜 + 週40時間超)。給与明細に単価が無い行は「単価なし」(独自の按分計算はしません)。
+                残業は 最低賃金ベースの残業代 (最低賃金を基礎額にした割増、賃金計算の 時間外 + 時間外深夜 + 週40時間超。最低賃金が引けない行は「最低賃金未設定」)。独自の按分計算はしません。
                 基本給計/残業計にカーソルを合わせると支給項目の内訳を表示します。
                 * は 支給合計額 列と支給項目の合算が一致しない行。<br>
                 基礎単価(実績) = 割増基礎に算入する支給項目 (支給項目区分タブで「割増基礎○」の区分) の合計 ÷ 所定労働時間 (労基則19条。実際に働いた時間ではない)。日給 = ÷ (明細の (出勤日数 + 有休日数) × 1日の所定。勤務設定の所定を引けなければ法定8時間。週40時間相当の月平均 173.8h を超える月は 173.8h で割る。明細に日数が無い行・複数会社を合算した行はデジタコの稼働日数で数え、セルにカーソルを合わせるとその旨を表示)、時給 = 給与明細の時給そのもの (割り算なし)、月給・その他 = ÷ 法定の月平均 173.8h。給与区分が不明な行は出しません。
@@ -7338,7 +7326,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 <b>これは違反の検出ではなく、賃金の内訳を見直すための材料です</b> — 割増基礎 (基本給 + 算入手当) が高いほど理論値も上がるため、
                 最低賃金を満たしていても差は負に出ます。支給総額を変えずに基本給と固定残業の配分を見直すと差は縮みます
                 (「見直し候補だけ」の絞り込みと「見直し優先度順」はそのための導線です)。
-                残業(最低賃金) は同じ計算を最低賃金を基礎額として行った絶対下限の併記で、単価マスタ設定の妥当性チェックである「最低賃金チェック」タブとは異なります。<br>
+                残業(計算) は最低賃金を基礎額として行った割増計算 (絶対下限) で、単価マスタ設定の妥当性チェックである「最低賃金チェック」タブとは異なります。<br>
                 注: 週40超過分は summary v2 の日別データ (days) からの自前計算のため、旧形式 (v1、days なし) のアーカイブ月は週40超過が計算できません — 対象月をアーカイブタブで再計算 (resummarize) してから使ってください。
               </p>
               <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
