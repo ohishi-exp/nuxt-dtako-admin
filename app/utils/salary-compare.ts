@@ -13,8 +13,8 @@
  * - 給与・賞与名 は "2026年 1月" 形式。賞与など年月にならない行はスキップして警告
  */
 
-import type { WageReportRow } from './restraint-wage-view'
-import { fmtMinutes, fmtYen, monthlyOvertimeMinutes } from './restraint-wage-view'
+import type { PremiumMinutes, WageReportRow } from './restraint-wage-view'
+import { fmtMinutes, fmtYen, monthlyOvertimeMinutes, premiumMinutesOf, premiumMinutesText } from './restraint-wage-view'
 
 /**
  * 支給項目の区分 (Refs #278)。法令上の除外集合は 2 軸で別物のため、
@@ -446,6 +446,18 @@ export interface SalaryRateBasis {
   minWageEffectiveFrom: string | null
 }
 
+/** 残業・深夜・休日(計算) の内訳 (円)。wage report の最低賃金ベースの 4 欄をそのまま運ぶ。 */
+export interface SysOvertimeParts {
+  /** 残業 (時間外 + 週40超過。`minWageOvertimePay`) */
+  overtime: number
+  /** 時間外深夜 (`minWageNightOvertimePay`) */
+  nightOvertime: number
+  /** 法定時間内の深夜の割増 (0.25 の加算分だけ。`minWageNightPay`) */
+  night: number
+  /** 休日労働 (法定休日・法定外休日、深夜ぶんを含む。`minWageHolidayPay`) */
+  holiday: number
+}
+
 export interface SalaryComparisonRow {
   driverCd: string
   /** 突合マスタで引き当てた乗務員CD (マスタ経由の時だけ非 null)。 */
@@ -478,31 +490,40 @@ export interface SalaryComparisonRow {
    */
   sysBase: number | null
   /**
-   * 残業(計算) = **最低賃金ベースの残業代** (wage report の `minWageOvertimePay + minWageNightOvertimePay`。
-   * 最低賃金を基礎額に割増を掛けた絶対下限、時間は `overtimeMinutes`)。最低賃金が引けない月は null。
-   * 明細の残業単価は使わない。
+   * 残業・深夜・休日(計算) = **最低賃金ベースの 残業代 + 深夜の割増 + 休日労働** (wage report の
+   * `minWageOvertimePay + minWageNightOvertimePay + minWageNightPay + minWageHolidayPay`。最低賃金を基礎額に
+   * 割増を掛けた絶対下限、時間は `premiumMinutes`)。明細の「残業」の区分が 残業・深夜・休日出勤の手当の束なので、
+   * 同じ束どうしを比べる。**4 つのどれかが無い月は null** — 最低賃金が引けない・拘束時間が欠測 (null) と、
+   * 休日の欄が無い古い保存物 (undefined、`wageRowOutdated`)。無い欄を 0 として足さない。明細の残業単価は使わない。
    */
   sysOvertime: number | null
-  /** 総支給(計算) = 基本給(計算) + 残業(計算)。どちらかが null なら null。 */
+  /** `sysOvertime` の内訳 (円。wage report の 4 欄そのまま)。`sysOvertime` が null なら null。 */
+  sysOvertimeParts: SysOvertimeParts | null
+  /** wage report の行に休日の金額の欄 (`minWageHolidayPay`) が無い = 古い保存物・応答。
+   * 残業・深夜・休日(計算)・総支給(計算)・37条を出さず、画面は取り直しを促す (`wageRowOutdatedNotice`)。 */
+  wageRowOutdated: boolean
+  /** 総支給(計算) = 基本給(計算) + 残業・深夜・休日(計算)。どちらかが null なら null。 */
   sysTotal: number | null
   /**
    * その月の残業時間 (分)。**wage report (`report.wage`) の `overtimeMinutes + nightOvertimeMinutes`
-   * が唯一の出どころ** (時間外 + 時間外深夜 + 週 40 時間超)。残業(計算)・37条の
-   * 2 つが同じこの値を使う — 給与比較の側で時間を数え直さない。
+   * が唯一の出どころ** (時間外 + 時間外深夜 + 週 40 時間超)。給与比較の側で時間を数え直さない。
+   * 「残業・深夜・休日」の金額に添える時間はこれではなく `premiumMinutes` (深夜・休日を含む内訳)。
    */
   overtimeMinutes: number
+  /** 残業・深夜・休日(計算)・37条の理論値が対象にしている時間の内訳 (`premiumMinutesOf`)。 */
+  premiumMinutes: PremiumMinutes
   /**
    * **固定残業 (みなし残業) の人か** (給与区分 = 月給、Refs #449)。
    *
    * 月給者の残業扱い項目は役職手当のような**定額**で、実残業時間で払われたものではない。
-   * 残業(計算) が最低賃金ベースの残業代なので、`diffOvertime` はこの人にも出す (定額が
+   * 残業・深夜・休日(計算) が最低賃金ベースの割増なので、`diffOvertime` はこの人にも出す (定額が
    * 最低賃金ベースの割増を下回っていないかの比較)。ただし**正の差は「多く払っている = 問題なし」
    * ではない** (定額と時間の対応が無い) ので、画面は注記を添える。37条の判定は `diffCsvVsBaseRateOvertime`。
    */
   overtimeFixed: boolean
   /** CSV − システム (システム側が null なら null)。 */
   diffBase: number | null
-  /** 残業(計算) が無い (最低賃金が引けない) 月は null。固定残業の人も他と同じく出す。 */
+  /** 残業・深夜・休日(計算) が無い月は null。固定残業の人も他と同じく出す。 */
   diffOvertime: number | null
   diffTotal: number | null
   /** 割増基礎に算入する支給項目の合計 (base + premium-base-only、Refs #278)。 */
@@ -524,11 +545,11 @@ export interface SalaryComparisonRow {
   baseRateActual: number | null
   /** 基礎単価の根拠 (逆算の単価と、最低賃金を採用したか)。 */
   baseRateBasis: BaseRateBasis
-  /** 基礎単価を基礎額とした割増残業代の理論値 (労基法37条) = round(残業(計算) × 基礎単価 ÷ 最低賃金)。
-   * 最低賃金を採用した月は残業(計算) そのもの。baseRateActual が null なら null。 */
+  /** 基礎単価を基礎額とした割増 (残業・深夜・休日) の理論値 (労基法37条) = round(残業・深夜・休日(計算) × 基礎単価 ÷ 最低賃金)。
+   * 最低賃金を採用した月は 残業・深夜・休日(計算) そのもの。baseRateActual が null なら null。 */
   baseRateOvertimePay: number | null
   /** csvOvertime (支払残業代) − baseRateOvertimePay。負 = 基礎単価 (逆算と最低賃金の
-   * 高いほう) に対する法定割増を下回っている (**主判定・37条**)。残業(計算) は
+   * 高いほう) に対する法定割増を下回っている (**主判定・37条**)。残業・深夜・休日(計算) は
    * 最低賃金を基礎額にした絶対下限の併記 (Refs #278)。 */
   diffCsvVsBaseRateOvertime: number | null
   /**
@@ -791,7 +812,7 @@ export interface BaseRateBasis {
   /** `hours` で使った明細の時給の単価 */
   hourlyRate: number | null
   /** 基礎単価を出せなかった理由 (出せたら null) */
-  none: 'unknown-kind' | 'no-hourly-rate' | 'no-premium-base' | 'no-denominator' | 'no-min-wage' | 'restraint-missing' | null
+  none: 'unknown-kind' | 'no-hourly-rate' | 'no-premium-base' | 'no-denominator' | 'no-min-wage' | 'restraint-missing' | 'wage-row-outdated' | null
 }
 
 /** 基礎単価を出せなかった理由の文言 (`BaseRateBasis.none`)。 */
@@ -802,6 +823,38 @@ export const BASE_RATE_NONE_LABELS: Record<NonNullable<BaseRateBasis['none']>, s
   'no-denominator': '法定時間内が 0',
   'no-min-wage': 'その月の最低賃金が引けない',
   'restraint-missing': '拘束時間が欠測',
+  'wage-row-outdated': '拘束の材料が古い形 — 取り直しが要る',
+}
+
+/**
+ * 残業・深夜・休日(計算) の根拠 (1 要素 = 1 行)。**訴訟準備と拘束×賃金の給与比較が同じこの関数を使う**。
+ * 金額は wage report の最低賃金ベースの 4 欄 (ここで掛け算しない)、時間は `premiumMinutes`。
+ * 0 円の 時間外深夜・深夜の割増・休日労働 は行を省く (残業は 0 円でも出す)。計算を出せない行は理由を 1 行。
+ */
+export function sysOvertimeBasisLines(
+  row: Pick<SalaryComparisonRow, 'sysOvertimeParts' | 'premiumMinutes' | 'wageRowOutdated' | 'rateBasis'>,
+): string[] {
+  if (row.wageRowOutdated) return ['拘束の材料が古い形 (深夜と休日の欄が無い) — 取り直すと計算が出ます']
+  const p = row.sysOvertimeParts
+  if (p === null) {
+    return [`最低賃金ベースの金額なし (${row.rateBasis.minWageRate === null ? '最低賃金が引けない' : '拘束時間が欠測'})`]
+  }
+  return [
+    `最低賃金ベース (${premiumMinutesText(row.premiumMinutes)})`,
+    `残業 ${fmtYen(p.overtime)} 円`,
+    ...(p.nightOvertime !== 0 ? [`時間外深夜 ${fmtYen(p.nightOvertime)} 円`] : []),
+    ...(p.night !== 0 ? [`法定時間内の深夜の割増 ${fmtYen(p.night)} 円`] : []),
+    ...(p.holiday !== 0 ? [`休日労働 ${fmtYen(p.holiday)} 円`] : []),
+  ]
+}
+
+/**
+ * 休日の金額の欄が無い古い行が在るときの案内 (1 行)。`count` は `wageRowOutdated` の行数、
+ * `retake` は画面ごとの取り直し方 (訴訟準備 = 拘束の材料を取り直す / 拘束×賃金 = 「再計算」)。
+ */
+export function wageRowOutdatedNotice(count: number, retake: string): string {
+  return `深夜と休日の金額の欄が無い古い形の行が ${count} 件あります (その行は「残業・深夜・休日」の計算・総支給の計算・37条を出していません)。`
+    + `${retake}と、深夜と休日を含めた計算が出ます`
 }
 
 /**
@@ -823,9 +876,10 @@ export function baseRateBasisText(
 
 /**
  * 37条の基礎単価と根拠。逆算の単価 r0 = 割増基礎 ÷ 法定時間内 (時給は明細の時給)、
- * 採用する単価 r = max(r0, その月の最低賃金)。理論値 = 残業(計算) × r ÷ 最低賃金
+ * 採用する単価 r = max(r0, その月の最低賃金)。理論値 = 残業・深夜・休日(計算) × r ÷ 最低賃金
  * (割増の規則は wage report が正本で、ここでは実装し直さない)。
- * `value` = r、`overtimePay` = 理論値 (円)。出せない月は両方 null で、理由は `basis.none`。
+ * `value` = r、`overtimePay` = 理論値 (円)。出せない月は両方 null で、理由は `basis.none`
+ * (`sysOvertime` が null のとき、休日の欄が無い古い行 = `wageRowOutdated` なら欠測とは別の理由にする)。
  */
 export function computeBaseRate(
   payKubun: number | null,
@@ -834,6 +888,7 @@ export function computeBaseRate(
   hourlyRate: number | null,
   minWageRate: number | null,
   sysOvertime: number | null,
+  wageRowOutdated: boolean,
 ): { value: number | null, overtimePay: number | null, basis: BaseRateBasis } {
   const kind = payKubunKind(payKubun)
   const basis: BaseRateBasis = { kind, reverse: null, floored: false, hourlyRate: null, none: null }
@@ -846,7 +901,7 @@ export function computeBaseRate(
   if (premiumBaseTotal <= 0) return fail('no-premium-base')
   if (kind !== 'hours' && statutoryMinutes <= 0) return fail('no-denominator')
   if (minWageRate === null) return fail('no-min-wage')
-  if (sysOvertime === null) return fail('restraint-missing')
+  if (sysOvertime === null) return fail(wageRowOutdated ? 'wage-row-outdated' : 'restraint-missing')
   basis.reverse = kind === 'hours' ? hourlyRate : premiumBaseTotal / (statutoryMinutes / 60)
   basis.floored = basis.reverse! < minWageRate
   const value = Math.max(basis.reverse!, minWageRate)
@@ -958,25 +1013,30 @@ export function compareSalaryMonth(
     const sums = sumByCategory(csv, config)
     const base = sums.buckets['base'].total
     const overtime = sums.buckets['overtime'].total
-    // 残業時間は wage report が正本 (時間外 + 時間外深夜 + 週 40 時間超)。ここで summary から数え直さない —
-    // 残業(計算)・37条が同じ月で違う時間になるため
+    // 残業時間は wage report が正本 (時間外 + 時間外深夜 + 週 40 時間超)。ここで summary から数え直さない
     const overtimeMinutes = monthlyOvertimeMinutes(report.wage)
 
     // 基本給(計算) は wage report の 単価マスタ × 法定時間内 (給与区分に関わらず同じ式)。単価が無い月は null。
     // 明細の基本単価 × 日数は使わない — 日数を掛ければ明細の基本給の項目そのものになり、比較にならない
     const sysBase = report.wage.amounts?.statutory ?? null
-    // 残業(計算) は wage report の最低賃金ベースの残業代 (最低賃金を基礎額にした割増。時間軸は
-    // 「最低賃金チェック」タブと同じ 時間外+時間外深夜+週40超過 = 上の overtimeMinutes)。最低賃金が引けない月は null
-    const sysOvertime
-      = report.wage.minWageOvertimePay !== null && report.wage.minWageNightOvertimePay !== null
-        ? report.wage.minWageOvertimePay + report.wage.minWageNightOvertimePay
+    // 残業・深夜・休日(計算) は wage report の最低賃金ベースの 4 欄の和 (残業 + 時間外深夜 + 法定時間内の深夜の割増 + 休日労働)。
+    // 明細の「残業」の区分が 残業・深夜・休日出勤の手当の束なので、同じ束を足す。金額はここで計算しない (足すだけ)。
+    // どれかが null (最低賃金が引けない・欠測) / undefined (休日の欄が無い古い保存物) なら計算を出さない — 0 として足さない
+    const { minWageOvertimePay, minWageNightOvertimePay, minWageNightPay, minWageHolidayPay } = report.wage
+    const wageRowOutdated = minWageHolidayPay === undefined
+    const sysOvertimeParts: SysOvertimeParts | null
+      = minWageOvertimePay !== null && minWageNightOvertimePay !== null && minWageNightPay !== null && minWageHolidayPay != null
+        ? { overtime: minWageOvertimePay, nightOvertime: minWageNightOvertimePay, night: minWageNightPay, holiday: minWageHolidayPay }
         : null
+    const sysOvertime = sysOvertimeParts === null
+      ? null
+      : sysOvertimeParts.overtime + sysOvertimeParts.nightOvertime + sysOvertimeParts.night + sysOvertimeParts.holiday
     // 月給者 = 固定残業とみなす (Refs #449)。注記と みなし時間数 の表示に使う。差は出す (計算が最低賃金ベースなので、定額が最低賃金ベースの割増を下回っていないかを見る比較そのもの)
     const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
 
     // 基礎単価は 割増基礎 ÷ wage report の法定時間内 (実働、週 40 時間で頭打ち済み)。最低賃金を下限にする。
-    // それを基礎額にした割増残業代の理論値 (= 残業(計算) × 基礎単価 ÷ 最低賃金) が労基法37条の主判定 (Refs #278)。
+    // それを基礎額にした割増の理論値 (= 残業・深夜・休日(計算) × 基礎単価 ÷ 最低賃金) が労基法37条の主判定 (Refs #278)。
     // 割増の規則は wage report が正本なので、ここで数え直さない (`computeBaseRate`)
     const minWageRate = report.wage.minWage?.rate ?? null
     const { value: baseRateActual, overtimePay: baseRateOvertimePay, basis: baseRateBasis } = computeBaseRate(
@@ -986,6 +1046,7 @@ export function compareSalaryMonth(
       csv.rates.base,
       minWageRate,
       sysOvertime,
+      wageRowOutdated,
     )
 
     rows.push({
@@ -1002,8 +1063,11 @@ export function compareSalaryMonth(
       csvReportedTotal: csv.reportedTotal,
       sysBase,
       sysOvertime,
+      sysOvertimeParts,
+      wageRowOutdated,
       sysTotal,
       overtimeMinutes,
+      premiumMinutes: premiumMinutesOf(report.wage),
       overtimeFixed,
       diffBase: sysBase === null ? null : base - sysBase,
       diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,

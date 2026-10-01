@@ -859,6 +859,7 @@ describe('computeWageRow', () => {
     expect(row.minWageTotalPay).toBeNull()
     expect(row.minWageStatutoryPay).toBeNull()
     expect(row.minWageNightPay).toBeNull()
+    expect(row.minWageHolidayPay).toBeNull()
     expect(row.totalPayDiff).toBeNull()
     expect(row.minWageOvertimePay).toBeNull()
     expect(row.minWageOvertimeRate).toBeNull()
@@ -878,6 +879,7 @@ describe('computeWageRow', () => {
     expect(row.minWageDiff).toBeNull()
     expect(row.minWageStatutoryPay).toBeNull()
     expect(row.minWageNightPay).toBeNull()
+    expect(row.minWageHolidayPay).toBeNull()
     expect(row.minWageOvertimePay).toBeNull()
     expect(row.minWageNightOvertimePay).toBeNull()
     expect(row.actualOvertimePay).toBeNull()
@@ -897,6 +899,77 @@ describe('computeWageRow', () => {
     expect(row.amounts).not.toBeNull()
     expect(row.totalAmount).not.toBeNull()
     expect(row.minWageStatutoryPay).not.toBeNull()
+  })
+
+  // --- 最低賃金ベースの 深夜の割増 と 休日労働 (Refs #1133) ---
+  // 2025-04 は 1 日 = 火曜、6 日 = 日曜 (法定休日)。最低賃金は MIN_WAGE の 956 円
+  const R = DEFAULT_WAGE_CONFIG.rates
+  const yenAt = (minutes: number, rate: number) => Math.round((minutes / 60) * 956 * rate)
+  /** 法定休日 390 分 + 法定休日深夜 90 分 (日曜の実働 480 分、うち深夜 90 分)。 */
+  const legalHolidayDay = day(6, { workingMinutes: 480, nightMinutes: 90 })
+  /** 法定外休日 280 分 + 法定外休日深夜 20 分 (会社指定休の出勤)。 */
+  const nonLegalHolidayDay = day(9, { workingMinutes: 300, nightMinutes: 20, holidayKind: 'non_legal' })
+  const rowOf = (days: RestraintSummaryDay[], config = DEFAULT_WAGE_CONFIG, year = 2025) =>
+    computeWageRow(summary({ workingMinutes: 40 * 60, days }), year, 4, wageMaster, MIN_WAGE, config)
+
+  it('minWageNightPay: 法定時間内の深夜の分 × 最低賃金 × night 係数 (加算分のみ)', () => {
+    const row = rowOf([day(1, { workingMinutes: 480, nightMinutes: 60 })])
+    expect(row.minutes.night).toBe(60)
+    expect(row.minWageNightPay).toBe(yenAt(60, R.night))
+    expect(row.minWageNightPay).toBe(239)
+    // 深夜の分は休日でも残業でもない
+    expect(row.minWageHolidayPay).toBe(0)
+    expect(row.minWageOvertimePay).toBe(0)
+  })
+
+  it('minWageHolidayPay: 法定休日・法定休日深夜 (係数は基礎の 1.0 を含む全額)', () => {
+    const row = rowOf([legalHolidayDay])
+    expect(row.minutes.legalHoliday).toBe(390)
+    expect(row.minutes.legalHolidayNight).toBe(90)
+    expect(row.minWageHolidayPay).toBe(yenAt(390, R.legalHoliday) + yenAt(90, R.legalHolidayNight))
+    expect(row.minWageHolidayPay).toBe(8389 + 2294)
+    // 休日の分は法定時間内に入らないので、基本給の側と重ならない
+    expect(row.minutes.statutory).toBe(0)
+    expect(row.minWageStatutoryPay).toBe(0)
+  })
+
+  it('minWageHolidayPay: 法定外休日・法定外休日深夜', () => {
+    const row = rowOf([nonLegalHolidayDay])
+    expect(row.minutes.nonLegalHoliday).toBe(280)
+    expect(row.minutes.nonLegalHolidayNight).toBe(20)
+    expect(row.minWageHolidayPay).toBe(yenAt(280, R.nonLegalHoliday) + yenAt(20, R.nonLegalHolidayNight))
+    expect(row.minWageHolidayPay).toBe(5577 + 478)
+  })
+
+  it('minWageHolidayPay: 4 区分の和。丸めは区分ごと = 単価マスタ側 (amounts) と同じ関数の出力', () => {
+    const row = rowOf([legalHolidayDay, nonLegalHolidayDay, day(1, { workingMinutes: 600, overtimeMinutes: 120 })])
+    expect(row.minWageHolidayPay).toBe(8389 + 2294 + 5577 + 478)
+    const atMinWage = computeWageAmounts(row.minutes, 956, DEFAULT_WAGE_CONFIG).amounts
+    expect(row.minWageHolidayPay).toBe(
+      atMinWage.legalHoliday + atMinWage.legalHolidayNight + atMinWage.nonLegalHoliday + atMinWage.nonLegalHolidayNight,
+    )
+    // 既存の欄は休日を足しても動かない (残業は平日の 120 分だけ)
+    expect(row.minWageOvertimePay).toBe(yenAt(120, R.overtime))
+  })
+
+  it('minWageHolidayPay: 係数は config から取る (係数を変えると値が変わる)', () => {
+    const custom = {
+      ...DEFAULT_WAGE_CONFIG,
+      rates: { ...R, legalHoliday: 1.4, legalHolidayNight: 1.7, nonLegalHoliday: 1.3, nonLegalHolidayNight: 1.55 },
+    }
+    const row = rowOf([legalHolidayDay, nonLegalHolidayDay], custom)
+    expect(row.minWageHolidayPay).toBe(yenAt(390, 1.4) + yenAt(90, 1.7) + yenAt(280, 1.3) + yenAt(20, 1.55))
+    expect(row.minWageHolidayPay).not.toBe(rowOf([legalHolidayDay, nonLegalHolidayDay]).minWageHolidayPay)
+  })
+
+  it('minWageHolidayPay / minWageNightPay: 月 60h 超の枠は掛からない (残業が 60h を超える月でも同じ額)', () => {
+    // 平日 21 日 × 残業 200 分 = 70h (2025-04 は 60h 超が 1.5 倍の月)
+    const weekdays = [1, 2, 3, 4, 7, 8, 10, 11, 14, 15, 16, 17, 18, 21, 22, 23, 24, 25, 28, 29, 30]
+    const heavy = weekdays.map(d => day(d, { workingMinutes: 680, overtimeMinutes: 200, nightMinutes: 30 }))
+    const row = rowOf([...heavy, legalHolidayDay, nonLegalHolidayDay])
+    expect(row.overtimeMinutes + row.nightOvertimeMinutes).toBeGreaterThan(60 * 60)
+    expect(row.minWageHolidayPay).toBe(8389 + 2294 + 5577 + 478)
+    expect(row.minWageNightPay).toBe(yenAt(21 * 30, R.night))
   })
 })
 

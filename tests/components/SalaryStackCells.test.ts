@@ -4,13 +4,16 @@ import SalaryAmountCell from '../../app/components/SalaryAmountCell.vue'
 import SalaryOver37Cell from '../../app/components/SalaryOver37Cell.vue'
 
 // 画面と印刷の紙面が共用する縦積みセル。紙面 (compact) は同じ行を詰めた余白で出す。
-const amount = (over = {}) => ({ key: 'overtime' as const, csv: 30000, sys: 15000, diff: 15000, basis: '最低賃金ベース × 残業時間 10h00m', breakdown: null, ...over })
+const amount = (over = {}) => ({ key: 'overtime' as const, csv: 30000, sys: 15000, diff: 15000, basis: ['最低賃金ベース (残業 10h00m)', '残業 15,000 円'], breakdown: null, ...over })
 const lines = (w: ReturnType<typeof mount>) => w.findAll('[data-salary-line]').map(l => l.attributes('data-salary-line'))
 
 describe('SalaryAmountCell', () => {
-  it('明細 / 計算 / 根拠 / 差 の順に積む。根拠が無ければ 3 段', () => {
-    expect(lines(mount(SalaryAmountCell, { props: { cell: amount() } }))).toEqual(['csv', 'sys', 'basis', 'diff'])
-    expect(lines(mount(SalaryAmountCell, { props: { cell: amount({ key: 'total', basis: null }) } }))).toEqual(['csv', 'sys', 'diff'])
+  it('明細 / 計算 / 根拠 (1 要素 1 行) / 差 の順に積む。根拠が無ければ 3 段', () => {
+    const w = mount(SalaryAmountCell, { props: { cell: amount() } })
+    expect(lines(w)).toEqual(['csv', 'sys', 'basis', 'basis', 'diff'])
+    expect(w.findAll('[data-salary-line="basis"]').map(l => l.text())).toEqual(['最低賃金ベース (残業 10h00m)', '残業 15,000 円'])
+    expect(lines(mount(SalaryAmountCell, { props: { cell: amount({ basis: ['最低賃金ベースの金額なし (拘束時間が欠測)'] }) } }))).toEqual(['csv', 'sys', 'basis', 'diff'])
+    expect(lines(mount(SalaryAmountCell, { props: { cell: amount({ key: 'total', basis: [] }) } }))).toEqual(['csv', 'sys', 'diff'])
   })
 
   it('差の符号で色が変わる (正は青・負は赤・0 と計算できない月は色なし)', () => {
@@ -46,7 +49,7 @@ describe('SalaryAmountCell', () => {
 
 describe('SalaryOver37Cell', () => {
   const over37 = {
-    rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: -1, shortfall: true,
+    rate: 1333.3, minutesText: '残業 10h00m・深夜 3h00m・休日 6h40m', theory: 16667, paid: 30000, diff: -1, shortfall: true,
     rateBasis: '割増基礎 200,000 円 ÷ 150h00m', floored: false,
   }
 
@@ -54,6 +57,8 @@ describe('SalaryOver37Cell', () => {
     const w = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
     expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
     expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ 150h00m')
+    // 時間は 残業・深夜・休日の内訳 (理論値が深夜と休日を含むので、残業時間だけを添えない)
+    expect(w.find('[data-salary-line="minutes"]').text()).toBe('時間残業 10h00m・深夜 3h00m・休日 6h40m')
     expect(w.find('[data-salary-line="diff37"]').classes()).toContain('font-bold')
     const ok = mount(SalaryOver37Cell, { props: { over37: { ...over37, diff: 5, shortfall: false }, noneReason: '', compact: true } })
     expect(ok.find('[data-salary-line="diff37"]').classes()).not.toContain('font-bold')
@@ -86,7 +91,7 @@ describe('SalaryOver37Cell', () => {
 
 describe('SalaryAmountCell: 基本給の内訳と計算の根拠', () => {
   const withExtra = (over = {}) => ({
-    key: 'base' as const, csv: 200000, sys: 150000, diff: 50000, basis: '最低賃金 1,000 円/h × 法定時間内 150h00m',
+    key: 'base' as const, csv: 200000, sys: 150000, diff: 50000, basis: ['最低賃金 1,000 円/h × 法定時間内 150h00m'],
     breakdown: 'うち基本給 190,000 / 手当 10,000', ...over,
   })
 
@@ -111,6 +116,6 @@ describe('SalaryAmountCell: 基本給の内訳と計算の根拠', () => {
   })
 
   it('内訳も根拠も無ければ (総支給) 3 段', () => {
-    expect(lines(mount(SalaryAmountCell, { props: { cell: withExtra({ key: 'total', basis: null, breakdown: null }) } }))).toEqual(['csv', 'sys', 'diff'])
+    expect(lines(mount(SalaryAmountCell, { props: { cell: withExtra({ key: 'total', basis: [], breakdown: null }) } }))).toEqual(['csv', 'sys', 'diff'])
   })
 })

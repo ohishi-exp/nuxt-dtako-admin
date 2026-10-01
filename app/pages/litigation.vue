@@ -119,7 +119,7 @@ import {
   type RateBasisStatus,
 } from '~/utils/litigation-salary'
 import type { MinWageFixInput } from '~/utils/min-wage-fix'
-import type { SalaryCdMap, SalaryCsvRow, SalaryItemConfig } from '~/utils/salary-compare'
+import { wageRowOutdatedNotice, type SalaryCdMap, type SalaryCsvRow, type SalaryItemConfig } from '~/utils/salary-compare'
 import { fmtPayrollSync, foldPayrollSync, payrollToParsedSalary, summarizeSyncedMonths, toStoredPayroll, type KyuyoPayrollRow } from '~/utils/kyuyo-fetch'
 import { buildCdMapEntries, planPayrollDbImport, type EmployeeMasterEntry, type EmployeeMasterGetResponse, type KyuyoEmployeesResponse } from '~/utils/employee-master'
 import { parseCompMap } from '~/utils/dtako-comps'
@@ -1250,6 +1250,8 @@ const salaryShortfall37Count = computed(() =>
 // 37条の逆算の基礎単価 (÷ wage report の法定時間内) が最低賃金を下回り、最低賃金で計算した行 (0 件でも出す)
 const salaryFloored37Count = computed(() =>
   salaryRows.value.filter(r => r.compared?.baseRateBasis.floored).length)
+// 保存済みの wage report の行に休日の金額の欄が無い行 (古い保存)。残業・深夜・休日の計算を出さず、取り直しを促す
+const salaryOutdatedCount = computed(() => salaryRows.value.filter(r => r.compared?.wageRowOutdated).length)
 // 明細の基本給が 単価マスタ × 法定内時間 (wage report の金額) を下回る行 — エラー (0 件でも出す)。比べられない行は数えない
 const salaryBaseBelowMinWageCount = computed(() =>
   salaryRows.value.filter(r => (r.compared?.diffBase ?? 0) < 0).length)
@@ -2217,7 +2219,7 @@ function fmtDateTime(iso: string): string {
         <!-- 給与比較: 給与大臣の明細 × エラータブの wage-report (litigation-salary.ts) -->
         <div v-if="activeTab === 'salary'" data-testid="litigation-salary" class="space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
-            拘束×賃金の給与比較と同じ比べ方で、案件の乗務員 × 月を並べます。明細の実支給 (基本給・残業代・総支給) と、明細の【補助】単価 × 勤務日数・時間外 (拘束は GCP) で出した額の差です (+ は明細の方が多い)。
+            拘束×賃金の給与比較と同じ比べ方で、案件の乗務員 × 月を並べます。明細の実支給 (基本給・残業代・総支給) と、計算 (基本給 = 単価マスタ × 法定時間内 / 残業・深夜・休日 = 最低賃金ベースの 残業代 + 深夜の割増 + 休日労働。拘束は GCP) の差です (+ は明細の方が多い)。
             明細は支給月 = 勤務月の翌月で合わせます。拘束の材料はエラータブの「検知を実行」か、下の「拘束の材料を取る」で取ったものを使います (未取得の月は比べられません)。
             明細はタブを開くと自動で読みます (読み直すときは「給与大臣から読み直す」)。保存済みの月はすぐ返り、保存が無い月だけ給与大臣から読んで保存します (1 社 10〜20 秒)。金額と氏名は画面を閉じると消えます。
           </p>
@@ -2269,11 +2271,12 @@ function fmtDateTime(iso: string): string {
             :retake-note="`1 か月 15〜64 秒 × ${caseMonths.length} か月。終わるまでこのタブを閉じない`"
             :retaking="errorsRunning"
             :retake-disabled="errorsStoreLoading || !!errorsStoreError || importingKey !== null || salaryRegistering"
-            :force-show="salaryAttrsWritten"
+            :force-show="salaryAttrsWritten || salaryOutdatedCount > 0"
             :driver-label="cd => `${driverLabel(cd)} (${cd})`"
             @retake="retakeWageReports"
           >
             <div v-if="salaryAttrsWritten" data-testid="litigation-salary-fix-attrs">属性を入れました。基本給の計算に反映するには下の「拘束の材料を取り直す」を押してください。</div>
+            <div v-if="salaryOutdatedCount > 0" data-testid="litigation-salary-outdated">{{ wageRowOutdatedNotice(salaryOutdatedCount, '下の「拘束の材料を取り直す」を押す') }}</div>
           </MinWageFixesPanel>
           <div v-if="salaryCounts.noPayroll > 0" class="flex items-center gap-2 flex-wrap" data-testid="litigation-salary-register">
             <template v-if="salaryRegisterCandidates.length > 0">
@@ -2317,9 +2320,9 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium">勤務月 (支給月)</th>
                   <th class="px-3 py-2 font-medium">状態</th>
                   <th class="px-3 py-2 font-medium text-right" title="明細 = 割増基礎に入る支給 (区分 base: 基本給の項目 + 手当) の合計 / 計算 = 単価マスタ (最低賃金) × 法定時間内 (wage report の金額。単価が無い月は計算なし)。差 = 明細 − 計算 (明細が下回る月は赤太字)">基本給</th>
-                  <th class="px-3 py-2 font-medium text-right">残業</th>
+                  <th class="px-3 py-2 font-medium text-right" title="明細 = 残業代扱いの支給 (区分 overtime: 残業・深夜・休日出勤の手当) の合計 / 計算 = 最低賃金ベースの 残業代 (時間外 + 週40時間超 + 時間外深夜) + 法定時間内の深夜の割増 + 休日労働 (wage report の金額。内訳は根拠の行)。最低賃金が引けない月・拘束が欠測の月・古い形の拘束の材料の月は計算なし">残業・深夜・休日</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
-                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 逆算の単価と最低賃金の高いほう。逆算の単価 = 割増の基礎に入る支給 ÷ wage report の法定時間内 (実働を週 40 時間で頭打ちにした時間。時給の人は明細の時給そのもの)。逆算が最低賃金を下回る月は最低賃金を採用する (根拠の行が赤)。理論値 = 残業(計算) × 基礎単価 ÷ 最低賃金 (割増の規則は wage report のもの)">残業代 (37条)</th>
+                  <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 逆算の単価と最低賃金の高いほう。逆算の単価 = 割増の基礎に入る支給 ÷ wage report の法定時間内 (実働を週 40 時間で頭打ちにした時間。時給の人は明細の時給そのもの)。逆算が最低賃金を下回る月は最低賃金を採用する (根拠の行が赤)。理論値 = 残業・深夜・休日(計算) × 基礎単価 ÷ 最低賃金 (割増の規則は wage report のもの)">残業・深夜・休日 (37条)</th>
                   <th class="px-3 py-2 font-medium" title="計算に使った単価 = 単価マスタ (最低賃金の一括設定で入れた額)。その月の最低賃金と違う月はエラー">単価 (最低賃金)</th>
                 </tr>
               </thead>
@@ -2512,6 +2515,7 @@ function fmtDateTime(iso: string): string {
               / 単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件 / 単価 判定できない {{ salaryRateBasisCounts.unknown }} 件
               / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
             </div>
+            <div v-if="salaryOutdatedCount > 0" class="litigation-print-meta" data-testid="litigation-print-salary-outdated">{{ wageRowOutdatedNotice(salaryOutdatedCount, '画面の「拘束の材料を取り直す」を押す') }}</div>
             <div class="litigation-print-meta font-bold mt-1">計算に使った単価 (単価マスタ)</div>
             <table class="litigation-print-table" data-testid="litigation-print-rate-periods">
               <thead>
@@ -2542,7 +2546,7 @@ function fmtDateTime(iso: string): string {
               <thead>
                 <tr>
                   <th>乗務員</th><th>勤務月 (支給月)</th><th>状態</th>
-                  <th>基本給</th><th>残業</th><th>総支給</th><th>残業代 (37条)</th>
+                  <th>基本給</th><th>残業・深夜・休日</th><th>総支給</th><th>残業・深夜・休日 (37条)</th>
                 </tr>
               </thead>
               <tbody>

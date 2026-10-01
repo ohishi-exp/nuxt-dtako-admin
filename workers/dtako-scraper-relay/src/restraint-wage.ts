@@ -978,6 +978,11 @@ export interface WageRow {
   /** 通常勤務中の深夜加算 (night 区分、残業ではない深夜) の最低賃金換算
    * (最低賃金 × night 時間 × night 係数 0.25 — 加算分のみ)。最低賃金なしは null。 */
   minWageNightPay: number | null;
+  /** 休日労働 (法定休日・法定休日深夜・法定外休日・法定外休日深夜) の最低賃金換算。
+   * `computeWageAmounts` を最低賃金の単価で呼んだ 4 区分の和 (係数は基礎の 1.0 を含む全額で、
+   * 丸めは区分ごと)。休日の分は `minutes.statutory` に入っていないので `minWageStatutoryPay` と
+   * 重ならない。月 60h 超の枠は掛からない (休日労働は時間外労働ではない)。最低賃金なしは null。 */
+  minWageHolidayPay: number | null;
   /** totalAmount − minWageTotalPay (どちらか欠けたら null。負 = 支給見込みが最低賃金換算を下回る)。 */
   totalPayDiff: number | null;
   /** 通常残業 (時間外 + 週40超過) の合計時間 (分)。時間外深夜は含まない (nightOvertimeMinutes)。 */
@@ -1114,6 +1119,9 @@ export function splitMinWageOvertimePay(
 const OVERTIME_KEYS = ["overtime", "weekly40Excess", "overtimeNight"] as const;
 type OvertimeKey = (typeof OVERTIME_KEYS)[number];
 
+/** 休日労働の 4 区分 (`minWageHolidayPay` が足す範囲)。 */
+const HOLIDAY_KEYS = ["legalHoliday", "legalHolidayNight", "nonLegalHoliday", "nonLegalHolidayNight"] as const;
+
 /**
  * 月60h を**超えた**ぶんに掛ける係数 (60h 以下は `config.rates[key]` のまま)。
  *
@@ -1225,10 +1233,14 @@ export function computeWageRow(
   const nightOvertimeMinutes = minutes.overtimeNight;
   let minWageOvertimePay: number | null = null;
   let minWageNightOvertimePay: number | null = null;
+  let minWageHolidayPay: number | null = null;
   if (minWage.rate !== null && !missing) {
     const split = splitMinWageOvertimePay(overtimeMinutes, nightOvertimeMinutes, minWage.rate, monthConfig);
     minWageOvertimePay = split.normalPay;
     minWageNightOvertimePay = split.nightPay;
+    // 休日の式はここに書かない — 単価マスタ側 (`amounts`) と同じ関数を最低賃金の単価で呼ぶ
+    const atMinWage = computeWageAmounts(minutes, minWage.rate, monthConfig).amounts;
+    minWageHolidayPay = HOLIDAY_KEYS.reduce((sum, key) => sum + atMinWage[key], 0);
   }
   const minWageOvertimeRate =
     minWageOvertimePay !== null && overtimeMinutes > 0
@@ -1262,6 +1274,7 @@ export function computeWageRow(
     minWageTotalPay,
     minWageStatutoryPay,
     minWageNightPay,
+    minWageHolidayPay,
     totalPayDiff:
       totalAmount !== null && minWageTotalPay !== null ? totalAmount - minWageTotalPay : null,
     overtimeMinutes,

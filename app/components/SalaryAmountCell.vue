@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 給与比較の金額セルの中身 (基本給・残業・総支給)。明細 (基本給は内訳つき) / 計算 / 差を縦に積み、計算の根拠 (基本給 = 単価 × 法定時間内、残業 = 最低賃金ベース × 残業時間) を添える。基本給・残業の差が負 (明細が下回る) は赤太字。
+ * 給与比較の金額セルの中身 (基本給・残業 (残業・深夜・休日)・総支給)。明細 (基本給は内訳つき) / 計算 / 差を縦に積み、計算の根拠 (基本給 = 単価 × 法定時間内、残業・深夜・休日 = 最低賃金ベースの 時間の内訳 と 金額の内訳を 1 行ずつ) を添える。基本給・残業の差が負 (明細が下回る) は赤太字。
  * 訴訟準備の画面の表と印刷の紙面が**同じ部品**を使う (紙面は `compact` で余白・文字を詰める)。
  * 行の組み立ては `salaryRowCells` (`app/utils/litigation-salary.ts`)。
  */
@@ -20,7 +20,7 @@ withDefaults(defineProps<{
     <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="csv"><span :class="compact ? '' : 'text-xs text-gray-500'">明細</span><span>{{ fmtYen(cell.csv) }}</span></div>
     <div v-if="cell.breakdown" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="breakdown">{{ cell.breakdown }}</div>
     <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="sys"><span :class="compact ? '' : 'text-xs text-gray-500'">計算</span><span>{{ fmtYen(cell.sys) }}</span></div>
-    <div v-if="cell.basis" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="basis">{{ cell.basis }}</div>
+    <div v-for="(line, i) in cell.basis" :key="i" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="basis">{{ line }}</div>
     <div class="flex justify-between" :class="[compact ? 'gap-1' : 'gap-3', diffSignClass(cell.diff), cell.key !== 'total' && (cell.diff ?? 0) < 0 ? 'font-bold' : '']" data-salary-line="diff"><span :class="compact ? '' : 'text-xs text-gray-500'">差</span><span>{{ fmtSalaryDiff(cell.diff) }}</span></div>
     <div v-if="cell.key === 'overtime' && overtimeFixed" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'">月給 (固定残業)</div>
   </div>

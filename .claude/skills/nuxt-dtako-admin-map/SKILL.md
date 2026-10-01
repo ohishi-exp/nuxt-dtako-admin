@@ -664,9 +664,10 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
 `@media print` A4横) ②最低賃金チェック (換算時給 vs 県別最低賃金)
 ③単価マスタ (適用開始日つき履歴、一括変更、CSV 1行=1履歴 upsert)
 ④給与比較 (給与明細 CSV をブラウザ内のみで解析し wage-report と突合 —
-**基礎単価 = max(逆算の単価, その月の最低賃金)。逆算の単価 = 割増基礎算入計÷wage report の法定時間内 (`wage.minutes.statutory` = 実働を週40時間で頭打ちにした時間。日給・月給・その他とも同じ。#1169 の直前の分母に戻した) / 時給 = 明細の時給そのもの / 区分不明は出さない。逆算が最低賃金を下回る月は最低賃金を採用 (`baseRateBasis.floored`、根拠の行が赤)。`computeBaseRate`、Refs #1133) と 残業(基礎単価) 理論値 (= 残業(計算) × 基礎単価 ÷ 最低賃金。割増の規則は wage report のもので、front で再実装しない) の
-労基法37条主判定 + 残業(計算) = 最低賃金ベースの残業代 (絶対下限、wage report の `minWageOvertimePay + minWageNightOvertimePay`)**、Refs #278)
-訴訟準備 (`/litigation`) の給与比較の表は、金額を `SalaryAmountCell`・37条を `SalaryOver37Cell` に縦積みする (行の組み立ては `salaryRowCells`)。「計算に使った時間」の列は無い (時間は基本給・残業の根拠の行に出る)。基本給のセルは 明細 / うち基本給・手当 (`CSV_BASE_SALARY_ITEM_LABEL`) / 計算 / 根拠 / 差。**基本給(計算) = wage report の `wage.amounts.statutory` (単価マスタ × 法定時間内) の 1 欄 (`sysBase`)** で、給与区分に関わらず同じ式 (明細の基本単価 × 日数は使わない)。根拠は 単価マスタが最低賃金と一致する月 =「最低賃金 N 円/h × 法定時間内 H」/ 違う月 =「単価マスタ N 円/h × …」/ 単価なし。残業(計算) = wage report の最低賃金ベースの残業代 (根拠「最低賃金ベース × 残業時間 H」、最低賃金が引けない月は計算なし。月給 = 固定残業は差を出さない)。差が負は赤太字。
+**基礎単価 = max(逆算の単価, その月の最低賃金)。逆算の単価 = 割増基礎算入計÷wage report の法定時間内 (`wage.minutes.statutory` = 実働を週40時間で頭打ちにした時間。日給・月給・その他とも同じ。#1169 の直前の分母に戻した) / 時給 = 明細の時給そのもの / 区分不明は出さない。逆算が最低賃金を下回る月は最低賃金を採用 (`baseRateBasis.floored`、根拠の行が赤)。`computeBaseRate`、Refs #1133) と 残業・深夜・休日(基礎単価) 理論値 (= 残業・深夜・休日(計算) × 基礎単価 ÷ 最低賃金。割増の規則は wage report のもので、front で再実装しない) の
+労基法37条主判定 + 残業・深夜・休日(計算) = 最低賃金ベースの 残業代 + 法定時間内の深夜の割増 + 休日労働 (絶対下限、wage report の `minWageOvertimePay + minWageNightOvertimePay + minWageNightPay + minWageHolidayPay`。明細の「残業」の区分が 残業・深夜・休日出勤の手当の束なので同じ束を足す。列は増やさない)**、Refs #278 / #1133)
+**休日の金額の欄 (`minWageHolidayPay`) が無い古い保存物・応答は 0 として足さない** — `compareSalaryMonth` が `wageRowOutdated` を立て、その行の 残業・深夜・休日(計算)・総支給(計算)・37条を出さず、画面が件数つきの 1 行 (`wageRowOutdatedNotice`) で取り直しを促す (訴訟準備 = 「拘束の材料を取り直す」/ 拘束×賃金 = 「再計算」)。保存済みの行は捨てない (`isFullWageRow` の条件に足さない — 足すとエラータブと月ごとの時間の表まで未取得に戻る)。金額に添える時間は 残業・深夜・休日の内訳 (`premiumMinutesOf` / `premiumMinutesText`、`restraint-wage-view.ts`)、根拠の行は `sysOvertimeBasisLines` (両画面が共用)。`WAGE_LOGIC_VERSION` は上げていない (スナップショットが保存するのは最低賃金チェックの表の「計算」で、給与比較の計算は保存されない)
+訴訟準備 (`/litigation`) の給与比較の表は、金額を `SalaryAmountCell`・37条を `SalaryOver37Cell` に縦積みする (行の組み立ては `salaryRowCells`)。「計算に使った時間」の列は無い (時間は基本給・残業・深夜・休日の根拠の行に出る)。列の見出しは 基本給 / 残業・深夜・休日 / 総支給 / 残業・深夜・休日 (37条)。基本給のセルは 明細 / うち基本給・手当 (`CSV_BASE_SALARY_ITEM_LABEL`) / 計算 / 根拠 / 差。**基本給(計算) = wage report の `wage.amounts.statutory` (単価マスタ × 法定時間内) の 1 欄 (`sysBase`)** で、給与区分に関わらず同じ式 (明細の基本単価 × 日数は使わない)。根拠は 単価マスタが最低賃金と一致する月 =「最低賃金 N 円/h × 法定時間内 H」/ 違う月 =「単価マスタ N 円/h × …」/ 単価なし。残業・深夜・休日(計算) = wage report の最低賃金ベースの 4 欄の和 (根拠は 1 行ずつ: 「最低賃金ベース (残業 a・深夜 b・休日 c)」/ 残業 N 円 / 時間外深夜 / 法定時間内の深夜の割増 / 休日労働。0 円の行は省く。最低賃金が引けない月・拘束が欠測の月・古い形の行は計算なしで理由を 1 行。月給 = 固定残業も差を出し「月給 (固定残業)」と注記する)。差が負は赤太字。
 ⑤支給項目区分 (**割増基礎 (37条) × 最低賃金 (4条3項) の 2 軸 5 区分**:
 base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存値は
 後方互換。集計意味論は `app/utils/salary-compare.ts` の `SALARY_CATEGORY_FLAGS`)
@@ -680,6 +681,9 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   単価/最低賃金の適用開始日 lookup・法定区分分類・週40h・金額 (円未満四捨五入)、
   最低賃金ベース残業代 (月60h超 1.5 倍の時間外軸 + 深夜軸 0.25 の独立加算、
   `computeMinWageOvertimePay`/`splitMinWageOvertimePay`、Refs #268)。
+  行 (`WageRow`) の最低賃金ベースの金額は 5 欄: `minWageStatutoryPay` / `minWageNightPay` (法定時間内の深夜の加算分) /
+  `minWageOvertimePay` / `minWageNightOvertimePay` / **`minWageHolidayPay`** (休日の 4 区分の和。式を別に持たず、
+  `computeWageAmounts` を最低賃金の単価で呼んで足す = 単価マスタ側の `amounts.*` と同じ係数・同じ丸め、Refs #1133)。
   summary v2 (theearth-restraint-client.ts) が日別データ + 派生指標
   (当月超過/15h超過日数/平均運転9h超過回数、上限は CSV 注記パース) を供給する
 - 共有 fixture + golden: `tests/fixtures/restraint-wage/` (入力 4 乗務員シナリオ +
