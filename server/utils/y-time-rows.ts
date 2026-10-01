@@ -47,9 +47,15 @@
  * どの status・本文の `error` / `reason` かを運ぶ。**relay の本文で運ぶのはその 2 欄だけ。**
  * `statusMessage` は ASCII の決まった語 (日本語は本番で落ちる)、画面に出す 1 文は `message`。
  *
- * 利用者に返す status は、**その人の話のときだけ**そのまま返す (上流の 401 / 403 = その人の
- * ログイン・権限)。relay の 4xx と上流のほかの 4xx は、利用者が送った内容の話ではないので 502 にする
- * (画面は status から「再ログイン」「送った内容を直す」等の次の一手を組むため)。
+ * 利用者に返す status は、**その人の話のときだけ**そのまま返す (画面は status から「再ログイン」
+ * 「送った内容を直す」等の次の一手を組むため):
+ *
+ * - 上流の 401 / 403 = その人のログイン・権限
+ * - **relay の 400** = その人が送った内容 (relay の 400 は乗務員CD・`from` / `to` の形と期間の検証でしか出ない。
+ *   例: 期間が relay の上限を超える)。relay の理由は `message` と `data.error` にそのまま載る
+ *
+ * relay のほかの 4xx (401 / 倒さない形の 403 / 404) と上流のほかの 4xx (400 を含む) は、利用者が送った内容の
+ * 話ではないので 502 にする。**期間の上限の規則はここに写さない** (relay が判定し、ここは status を運ぶだけ)。
  */
 import { createError } from 'h3'
 import type { H3Event } from 'h3'
@@ -69,6 +75,9 @@ import { sendToScraperRelay } from './scraper-relay'
 const RELAY_OUT_OF_SCOPE = 'kintai_out_of_scope'
 /** relay の 503 の本文の `reason` (relay に勤怠の会社が設定されていない) */
 const RELAY_COMP_ID_UNSET = 'kintai_comp_id_unset'
+
+/** relay が入力の検証 (乗務員CD・期間) で返す status。利用者が直せる内容なので、そのまま利用者へ返す */
+const RELAY_BAD_INPUT = 400
 
 const RELAY_PATH = '/kintai-relay/y-time-shifts'
 /** 応答ヘッダ `x-y-time-excluded` に載せる上限 (全件の件数は `-excluded-reasons` が持つ) */
@@ -205,7 +214,7 @@ async function shiftsFromRelay(
     const error = typeof body.error === 'string' ? body.error : undefined
     const reason = typeof body.reason === 'string' ? body.reason : undefined
     throw kintaiError(
-      status !== undefined && status >= 500 ? status : 502,
+      status !== undefined && (status >= 500 || status === RELAY_BAD_INPUT) ? status : 502,
       'relay',
       `勤怠の勤務の記録を読めませんでした (relay ${status ?? '応答なし'}${error ? `: ${error}` : ''})`,
       { status, error, reason },

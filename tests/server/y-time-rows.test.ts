@@ -215,7 +215,8 @@ describe('fetchYTimeRows — 倒さない失敗 (黙って運行の元にすり�
     ['502 (1 つの月が読めない)', 502, { error: 'gcp kintai shift-days 2025-03: failed' }, 502],
     ['401 (secret が合わない)', 401, { error: 'Unauthorized' }, 502],
     ['404', 404, null, 502],
-    ['400 (検証)', 400, { error: 'period too long' }, 502],
+    // relay の 400 は入力の検証でしか出ない (利用者が直せる) ので、400 のまま返す。ほかの 4xx は 502
+    ['400 (検証)', 400, { error: 'from〜to は 400 日以内にしてください: 2025-01-01..2026-03-31' }, 400],
     ['reason の無い 503', 503, { error: 'kintai-relay not configured' }, 503],
     ['tenant not resolved の 503', 503, { error: 'tenant not resolved from dtako_accounts' }, 503],
     ['error が別の 403', 403, { error: 'forbidden' }, 502],
@@ -231,6 +232,19 @@ describe('fetchYTimeRows — 倒さない失敗 (黙って運行の元にすり�
     expect(e.statusCode).toBe(expected)
     expect(e.data).toMatchObject({ source: 'kintai', stage: 'relay', status })
     expect(e.data).not.toHaveProperty('upstream')
+    expect(alcProxyFetchMock).not.toHaveBeenCalled()
+  })
+
+  it('★ relay の 400 は 400 のまま: 画面の 1 文に relay の理由が読め、data と statusMessage の形は変わらない', async () => {
+    const error = 'from〜to は 400 日以内にしてください: 2025-01-01..2026-03-31'
+    sendToScraperRelayMock.mockRejectedValue(relayError(400, { error }))
+    routeUpstream({ rows: () => rowsOk(), alc: () => alcOk() })
+    const e = await rejection(fetchYTimeRows(withRelay(), INPUT, KINTAI))
+    expect(e.statusCode).toBe(400)
+    expect(e.message).toBe(`勤怠の勤務の記録を読めませんでした (relay 400: ${error})`)
+    expect(e.statusMessage).toBe('kintai y-time rows failed (relay)')
+    expect(e.data).toEqual({ source: 'kintai', stage: 'relay', status: 400, error })
+    // 倒さない (運行の GET を呼ばない)・上流も呼ばない
     expect(alcProxyFetchMock).not.toHaveBeenCalled()
   })
 

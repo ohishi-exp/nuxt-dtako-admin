@@ -1042,12 +1042,39 @@ describe('/y-time-export 行の元 — プレビューとダウンロードが�
     expect(w.text()).toContain('xlsx 生成失敗: 404 template not found in R2: templates/x.xlsx')
 
     stubFetch(() => json(502, {
-      error: true, statusCode: 502, message: '勤怠の勤務の記録を読めませんでした (relay 400: 期間が長すぎる)',
-      data: { source: 'kintai', stage: 'relay', status: 400 },
+      error: true, statusCode: 502, message: '勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る)',
+      data: { source: 'kintai', stage: 'relay', status: 502 },
     }))
     await button(w, 'ダウンロード').trigger('click')
     await flushPromises()
-    expect(w.text()).toContain('xlsx 生成失敗: 502 勤怠の勤務の記録を読めませんでした (relay 400: 期間が長すぎる)')
+    expect(w.text()).toContain('xlsx 生成失敗: 502 勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る)')
+  })
+
+  it('★ 400 日を超える期間 (勤怠の元): relay の理由「400 日以内に」が読め、次の一手は「送った内容を直す」(プレビューもダウンロードも)', async () => {
+    const TOO_LONG = {
+      error: true, statusCode: 400, statusMessage: 'kintai y-time rows failed (relay)',
+      message: '勤怠の勤務の記録を読めませんでした (relay 400: from〜to は 400 日以内にしてください: 2026-01-01..2027-03-31)',
+      data: { source: 'kintai', stage: 'relay', status: 400, error: 'from〜to は 400 日以内にしてください: 2026-01-01..2027-03-31' },
+    }
+    api.getYTimeRows.mockRejectedValue(new ResponseFailure(400, TOO_LONG))
+    const w = mountPage()
+    await flushPromises()
+    await fillForm(w, '9001', '2026-01-01', '2027-03-31')
+    await button(w, '計算プレビュー').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain(
+      'プレビュー取得失敗: 400 勤怠の勤務の記録を読めませんでした (relay 400: from〜to は 400 日以内にしてください: 2026-01-01..2027-03-31)'
+      + ' — 送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから「計算プレビュー」を押してください',
+    )
+    expect(w.text()).not.toContain('サーバ側の設定か障害です')
+
+    stubFetch(() => json(400, TOO_LONG))
+    await button(w, 'ダウンロード').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain(
+      'xlsx 生成失敗: 400 勤怠の勤務の記録を読めませんでした (relay 400: from〜to は 400 日以内にしてください: 2026-01-01..2027-03-31)'
+      + ' — 送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから「ダウンロード」を押してください',
+    )
   })
 
   it('説明文は元を言う (勤怠の勤務の記録から。倒したときだけ運行)', async () => {

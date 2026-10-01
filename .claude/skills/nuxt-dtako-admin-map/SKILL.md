@@ -482,13 +482,13 @@ Y時間 の行の元は 2 つ。**どちらで作るか・倒し方・1 社固�
   (`requireAuth` は 1 回)。`driver_cd` / `from` / `to` の検証も util の `yTimeRowsInputFromBody` 1 本。
   **`POST /api/y-time-rows` は role の関門 (admin / payroll) を通る** — 以前のプレビュー (ブラウザが上流の GET を
   中継ごしに叩く) は通っていなかったので、admin / payroll でない利用者のプレビューは 403 になる
-- **期間が 400 日を超える呼び出しは、勤怠の元では失敗する** (relay の検証が 400 を返し、util が 502 にして投げる。
+- **期間が 400 日を超える呼び出しは、勤怠の元では失敗する** (relay の検証が 400 を返し、util が 400 のまま投げる。
   文に relay の理由が出る)。訴訟準備は 1 冊 12 か月なので当たらない。`/y-time-export` ページは期間が自由入力で、
   テンプレ既定の期間 (407 日) をそのまま入れると当たる
 - 勤怠の経路の失敗は `data: {source: 'kintai', stage, status, error, reason}` で、**`upstream: 'alc'` を付けない**
   (画面は 404 + `upstream: 'alc'` を「乗務員CD が alc に未登録」と読む)。画面に出す 1 文は `message`、
-  `statusMessage` は ASCII。利用者へ返す status は、上流の 401 / 403 と 5xx だけそのまま、relay の 4xx と
-  上流のほかの 4xx は 502 (利用者が送った内容の話ではないため)
+  `statusMessage` は ASCII。利用者へ返す status は、上流の 401 / 403・**relay の 400** (入力の検証 = 利用者が
+  直せる内容)・5xx だけそのまま、relay のほかの 4xx と上流のほかの 4xx は 502 (利用者が送った内容の話ではないため)
 - 応答ヘッダ (`yTimeSourceHeaders`。値は ASCII の決まった語だけ): `x-y-time-source` /
   `-source-reason` / `-excluded-reasons` (`reason=件数`、全件) / `-excluded` (先頭 20 件の `始業の日付:reason`) /
   `-missing-months`。読む側は `app/utils/litigation-output.ts` の `yTimeSourceFromHeaders` (冊を引数に取らない)。
