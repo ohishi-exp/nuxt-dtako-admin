@@ -95,6 +95,8 @@ import {
   rateBasisStatus,
   isBaseRateBelowMinWage,
   salaryRowCells,
+  isBaseBelowMinWageStatutory,
+  minWageBaseCompare,
   splitPayrollTargets,
   type LitigationRegisterCandidate,
   type PayrollTarget,
@@ -856,6 +858,12 @@ const salaryShortfall37Count = computed(() =>
 // 37条の基礎単価 (÷ 所定労働時間) がその月の最低賃金を下回る行 — エラー (0 件でも出す)
 const salaryBelowMinWage37Count = computed(() =>
   salaryRows.value.filter(r => r.compared && isBaseRateBelowMinWage(r.compared)).length)
+// 明細の基本給が 単価マスタ × 法定内時間 (wage report の金額) を下回る行 — エラー (0 件でも出す)。比べられない行は数えない
+const salaryBaseBelowMinWageCount = computed(() =>
+  salaryRows.value.filter(r => r.compared && isBaseBelowMinWageStatutory(r.compared)).length)
+// 比較済みの行のうち、単価マスタに単価が無く基本給を比べられない行
+const salaryBaseMinWageUnknownCount = computed(() =>
+  salaryRows.value.filter(r => r.compared && minWageBaseCompare(r.compared).diffBase === null).length)
 // 計算に使った単価が、その月の最低賃金と違う行 (上下どちらも) / 判定できない行 (Refs #1133)
 const salaryRateBasisCounts = computed(() => {
   let mismatch = 0
@@ -1733,6 +1741,7 @@ function fmtDateTime(iso: string): string {
             <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
             / <span data-testid="litigation-salary-shortfall37">37条で不足 {{ salaryShortfall37Count }} 件</span>
             / <span :class="salaryBelowMinWage37Count > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-below-minwage37">37条の基礎単価が最低賃金を下回る {{ salaryBelowMinWage37Count }} 件</span>
+            / <span :class="salaryBaseBelowMinWageCount > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-base-below-minwage">基本給が 単価 × 法定時間内 を下回る {{ salaryBaseBelowMinWageCount }} 件 (比べられない {{ salaryBaseMinWageUnknownCount }} 件)</span>
             / <span :class="salaryRateBasisCounts.mismatch > 0 ? 'font-bold text-red-600 dark:text-red-400' : ''" data-testid="litigation-salary-rate-mismatch">単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件</span>
             / <span data-testid="litigation-salary-rate-unknown">単価 判定できない {{ salaryRateBasisCounts.unknown }} 件</span>
             / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
@@ -1794,11 +1803,11 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium">乗務員</th>
                   <th class="px-3 py-2 font-medium">勤務月 (支給月)</th>
                   <th class="px-3 py-2 font-medium">状態</th>
-                  <th class="px-3 py-2 font-medium text-right">基本給</th>
+                  <th class="px-3 py-2 font-medium text-right" title="明細 = 割増基礎に入る支給 (区分 base: 基本給の項目 + 手当) の合計 / 計算 = 明細の基本単価 (日額) × デジタコ稼働日数。最低賃金・実働時間は使っていない。最低賃金との比較の行 = 単価マスタ (最低賃金) × 法定時間内 と明細の基本給の差 (明細が下回る月は赤)">基本給</th>
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
                   <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 明細の (出勤日数 + 有休日数) × 1 日の所定。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無ければデジタコの稼働日数、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>
-                  <th class="px-3 py-2 font-medium text-right" title="勤務日 = デジタコの稼働日数 / 時間外 = 残業時間 (時間外 + 時間外深夜 + 週 40 時間超。残業・残業代 (37条) のセルと同じ時間)">勤務日 / 時間外</th>
+                  <th class="px-3 py-2 font-medium" title="計算に使った労働時間。デジタコ = 賃金計算 (wage report) の稼働日数・実働・法定区分ごとの時間 / 明細 = 給与明細の出勤日数・有休日数・残業時間 / 37条の分母 = 日給の基礎単価を割る所定 (週 40 時間相当の月平均 173.8h で頭打ち)">計算に使った時間</th>
                   <th class="px-3 py-2 font-medium" title="計算に使った単価 = 単価マスタ (最低賃金の一括設定で入れた額)。その月の最低賃金と違う月はエラー">単価 (最低賃金)</th>
                 </tr>
               </thead>
@@ -1830,7 +1839,9 @@ function fmtDateTime(iso: string): string {
                     <td class="px-3 py-2 whitespace-nowrap" data-salary-cell="over37">
                       <SalaryOver37Cell :over37="salaryRowCells(row.compared).over37" :none-reason="salaryRowCells(row.compared).over37NoneReason" />
                     </td>
-                    <td class="px-3 py-2 text-right whitespace-nowrap tabular-nums">{{ salaryRowCells(row.compared).workDays }} 日 / {{ salaryRowCells(row.compared).overtimeHours }} h</td>
+                    <td class="px-3 py-2 whitespace-nowrap" data-salary-cell="hours">
+                      <SalaryHoursCell :hours="salaryRowCells(row.compared).hours" />
+                    </td>
                     <td class="px-3 py-2 text-xs min-w-48" data-salary-cell="rate-basis" :data-rate-status="rateBasisStatus(row.compared.rateBasis).status">
                       <div data-salary-line="rate-basis">単価 {{ rateBasisLabel(row.compared.rateBasis) }}</div>
                       <div :class="RATE_BASIS_CLASS[rateBasisStatus(row.compared.rateBasis).status]" data-salary-line="rate-basis-status">{{ rateBasisStatus(row.compared.rateBasis).message }}</div>
@@ -1985,6 +1996,7 @@ function fmtDateTime(iso: string): string {
             <div class="litigation-print-meta">
               <template v-for="(k, i) in (['ok', 'noPayroll', 'unknown', 'pending'] as const)" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_SALARY_STATE_LABELS[k] }} {{ salaryCounts[k] }}</template>
               / 37条で不足 {{ salaryShortfall37Count }} 件 / 37条の基礎単価が最低賃金を下回る {{ salaryBelowMinWage37Count }} 件
+              / 基本給が 単価 × 法定時間内 を下回る {{ salaryBaseBelowMinWageCount }} 件 (比べられない {{ salaryBaseMinWageUnknownCount }} 件)
               / 単価が最低賃金と違う {{ salaryRateBasisCounts.mismatch }} 件 / 単価 判定できない {{ salaryRateBasisCounts.unknown }} 件
               / 明細 読込済み {{ salaryPayrollLoaded }} / {{ caseMonths.length }} か月 (サーバー保存 {{ salarySourceCounts.cache }}・給与大臣から取得 {{ salarySourceCounts.live }})
             </div>
@@ -2018,7 +2030,7 @@ function fmtDateTime(iso: string): string {
               <thead>
                 <tr>
                   <th>乗務員</th><th>勤務月 (支給月)</th><th>状態</th>
-                  <th>基本給</th><th>残業</th><th>総支給</th><th>残業代 (37条)</th><th>勤務日 / 時間外</th>
+                  <th>基本給</th><th>残業</th><th>総支給</th><th>残業代 (37条)</th><th>計算に使った時間</th>
                 </tr>
               </thead>
               <tbody>
@@ -2037,7 +2049,7 @@ function fmtDateTime(iso: string): string {
                       <SalaryAmountCell :cell="cell" :overtime-fixed="salaryRowCells(row.compared).overtimeFixed" compact />
                     </td>
                     <td><SalaryOver37Cell :over37="salaryRowCells(row.compared).over37" :none-reason="salaryRowCells(row.compared).over37NoneReason" compact /></td>
-                    <td class="text-right">{{ salaryRowCells(row.compared).workDays }} 日 / {{ salaryRowCells(row.compared).overtimeHours }} h</td>
+                    <td><SalaryHoursCell :hours="salaryRowCells(row.compared).hours" compact /></td>
                   </template>
                   <td v-else colspan="5">-</td>
                 </tr>

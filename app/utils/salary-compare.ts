@@ -13,7 +13,7 @@
  * - 給与・賞与名 は "2026年 1月" 形式。賞与など年月にならない行はスキップして警告
  */
 
-import type { WageReportRow } from './restraint-wage-view'
+import type { WageReportRow, WageRow } from './restraint-wage-view'
 import { fmtMinutes, fmtYen, isOver60hPremiumMonth } from './restraint-wage-view'
 import { SCHEDULED_HOURS_PER_DAY } from './profit-wage-mix'
 
@@ -558,11 +558,21 @@ export interface SalaryComparisonRow {
   }
   /** 計算に使った単価と最低賃金 (表示用の写し、Refs #1133)。 */
   rateBasis: SalaryRateBasis
+  /** デジタコの労働時間 (表示用の写し、Refs #1133)。**wage report の欄をそのまま運ぶだけ** — ここで足し引きしない。 */
+  hours: {
+    workDays: number
+    /** 実働 (分)。`report.summary.workingMinutes` (無ければ 0) */
+    workingMinutes: number
+    /** 法定区分ごとの分 (`report.wage.minutes`) */
+    minutes: WageRow['minutes']
+  }
+  /** 単価マスタ × 法定内時間の金額 (`report.wage.amounts.statutory`)。単価か金額が無ければ null。基本給の最低賃金との比較に使う。 */
+  wageStatutoryAmount: number | null
 }
 
 /** 給与明細の【 勤怠 】項目名 → 突合する軸 (Refs #433)。給与大臣の様式に合わせた
  * 名前で、無い様式もあるので**引けなければ undefined のまま**にする。 */
-const CSV_ATTENDANCE_LABELS = {
+export const CSV_ATTENDANCE_LABELS = {
   work: '出勤日数',
   publicHoliday: '公休日数',
   paidLeave: '有休日数',
@@ -571,7 +581,11 @@ const CSV_ATTENDANCE_LABELS = {
 
 /** 給与明細の残業時間の項目名 (`KINDATA`)。本番実データで 0100/0200/0300 の 3 社とも
  * この名前 (Refs #447)。 */
-const CSV_OVERTIME_HOURS_LABEL = '残業時間'
+export const CSV_OVERTIME_HOURS_LABEL = '残業時間'
+
+/** 給与明細の支給項目のうち「基本給」そのものの項目名。区分 base には割増基礎に入る手当も混ざるので、
+ * 基本給の明細の内訳 (うち基本給 / 手当) を分けるのに使う (Refs #1133)。 */
+export const CSV_BASE_SALARY_ITEM_LABEL = '基本給'
 
 /** 給与明細の残業時間 (時間)。欄が無ければ null。 */
 export function csvOvertimeHoursOf(csv: SalaryCsvRow): number | null {
@@ -892,6 +906,11 @@ export function baseRateDaysOf(csv: SalaryCsvRow, merged: boolean, sysWorkDays: 
   return { value: (work ?? 0) + (paidLeave ?? 0), source: 'csv' }
 }
 
+/** 日給の分母の日数の出どころの呼び名 (`明細` / `デジタコ稼働`)。根拠の文字列と時間セルが同じ呼び名を使う。 */
+export function baseRateDaysSourceLabel(source: BaseRateDays['source'] | null): string {
+  return source === 'csv' ? '明細' : 'デジタコ稼働'
+}
+
 /** 基礎単価の根拠 (どの式で出したか)。 */
 export interface BaseRateBasis {
   /** 式の種類 (給与区分から決まる)。`days` = 日給 / `hours` = 時給 / `monthly` = 月給・その他 / `unknown` = 区分不明 */
@@ -923,7 +942,10 @@ export const BASE_RATE_NONE_LABELS: Record<NonNullable<BaseRateBasis['none']>, s
   'no-denominator': '分母の日数が 0 (明細の出勤 + 有休。無ければデジタコ稼働)',
 }
 
-const monthlyAvgText = `${(Math.round(STATUTORY_MONTHLY_AVG_HOURS * 10) / 10).toFixed(1)}h`
+/** 時間の表示 (`173.8h`、小数 1 桁)。 */
+export const fmtHoursOneDecimal = (hours: number): string => `${(Math.round(hours * 10) / 10).toFixed(1)}h`
+
+const monthlyAvgText = fmtHoursOneDecimal(STATUTORY_MONTHLY_AVG_HOURS)
 
 /**
  * 37条の基礎単価の根拠の文字列 (分母は所定労働時間)。**訴訟準備と拘束×賃金の給与比較が同じこの関数を使う**。
@@ -935,7 +957,7 @@ export function baseRateBasisText(row: Pick<SalaryComparisonRow, 'baseRateBasis'
   if (b.kind === 'hours') return `明細の時給 ${fmtYen(b.hourlyRate)} 円/h`
   const base = `割増基礎 ${fmtYen(row.csvPremiumBase)} 円`
   if (b.kind === 'monthly') return `${base} ÷ 法定の月平均 ${monthlyAvgText}`
-  const days = `${b.daysSource === 'csv' ? '明細' : 'デジタコ稼働'} ${b.days} 日 × ${fmtMinutes(b.dailyMinutes)}`
+  const days = `${baseRateDaysSourceLabel(b.daysSource)} ${b.days} 日 × ${fmtMinutes(b.dailyMinutes)}`
   return b.capped
     ? `${base} ÷ ${monthlyAvgText} (${days} は週 40 時間相当を超えるため法定の月平均)`
     : `${base} ÷ (${days})`
@@ -1182,6 +1204,8 @@ export function compareSalaryMonth(
         minWagePrefecture: report.wage.minWage?.prefecture ?? null,
         minWageEffectiveFrom: report.wage.minWage?.rateEffectiveFrom ?? null,
       },
+      hours: { workDays, workingMinutes, minutes: report.wage.minutes },
+      wageStatutoryAmount: report.wage.amounts?.statutory ?? null,
     })
   }
 

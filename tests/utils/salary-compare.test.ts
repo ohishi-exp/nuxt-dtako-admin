@@ -746,6 +746,24 @@ describe('compareSalaryMonth', () => {
     expect(compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸')], config, '2025-01').rows[0]!.rateBasis.hourlyRate).toBeNull()
   })
 
+  // Refs #1133: 計算で使った労働時間 (表示用の写し)。wage report の欄をそのまま運び、給与比較の側で数え直さない
+  it('hours / wageStatutoryAmount: wage report の稼働日数・実働・法定区分ごとの分・法定内の金額をそのまま写す。金額が無ければ null', () => {
+    const fake = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 太郎' })
+    const r = reportRow('99001', '架空 太郎', { workDays: 18, workingMinutes: 8000 })
+    const minutes = { statutory: 7000, overtime: 500, night: 60, overtimeNight: 30, nonLegalHoliday: 0, nonLegalHolidayNight: 0, legalHoliday: 0, legalHolidayNight: 0, weekly40Excess: 400 }
+    r.wage = { ...r.wage, minutes, amounts: { statutory: 123456 } as never }
+    const hit = compareSalaryMonth([fake], [r], config, '2025-01').rows[0]!
+    expect(hit.hours).toEqual({ workDays: 18, workingMinutes: 8000, minutes })
+    expect(hit.hours.minutes).toBe(minutes) // 写し (同じ欄をそのまま運ぶ。足し引きしない)
+    expect(hit.wageStatutoryAmount).toBe(123456)
+    // 実働が無い (null) 行は 0、単価が無く金額が出ていない行 (amounts null) は null
+    const none = reportRow('99001', '架空 太郎', { workDays: 3, workingMinutes: null })
+    none.wage = { ...none.wage, amounts: null }
+    const row = compareSalaryMonth([fake], [none], config, '2025-01').rows[0]!
+    expect(row.hours).toMatchObject({ workDays: 3, workingMinutes: 0 })
+    expect(row.wageStatutoryAmount).toBeNull()
+  })
+
   it('分単位の残業は時給を按分して円未満を四捨五入する', () => {
     const out = compareSalaryMonth(
       [csvRow({ rates: { base: null, overtime: 1430 } })],

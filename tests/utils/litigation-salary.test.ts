@@ -230,7 +230,7 @@ describe('diffSignClass (差の符号で文字色)', () => {
   })
 })
 
-import { isBaseRateBelowMinWage, salaryRowCells } from '~/utils/litigation-salary'
+import { isBaseBelowMinWageStatutory, isBaseRateBelowMinWage, salaryRowCells } from '~/utils/litigation-salary'
 import type { SalaryComparisonRow } from '~/utils/salary-compare'
 
 describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の組み立て)', () => {
@@ -243,6 +243,11 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     overtimeMinutes: 605, csvPremiumBase: 200000,
     baseRateBasis: { kind: 'days', hours: 150, days: 20, daysSource: 'csv', capped: false, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null },
     rateBasis: { hourlyRate: 1000, minWageRate: 1000 },
+    csvBaseItems: [{ label: '基本給', amount: 190000 }, { label: '通勤手当', amount: 10000 }],
+    csvOvertimeHours: 10.5,
+    attendanceDays: { sys: {}, csv: { work: 19, paidLeave: 1 } },
+    hours: { workDays: 20, workingMinutes: 9600, minutes: { statutory: 9000, overtime: 600, night: 0, overtimeNight: 0, nonLegalHoliday: 0, nonLegalHolidayNight: 0, legalHoliday: 0, legalHolidayNight: 0, weekly40Excess: 0 } },
+    wageStatutoryAmount: 150000, minWageOvertimePay: 14000, diffCsvVsMinWageOvertime: 16000,
     sysWorkDays: 20,
     sysBaseBasis: { kind: 'days', rate: 9500, quantity: 20 }, sysOvertimeRate: 1500,
   } as unknown as SalaryComparisonRow
@@ -250,12 +255,10 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
   it('基本給・残業・総支給を 明細 / 計算 / 差 の順で返し、時間外は小数 1 桁の時間にする (残業の根拠・37条・時間外の列が同じ overtimeMinutes)', () => {
     const c = salaryRowCells(base)
     expect(c.amounts).toEqual([
-      { key: 'base', csv: 200000, sys: 190000, diff: 10000, basis: '9,500 円 × 20 日' },
-      { key: 'overtime', csv: 30000, sys: 15000, diff: 15000, basis: '1,500 円/h × 10h05m' },
-      { key: 'total', csv: 250000, sys: 205000, diff: 45000, basis: null },
+      { key: 'base', csv: 200000, sys: 190000, diff: 10000, basis: '9,500 円 × 20 日', breakdown: 'うち基本給 190,000 / 手当 10,000', minWage: expect.any(Object) },
+      { key: 'overtime', csv: 30000, sys: 15000, diff: 15000, basis: '1,500 円/h × 10h05m', breakdown: null, minWage: expect.any(Object) },
+      { key: 'total', csv: 250000, sys: 205000, diff: 45000, basis: null, breakdown: null, minWage: null },
     ])
-    expect(c.workDays).toBe(20)
-    expect(c.overtimeHours).toBe(10.1)
     expect(c.over37!.minutes).toBe(605)
     expect(c.overtimeFixed).toBe(false)
   })
@@ -422,5 +425,100 @@ describe('fmtSalaryDiff', () => {
     expect(fmtSalaryDiff(-6667)).toBe('-6,667')
     expect(fmtSalaryDiff(0)).toBe('0')
     expect(fmtSalaryDiff(null)).toBe('-')
+  })
+})
+
+describe('salaryRowCells: 計算で使った労働時間・基本給の内訳・最低賃金との比較 (Refs #1133)', () => {
+  const base = {
+    csvBase: 200000, csvOvertime: 30000, overtimeFixed: false,
+    csvBaseItems: [{ label: '基本給', amount: 190000 }, { label: '通勤手当', amount: 10000 }],
+    csvOvertimeHours: 10.5,
+    attendanceDays: { sys: {}, csv: { work: 19, paidLeave: 1 } },
+    hours: { workDays: 20, workingMinutes: 9600, minutes: { statutory: 9000, overtime: 600, night: 0, overtimeNight: 0, nonLegalHoliday: 0, nonLegalHolidayNight: 0, legalHoliday: 0, legalHolidayNight: 0, weekly40Excess: 0 } },
+    wageStatutoryAmount: 150000, minWageOvertimePay: 14000, diffCsvVsMinWageOvertime: 16000,
+    rateBasis: { hourlyRate: 1000, minWageRate: 1000 },
+    sysBaseBasis: { kind: 'days', rate: 10000, quantity: 20 }, sysOvertimeRate: 1500, overtimeMinutes: 600,
+    baseRateOvertimePay: 16667, baseRateActual: 1250, diffCsvVsBaseRateOvertime: 13333, csvPremiumBase: 200000,
+    baseRateBasis: { kind: 'days', hours: 150, days: 20, daysSource: 'csv', capped: false, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null },
+  } as unknown as SalaryComparisonRow
+  const cells = (over: Record<string, unknown> = {}) => salaryRowCells({ ...base, ...over } as SalaryComparisonRow)
+  const mins = (over: Record<string, number>) => ({ ...base.hours, minutes: { ...base.hours.minutes, ...over } })
+
+  it('★ デジタコの時間は wage report の欄をそのまま: 稼働日数 / 実働 / 区分ごと (ラベルは WAGE_COLUMNS)。0 の区分は出さない', () => {
+    expect(cells().hours.digitaco).toEqual([
+      { key: 'work-days', label: '稼働日数', value: '20 日' },
+      { key: 'working', label: '実働', value: '160h00m' },
+      { key: 'statutory', label: '法定時間内', value: '150h00m' },
+      { key: 'overtime', label: '法定時間外', value: '10h00m' },
+    ])
+    const all = cells({ hours: mins({ night: 30, overtimeNight: 45, weekly40Excess: 120, legalHoliday: 60 }) }).hours.digitaco.map(l => `${l.label} ${l.value}`)
+    expect(all).toEqual(['稼働日数 20 日', '実働 160h00m', '法定時間内 150h00m', '法定時間外 10h00m', '深夜 0h30m', '時間外深夜 0h45m', '法定休日 1h00m', '週40超過 2h00m'])
+  })
+
+  it('★ 法定内と実働は 0 でも出す (0 の区分だけ消える)', () => {
+    const zero = cells({ hours: { workDays: 0, workingMinutes: 0, minutes: { ...base.hours.minutes, statutory: 0, overtime: 0 } } }).hours.digitaco
+    expect(zero.map(l => l.key)).toEqual(['work-days', 'working', 'statutory'])
+    expect(zero.map(l => l.value)).toEqual(['0 日', '0h00m', '0h00m'])
+  })
+
+  it('明細の勤怠: 出勤日数 / 有休日数 / 残業時間 (在るものだけ)。無ければ「明細に日数なし」(残業時間だけ在っても日数は無い)', () => {
+    const c = cells().hours
+    expect(c.csv).toEqual([
+      { key: 'csv-work', label: '出勤日数', value: '19 日' },
+      { key: 'csv-paid-leave', label: '有休日数', value: '1 日' },
+      { key: 'csv-overtime', label: '残業時間', value: '10.5 h' },
+    ])
+    expect(c.csvNoDays).toBe(false)
+    expect(cells({ attendanceDays: { sys: {}, csv: { work: 22 } }, csvOvertimeHours: null }).hours.csv).toEqual([{ key: 'csv-work', label: '出勤日数', value: '22 日' }])
+    const none = cells({ attendanceDays: { sys: {}, csv: {} }, csvOvertimeHours: 3 }).hours
+    expect(none.csvNoDays).toBe(true)
+    expect(none.csv).toEqual([{ key: 'csv-overtime', label: '残業時間', value: '3 h' }])
+    expect(cells({ attendanceDays: { sys: {}, csv: { paidLeave: 1 } } }).hours.csvNoDays).toBe(false)
+  })
+
+  it('★ 37条の分母は baseRateBasis から出す: 頭打ちなし / 頭打ちあり / デジタコ稼働に倒した月 / 日給以外・出せない行は無し', () => {
+    const den = (b: Record<string, unknown>) => cells({ baseRateBasis: { ...base.baseRateBasis, ...b } }).hours.denominator
+    expect(den({})).toBe('所定 150.0h (= 明細 20 日 × 7h30m)')
+    expect(den({ days: 24, capped: true, hours: (40 * 365) / 7 / 12 })).toBe('所定 173.8h (頭打ち)')
+    expect(den({ daysSource: 'sys' })).toBe('所定 150.0h (= デジタコ稼働 20 日 × 7h30m)')
+    expect(den({ kind: 'monthly', hours: 173.8, days: null })).toBeNull()
+    expect(den({ kind: 'hours', hours: null, days: null })).toBeNull()
+    expect(den({ none: 'no-premium-base', hours: null })).toBeNull()
+  })
+
+  it('★ 基本給の明細の内訳: 項目名「基本給」と それ以外 (手当) に分ける。手当が無ければ手当 0', () => {
+    expect(cells().amounts[0]!.breakdown).toBe('うち基本給 190,000 / 手当 10,000')
+    expect(cells({ csvBaseItems: [{ label: '基本給', amount: 200000 }] }).amounts[0]!.breakdown).toBe('うち基本給 200,000 / 手当 0')
+    expect(cells({ csvBaseItems: [{ label: '精勤手当', amount: 5000 }] }).amounts[0]!.breakdown).toBe('うち基本給 0 / 手当 5,000')
+    expect(cells().amounts[1]!.breakdown).toBeNull()
+  })
+
+  it('★ 基本給の最低賃金との比較: 既存 minWageCompareRow (単価マスタ × 法定内 と 明細の基本給、差 = 明細 − 計算)。上回る月は赤くしない', () => {
+    expect(cells().amounts[0]!.minWage).toEqual({ text: '最低賃金 1,000 円/h × 法定時間内 150h00m = 150,000', diff: 50000, shortfall: false })
+    expect(isBaseBelowMinWageStatutory({ wageStatutoryAmount: 150000, csvBase: 200000, csvOvertime: 0 })).toBe(false)
+  })
+
+  it('★ 明細が最低賃金 × 法定内を下回る月は shortfall (エラー)。等しいのは下回らない', () => {
+    expect(cells({ csvBase: 149999 }).amounts[0]!.minWage).toMatchObject({ diff: -1, shortfall: true })
+    expect(cells({ csvBase: 150000 }).amounts[0]!.minWage).toMatchObject({ diff: 0, shortfall: false })
+    expect(isBaseBelowMinWageStatutory({ wageStatutoryAmount: 150000, csvBase: 100000, csvOvertime: 0 })).toBe(true)
+  })
+
+  it('単価マスタと最低賃金が違う月は「単価マスタ」と書く (最低賃金と呼ばない)。最低賃金が引けない月も同じ', () => {
+    expect(cells({ rateBasis: { hourlyRate: 1000, minWageRate: 1100 } }).amounts[0]!.minWage!.text).toBe('単価マスタ 1,000 円/h × 法定時間内 150h00m = 150,000')
+    expect(cells({ rateBasis: { hourlyRate: 1000, minWageRate: null } }).amounts[0]!.minWage!.text).toContain('単価マスタ 1,000 円/h')
+  })
+
+  it('★ 単価が無い (金額が引けない) 月は比べない: 理由 1 行で差は null、下回り扱いにしない', () => {
+    const none = cells({ wageStatutoryAmount: null, rateBasis: { hourlyRate: null, minWageRate: 1000 } }).amounts[0]!.minWage
+    expect(none).toEqual({ text: '最低賃金との比較なし (単価マスタに単価が無い)', diff: null, shortfall: false })
+    expect(isBaseBelowMinWageStatutory({ wageStatutoryAmount: null, csvBase: 0, csvOvertime: 0 })).toBe(false)
+  })
+
+  it('残業の最低賃金ベース: 行の minWageOvertimePay と diffCsvVsMinWageOvertime を出すだけ。下回れば shortfall、引けなければ理由', () => {
+    expect(cells().amounts[1]!.minWage).toEqual({ text: '最低賃金ベース 14,000', diff: 16000, shortfall: false })
+    expect(cells({ diffCsvVsMinWageOvertime: -5 }).amounts[1]!.minWage).toMatchObject({ diff: -5, shortfall: true })
+    expect(cells({ minWageOvertimePay: null, diffCsvVsMinWageOvertime: null }).amounts[1]!.minWage).toEqual({ text: '最低賃金ベースの残業代なし (最低賃金が引けない)', diff: null, shortfall: false })
+    expect(cells({ diffCsvVsMinWageOvertime: null }).amounts[1]!.minWage).toMatchObject({ shortfall: false })
   })
 })
