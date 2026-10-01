@@ -140,6 +140,7 @@ function stubDollarFetch() {
     }
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, toMonth: caseToMonth, updatedAt: caseUpdatedAt }] }
+    if (url === '/restraint-api/litigation-cases/deleted') throw Object.assign(new Error('403'), { statusCode: 403 }) // 削除した案件の節は出さない既定
     if (url === '/restraint-api/kintai/onprem-month-operations') {
       if (q.month === '2025-01') throw Object.assign(new Error('reading-dates が 502'), { statusCode: 502 })
       return { month: q.month, driver_cd: q.driver_cd, ope_nos: febOnpremOpeNos, truncated: false }

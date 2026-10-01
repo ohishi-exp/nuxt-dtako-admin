@@ -78,6 +78,7 @@ beforeEach(() => {
   viewerCompsResponse = async () => ({ comps: ['27324455', '75700192'] })
   fetchMock = vi.fn(async (url: string) => {
     if (url === '/restraint-api/litigation-cases') return { cases: [] }
+    if (url === '/restraint-api/litigation-cases/deleted') throw Object.assign(new Error('403'), { statusCode: 403 }) // 削除した案件の節は出さない既定
     if (url === '/restraint-api/viewer-comps') return viewerCompsResponse()
     throw new Error(`unexpected $fetch ${url}`)
   })

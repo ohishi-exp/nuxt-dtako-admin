@@ -76,6 +76,7 @@ function stubDollarFetch() {
     calls.push({ via: '$fetch', method: opts.method ?? 'GET', url: `${url}?${new URLSearchParams(q).toString()}` })
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
+    if (url === '/restraint-api/litigation-cases/deleted') throw Object.assign(new Error('403'), { statusCode: 403 }) // 削除した案件の節は出さない既定
     if (url === '/restraint-api/kintai/change-log') {
       const result = kintaiHandler(url, q)
       if (result instanceof Error) throw result

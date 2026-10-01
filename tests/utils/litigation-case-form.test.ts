@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   addDriverCd,
+  deletedCaseExpiryDate,
+  restoreRetryLabel,
   buildLitigationCaseSavePayload,
   emptyLitigationCaseForm,
   isValidDriverCd,
@@ -243,5 +245,39 @@ describe('litigationCaseMonthCount', () => {
 
   it('形式不正なら0', () => {
     expect(litigationCaseMonthCount('invalid', '2024-06')).toBe(0)
+  })
+})
+
+describe('deletedCaseExpiryDate', () => {
+  it('削除の 30 日後の JST の日付 (UTC の 15:00 以降は JST で翌日)', () => {
+    expect(deletedCaseExpiryDate('2025-06-01T00:00:00.000Z')).toBe('2025-07-01')
+    expect(deletedCaseExpiryDate('2025-05-31T16:30:00.000Z')).toBe('2025-07-01')
+  })
+
+  it('月末をまたぐ (30 日の月・31 日の月)', () => {
+    expect(deletedCaseExpiryDate('2025-01-31T00:00:00.000Z')).toBe('2025-03-02')
+    expect(deletedCaseExpiryDate('2025-04-01T00:00:00.000Z')).toBe('2025-05-01')
+  })
+
+  it('うるう年の 2 月を数える (2024 は 29 日まで、2025 は 28 日まで)', () => {
+    expect(deletedCaseExpiryDate('2024-02-01T00:00:00.000Z')).toBe('2024-03-02')
+    expect(deletedCaseExpiryDate('2025-02-01T00:00:00.000Z')).toBe('2025-03-03')
+  })
+
+  it('年をまたぐ', () => {
+    expect(deletedCaseExpiryDate('2025-12-15T00:00:00.000Z')).toBe('2026-01-14')
+  })
+
+  it('読めなければ空文字', () => {
+    expect(deletedCaseExpiryDate('not-a-date')).toBe('')
+  })
+})
+
+describe('restoreRetryLabel', () => {
+  it('404 / 409 は押し直しても直らないので一覧を見る案内、それ以外は「復活」を押し直す', () => {
+    expect(restoreRetryLabel(404)).toBe('読み直した一覧を確認してください')
+    expect(restoreRetryLabel(409)).toBe('案件の一覧を確認してください')
+    expect(restoreRetryLabel(500)).toBe('「復活」を押してやり直してください')
+    expect(restoreRetryLabel(null)).toBe('「復活」を押してやり直してください')
   })
 })
