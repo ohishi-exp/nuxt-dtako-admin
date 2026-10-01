@@ -11,10 +11,14 @@ import {
   buildLitigationZipSummary,
   buildLitigationOutputChunks,
   countLitigationResults,
+  litigationEmptyMessage,
+  litigationOutputSourceLines,
   litigationResultFromFailure,
   litigationResultFromHeaders,
   litigationZipFilename,
-  LITIGATION_EMPTY_MESSAGE,
+  yTimeSourceFromHeaders,
+  LITIGATION_EMPTY_ALC_MESSAGE,
+  LITIGATION_EMPTY_KINTAI_MESSAGE,
   LITIGATION_HOURS_COLUMNS,
   LITIGATION_NOT_FOUND_MESSAGE,
   type LitigationOutputChunk,
@@ -112,11 +116,13 @@ describe('litigationResultFromHeaders', () => {
     })
   })
 
-  it('★ rows 0 は empty で「運行 0 件 (alc に取り込まれていない可能性)」と言う', () => {
+  it('★ 元を返さない応答の rows 0 は empty で「運行 0 件 (alc に取り込まれていない可能性)」と言う', () => {
     const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '0', 'x-y-time-missing-count': '0', 'x-y-time-warnings-count': '0' }))
     expect(r.status).toBe('empty')
     expect(r.rows).toBe(0)
-    expect(r.message).toBe(LITIGATION_EMPTY_MESSAGE)
+    expect(r.message).toBe(LITIGATION_EMPTY_ALC_MESSAGE)
+    // 元のヘッダが無い応答は、元の欄を 1 つも持たない (旧い版と同じ形)
+    for (const k of ['source', 'sourceReason', 'excludedReasons', 'excluded', 'missingMonths']) expect(r).not.toHaveProperty(k)
     expect(r.message).not.toBe(LITIGATION_NOT_FOUND_MESSAGE)
   })
 
@@ -139,6 +145,119 @@ describe('litigationResultFromHeaders', () => {
     expect(r.warningsCount).toBe(2)
     expect(litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '3' }))).toMatchObject({
       missingDates: [], missingCount: 0, warnings: [], warningsCount: 0,
+    })
+  })
+})
+
+describe('行の元 (Refs #1133 c1133-46)', () => {
+  const KINTAI_CHUNK: LitigationOutputChunk = { driverCd: '9001', from: '2025-01-01', to: '2025-12-31', label: '2025-01〜2025-12', filename: '9001_2025-01-2025-12.xlsx' }
+  const base = (over: Partial<LitigationOutputResult> = {}): LitigationOutputResult => ({
+    driverCd: '9001', from: '2025-01-01', to: '2025-12-31', status: 'ok', rows: 10,
+    missingDates: [], missingCount: 0, warnings: [], warningsCount: 0, message: '10 行', ...over,
+  })
+
+  describe('yTimeSourceFromHeaders', () => {
+    it('★ 勤怠の元: 理由ごとの件数 (全件)・先頭の始業の日付・記録の無い月を読む', () => {
+      expect(yTimeSourceFromHeaders(headers({
+        'x-y-time-source': 'kintai',
+        'x-y-time-excluded-reasons': 'no_non_working=22,three_days=1',
+        'x-y-time-excluded': '2025-01-02:no_non_working,2025-01-03:three_days',
+        'x-y-time-missing-months': '2025-03,2025-04',
+      }))).toEqual({
+        source: 'kintai',
+        excludedReasons: { no_non_working: 22, three_days: 1 },
+        excluded: [{ date: '2025-01-02', reason: 'no_non_working' }, { date: '2025-01-03', reason: 'three_days' }],
+        missingMonths: ['2025-03', '2025-04'],
+      })
+    })
+
+    it('運行の元へ倒した応答は理由を持ち、件数の欄は空で持つ', () => {
+      expect(yTimeSourceFromHeaders(headers({ 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'out_of_scope' })))
+        .toEqual({ source: 'alc', sourceReason: 'out_of_scope', excludedReasons: {}, excluded: [], missingMonths: [] })
+      expect(yTimeSourceFromHeaders(headers({ 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'not_configured' })).sourceReason).toBe('not_configured')
+    })
+
+    it('★ 元のヘッダが無い・知らない値なら何も返さない (勤怠の元に見せない)', () => {
+      expect(yTimeSourceFromHeaders(headers({}))).toEqual({})
+      expect(yTimeSourceFromHeaders(headers({ 'x-y-time-source': 'other', 'x-y-time-excluded-reasons': 'overlap=1' }))).toEqual({})
+    })
+
+    it('知らない倒した理由・形の合わない件数と一覧の要素は読まない', () => {
+      expect(yTimeSourceFromHeaders(headers({
+        'x-y-time-source': 'alc',
+        'x-y-time-source-reason': 'whatever',
+        'x-y-time-excluded-reasons': 'overlap=2,broken,=3,night_bands=x',
+        'x-y-time-excluded': '2025-01-02:overlap,nocolon,:overlap',
+      }))).toEqual({ source: 'alc', excludedReasons: { overlap: 2 }, excluded: [{ date: '2025-01-02', reason: 'overlap' }], missingMonths: [] })
+    })
+  })
+
+  describe('litigationEmptyMessage (rows 0 の文を元で言い分ける)', () => {
+    it('★ 勤怠の元: 勤務が無いのか、行を作れなかったのかを言い分ける', () => {
+      expect(litigationEmptyMessage({ source: 'kintai', excludedReasons: {} })).toBe('この期間に勤務が 0 件')
+      expect(litigationEmptyMessage({ source: 'kintai' })).toBe(LITIGATION_EMPTY_KINTAI_MESSAGE)
+      expect(litigationEmptyMessage({ source: 'kintai', excludedReasons: { no_non_working: 3, overlap: 1 } }))
+        .toBe('行を作れた勤務が 0 件 (行を作れなかった勤務 4 件)')
+    })
+
+    it('★ 運行の元 (倒した 2 通り) と、元の無い結果 (旧い版) は今までの運行の文', () => {
+      expect(litigationEmptyMessage({ source: 'alc', sourceReason: 'out_of_scope' } as never)).toBe(LITIGATION_EMPTY_ALC_MESSAGE)
+      expect(litigationEmptyMessage({ source: 'alc', excludedReasons: {} })).toBe(LITIGATION_EMPTY_ALC_MESSAGE)
+      expect(litigationEmptyMessage({})).toBe('この期間に運行が 0 件 (alc に取り込まれていない可能性)')
+    })
+
+    it('★ 勤怠の元の rows 0 は、結果の文が「運行」と言わない', () => {
+      const r = litigationResultFromHeaders(KINTAI_CHUNK, headers({ 'x-y-time-rows': '0', 'x-y-time-source': 'kintai', 'x-y-time-missing-months': '2025-01' }))
+      expect(r).toMatchObject({ status: 'empty', source: 'kintai', message: 'この期間に勤務が 0 件', missingMonths: ['2025-01'] })
+      const excluded = litigationResultFromHeaders(KINTAI_CHUNK, headers({ 'x-y-time-rows': '0', 'x-y-time-source': 'kintai', 'x-y-time-excluded-reasons': 'no_non_working=5' }))
+      expect(excluded.message).toBe('行を作れた勤務が 0 件 (行を作れなかった勤務 5 件)')
+      const alc = litigationResultFromHeaders(KINTAI_CHUNK, headers({ 'x-y-time-rows': '0', 'x-y-time-source': 'alc', 'x-y-time-source-reason': 'not_configured' }))
+      expect(alc).toMatchObject({ status: 'empty', source: 'alc', sourceReason: 'not_configured', message: LITIGATION_EMPTY_ALC_MESSAGE })
+    })
+  })
+
+  describe('litigationOutputSourceLines (冊ごとの表示)', () => {
+    const texts = (r: LitigationOutputResult) => litigationOutputSourceLines(r).map(l => `${l.kind}: ${l.text}`)
+
+    it('★ 元の 3 通りの文', () => {
+      expect(texts(base({ source: 'kintai', excludedReasons: {}, excluded: [], missingMonths: [] }))).toEqual(['source: 勤怠の記録から作成'])
+      expect(texts(base({ source: 'alc', sourceReason: 'out_of_scope' }))).toEqual(['source: 運行から作成 (この会社は勤怠の記録が無い)'])
+      expect(texts(base({ source: 'alc', sourceReason: 'not_configured' }))).toEqual(['source: 運行から作成 (この環境は勤怠の設定が無い)'])
+    })
+
+    it('★ 元の欄の無い結果 (旧い版) と、倒した理由の無い運行の元は「運行から作成」', () => {
+      expect(texts(base())).toEqual(['source: 運行から作成'])
+      expect(texts(base({ source: 'alc' }))).toEqual(['source: 運行から作成'])
+    })
+
+    it('★ 行を作れなかった勤務は合計・理由ごとの件数・先頭の始業の日付を言い、畳み直しが要るものは別の行で目立たせる', () => {
+      expect(texts(base({
+        source: 'kintai',
+        excludedReasons: { no_non_working: 3, three_days: 1, overlap: 1, night_bands: 1, brand_new: 1 },
+        excluded: [{ date: '2025-01-02', reason: 'no_non_working' }, { date: '2025-01-03', reason: 'three_days' }],
+        missingMonths: ['2025-03', '2025-04'],
+      }))).toEqual([
+        'source: 勤怠の記録から作成',
+        'excluded: 行を作れなかった勤務 7 件 (まだ畳み直していない 3 件・3 暦日以上にまたがる 1 件・別の勤務と時間が重なる 1 件・深夜の時間帯に載らない 1 件・理由 brand_new 1 件)'
+        + ' — 始業の日付: 2025-01-02 (まだ畳み直していない), 2025-01-03 (3 暦日以上にまたがる) ほか',
+        'refold: 勤怠の畳み直しが要ります (まだ畳み直していない勤務 3 件)',
+        'missingMonths: 勤務の記録が無い月: 2025-03, 2025-04',
+      ])
+    })
+
+    it('一覧が全件のときは「ほか」を付けない。畳み直しの要らない理由だけなら畳み直しの行は出さない', () => {
+      expect(texts(base({ source: 'kintai', excludedReasons: { overlap: 1 }, excluded: [{ date: '2025-02-01', reason: 'overlap' }], missingMonths: [] }))).toEqual([
+        'source: 勤怠の記録から作成',
+        'excluded: 行を作れなかった勤務 1 件 (別の勤務と時間が重なる 1 件) — 始業の日付: 2025-02-01 (別の勤務と時間が重なる)',
+      ])
+      // 件数だけ在って一覧の欄が無い結果でも落ちない
+      expect(texts(base({ source: 'kintai', excludedReasons: { overlap: 2 } }))[1]).toBe('excluded: 行を作れなかった勤務 2 件 (別の勤務と時間が重なる 2 件) — 始業の日付:  ほか')
+    })
+
+    it('行が 0 件の冊も元と除外を言う。失敗・未登録の冊は何も作っていないので空', () => {
+      expect(texts(base({ status: 'empty', rows: 0, source: 'kintai', excludedReasons: { no_non_working: 1 }, excluded: [{ date: '2025-01-02', reason: 'no_non_working' }] }))).toHaveLength(3)
+      expect(texts(base({ status: 'error', rows: null }))).toEqual([])
+      expect(texts(base({ status: 'not_found', rows: null }))).toEqual([])
     })
   })
 })

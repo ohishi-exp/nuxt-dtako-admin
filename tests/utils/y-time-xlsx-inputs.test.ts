@@ -98,6 +98,9 @@ describe('yTimeRowInputCells — 1 行が入力列のどのセルに何を書く
     ])
     expect(yTimeRowInputCells(row('2030-01-07', { rest_today_5_22: 60, start_minutes_of_day: 0 })))
       .toEqual([['G', 0], ['H', 1020], ['L', 60]])
+    // 終業は bucket の日の 0:00 からの分をそのまま書く。勤務の記録から作る行の最大 46:00 (2760) でも書き方は同じ
+    expect(yTimeRowInputCells(row('2030-01-07', { start_minutes_of_day: 1320, end_minutes_from_bucket_date: 2760 })))
+      .toEqual([['G', 1320], ['H', 2760]])
   })
 })
 

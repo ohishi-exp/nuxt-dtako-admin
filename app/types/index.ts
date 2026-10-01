@@ -395,3 +395,25 @@ export interface YTimeExportResponse {
   rows: YTimeRow[]
   warnings: string[]
 }
+
+// --- Y時間 の行を勤怠の勤務の記録から作る (rust-alc-api `POST /api/dtako/y-time-rows`、Refs #1133 c1133-46) ---
+
+/** Y時間 の行の元。`kintai` = 勤怠の勤務の記録 (wage report と同じ元)、`alc` = 運行 (デジタコ) */
+export type YTimeSource = 'kintai' | 'alc'
+
+/** 勤怠の元を試したのに運行の元へ倒した理由。倒していなければ持たない */
+export type YTimeSourceReason = 'out_of_scope' | 'not_configured'
+
+/** 上流が行を作れなかった勤務 1 本。`reason` = `no_non_working` / `three_days` / `overlap` / `night_bands` */
+export interface YTimeExcludedShift {
+  start: string
+  end: string
+  reason: string
+}
+
+/** `rows` の要素は運行の経路 ({@link YTimeExportResponse}) と同じ型 */
+export interface YTimeRowsResponse {
+  rows: YTimeRow[]
+  warnings: string[]
+  excluded: YTimeExcludedShift[]
+}

@@ -94,8 +94,9 @@ interface UpstreamPathEntry {
 }
 
 /**
- * **issue #1035 の「対象は 2 本」は誤り — 実測 3 本。**
+ * **issue #1035 の「対象は 2 本」は誤り — その時点の実測は 3 本。**
  * `alcInternalProxyFetch` 経由の `/api/internal/operations` が数え落とされている。
+ * その後 `/api/dtako/y-time-rows` (Refs #1133 c1133-46) が増えた。
  */
 const UPSTREAM_PATHS: UpstreamPathEntry[] = [
   {
@@ -105,7 +106,13 @@ const UPSTREAM_PATHS: UpstreamPathEntry[] = [
   },
   {
     path: '/api/dtako/y-time-export',
-    caller: 'server/api/y-time-export.post.ts',
+    caller: 'server/utils/y-time-rows.ts',
+    liveProbe: true,
+  },
+  {
+    // 勤務の列を Y時間 の行にする口 (POST)。実測は GET で投げるが、見るのは「404 でない」だけ
+    path: '/api/dtako/y-time-rows',
+    caller: 'server/utils/y-time-rows.ts',
     liveProbe: true,
   },
   {

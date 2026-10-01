@@ -6,8 +6,8 @@
  *
  * | 列 | 素材 | 口 |
  * | --- | --- | --- |
- * | `alcOps` alc の運行 | Y時間の勤務日 (JSON) を月に畳んだ日数 | `getYTimePreview` (区切り 1 つにつき 1 回) と出力タブの `empty` |
- * | `yTime` Y時間の欠け | 同じプレビューの警告 (Y時間に入らなかった運行) + ZIP を作った冊はテンプレに書けなかった日 | `getYTimePreview` (alcOps と同じ応答) / `POST /api/y-time-export` (出力タブ) |
+ * | `alcOps` alc の運行 | Y時間の勤務日 (JSON) を月に畳んだ日数 | `getYTimePreview` (区切り 1 つにつき 1 回) と、運行から作った出力タブの `empty` |
+ * | `yTime` Y時間の欠け | 同じプレビューの警告 (Y時間に入らなかった運行) + ZIP を作った冊はテンプレに書けなかった日・行を作れなかった勤務 | `getYTimePreview` (alcOps と同じ応答) / `POST /api/y-time-export` (出力タブ) |
  * | `unkoGaps` alc にあってオンプレのデジタコに無い運行 | alc の運行とオンプレ `dtako_rows` の運行を、運行を始めた月・先頭 22 桁で突き合わせる | `getOperations` (alc、読取日で 2 か月) / `GET /restraint-api/kintai/onprem-month-operations?month=&driver_cd=` |
  * | `invariants` 最低賃金の不変条件 (条件1〜3) | relay が付ける `invariants` | `GET /restraint-api/wage-report?source=gcp&month=` |
  *
@@ -61,7 +61,7 @@ export interface LitigationErrorRow {
   /** `YYYY-MM` */
   month: string
   cells: Record<LitigationCheckKey, LitigationCheckCell>
-  /** 取り込みボタンを出すか (= alc の運行が 0 件と判定できた月だけ) */
+  /** 取り込みボタンを出すか (= alc の運行が 0 件と判定できた月だけ。勤怠の元の出力の 0 件では出さない) */
   canImport: boolean
 }
 
@@ -79,6 +79,52 @@ export interface LitigationYTimeDropped {
 export type LitigationAlcOpsEntry =
   | { ok: true, days: number, dropped: LitigationYTimeDropped[] }
   | { ok: false, notFound: boolean, reason: string }
+
+// ---- 出力タブの結果の元 (Refs #1133 c1133-46) ----
+//
+// 出力タブの Y時間 の Excel は、勤怠の勤務の記録 (wage report と同じ元) から作る。勤怠の記録が無い会社・
+// 勤怠の設定が無い環境だけ、今までどおり運行 (デジタコ) から作る。**結果がどちらの元かを決めるのは
+// ここの 1 関数だけ** — 出力タブの文 (`litigation-output.ts`) もエラータブの判定も、これを通す。
+
+/**
+ * 出力タブの結果が、勤怠の勤務の記録から作ったものか。**`source` の無い結果 (この欄ができる前に
+ * 保存した版) は運行から作ったものとして読む** — その頃の出力は全部運行の元だった。
+ */
+export function litigationResultFromKintai(result: Pick<LitigationOutputResult, 'source'>): boolean {
+  return result.source === 'kintai'
+}
+
+/** 行を作れなかった勤務の理由 (上流の `excluded[].reason`) の読み方 */
+const EXCLUDED_REASON_LABELS: Record<string, string> = {
+  no_non_working: 'まだ畳み直していない',
+  three_days: '3 暦日以上にまたがる',
+  overlap: '別の勤務と時間が重なる',
+  night_bands: '深夜の時間帯に載らない',
+}
+/** 勤怠の畳み直しで直る理由 (実働でない区間をまだ持っていない勤務) */
+const REFOLD_REASON = 'no_non_working'
+export const LITIGATION_REFOLD_NOTICE = '勤怠の畳み直しが要ります'
+
+/** 理由の読み方。知らない理由は黙って丸めず、届いた語のまま出す。 */
+export function litigationExcludedReasonLabel(reason: string): string {
+  return EXCLUDED_REASON_LABELS[reason] ?? `理由 ${reason}`
+}
+
+/**
+ * 行を作れなかった勤務の要約。`total` は理由ごとの件数の合計 (結果が持つ `excluded` は先頭だけなので、
+ * 件数はそこから数えない)、`reasonsText` は「まだ畳み直していない 3 件・別の勤務と時間が重なる 1 件」、
+ * `refold` はまだ畳み直していない勤務の件数。欄の無い結果 (旧い版・運行の元) は 0 件。
+ */
+export function litigationExcludedSummary(
+  result: Pick<LitigationOutputResult, 'excludedReasons'>,
+): { total: number, reasonsText: string, refold: number } {
+  const entries = Object.entries(result.excludedReasons ?? {})
+  return {
+    total: entries.reduce((sum, [, n]) => sum + n, 0),
+    reasonsText: entries.map(([reason, n]) => `${litigationExcludedReasonLabel(reason)} ${n} 件`).join('・'),
+    refold: result.excludedReasons?.[REFOLD_REASON] ?? 0,
+  }
+}
 
 /** Map のキー `乗務員CD|YYYY-MM` */
 export function litigationDriverMonthKey(driverCd: string, month: string): string {
@@ -167,8 +213,10 @@ export function alcOpsCell(entry: LitigationAlcOpsEntry | undefined, chunkResult
       ? { state: 'unknown', message: '乗務員CD が alc に未登録 (404) — 運行を数えられない' }
       : { state: 'unknown', message: entry.reason }
   }
-  // 月単位を読む前でも、出力タブで区切りごと 0 件と分かっていれば言える
-  if (chunkResult?.status === 'empty') {
+  // 月単位を読む前でも、出力タブで区切りごと 0 件と分かっていれば言える。
+  // **運行から作った結果のときだけ** — 勤怠の元の 0 件 (勤務が無い・全部の勤務で行を作れなかった) は
+  // 運行が無いことを意味しないので、ここで `ng` にしない (運行の取り込みのボタンを出さない)
+  if (chunkResult?.status === 'empty' && !litigationResultFromKintai(chunkResult)) {
     return { state: 'ng', message: 'この冊の期間の運行が 0 件 (出力タブの結果)' }
   }
   return { state: 'pending', message: '未実行 — 「検知を実行」で調べます' }
@@ -178,6 +226,8 @@ export function alcOpsCell(entry: LitigationAlcOpsEntry | undefined, chunkResult
  * 出力タブの結果から、その月に「Y時間に書けなかった日」があるかを出す。
  * `missingDates` はサーバが先頭 30 件に切り詰めるので、**総数が一覧より多く、
  * この月の日が一覧に 1 つも無いときは「無い」と言わず判定できないにする**。
+ * そのあと、勤怠の元の結果で**行を作れなかった勤務が 1 件でも在れば異常あり** (黙って
+ * 「書けなかった日なし」にしない。件数は冊単位 — 月には割り振れない)。
  */
 function yTimeCellFromOutput(month: string, result: LitigationOutputResult): LitigationCheckCell {
   if (result.status === 'error') return { state: 'unknown', message: result.message }
@@ -194,9 +244,16 @@ function yTimeCellFromOutput(month: string, result: LitigationOutputResult): Lit
       message: `この冊で書けなかった日が ${result.missingCount} 日あり、一覧 (先頭 ${result.missingDates.length} 日) にこの月の日が入らなかった`,
     }
   }
-  return result.status === 'empty'
-    ? { state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「alc の運行」の列を見てください)' }
-    : { state: 'ok', message: '書けなかった日なし' }
+  // 勤怠の元で行を作れなかった勤務が在れば、その勤務の日は Excel に入っていない (冊単位の件数)
+  const excluded = litigationExcludedSummary(result)
+  if (excluded.total > 0) {
+    const refold = excluded.refold > 0 ? ` — ${LITIGATION_REFOLD_NOTICE}` : ''
+    return { state: 'ng', message: `この冊で行を作れなかった勤務 ${excluded.total} 件 (出力タブの結果): ${excluded.reasonsText}${refold}` }
+  }
+  if (result.status !== 'empty') return { state: 'ok', message: '書けなかった日なし' }
+  return litigationResultFromKintai(result)
+    ? { state: 'ok', message: '書けなかった日なし (この冊は勤務 0 件)' }
+    : { state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「alc の運行」の列を見てください)' }
 }
 
 /** 「検知を実行」のプレビュー (`alcOps` と同じ応答) から、Y時間に入らなかった運行があるかを出す。 */

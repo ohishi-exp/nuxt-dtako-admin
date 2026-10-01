@@ -17,7 +17,8 @@
  *   一部だけ「未実行」や 0 件に見せない
  */
 import { fmtJstDateTime } from './litigation-changes'
-import type { LitigationOutputChunk, LitigationOutputResult, LitigationOutputStatus } from './litigation-output'
+import type { LitigationOutputChunk, LitigationOutputResult, LitigationOutputStatus, YTimeSourceInfo } from './litigation-output'
+import type { YTimeSource, YTimeSourceReason } from '~/types'
 
 /** 保存する結果の形の版 */
 export const LITIGATION_OUTPUT_SNAPSHOT_VERSION = 1
@@ -73,6 +74,44 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every(s => typeof s === 'string')
 }
 
+const SOURCES: readonly unknown[] = ['kintai', 'alc'] satisfies YTimeSource[]
+const SOURCE_REASONS: readonly unknown[] = ['out_of_scope', 'not_configured'] satisfies YTimeSourceReason[]
+
+/**
+ * 行の元の 5 欄 (Refs #1133 c1133-46)。**どの欄も無くてよい** — この欄ができる前に保存した版は
+ * 1 つも持たず、運行から作ったものとして読む (版の形の番号は上げていない)。
+ * 在って型が違うときだけ false。
+ */
+function parseSourceInfo(raw: Record<string, unknown>): YTimeSourceInfo | false {
+  const { source, sourceReason, excludedReasons, excluded, missingMonths } = raw
+  const info: YTimeSourceInfo = {}
+  if (source !== undefined) {
+    if (!SOURCES.includes(source)) return false
+    info.source = source as YTimeSource
+  }
+  if (sourceReason !== undefined) {
+    if (!SOURCE_REASONS.includes(sourceReason)) return false
+    info.sourceReason = sourceReason as YTimeSourceReason
+  }
+  if (excludedReasons !== undefined) {
+    if (!isRecord(excludedReasons) || !Object.values(excludedReasons).every(isCount)) return false
+    info.excludedReasons = excludedReasons as Record<string, number>
+  }
+  if (excluded !== undefined) {
+    if (!Array.isArray(excluded)) return false
+    info.excluded = []
+    for (const e of excluded as unknown[]) {
+      if (!isRecord(e) || typeof e.date !== 'string' || typeof e.reason !== 'string') return false
+      info.excluded.push({ date: e.date, reason: e.reason })
+    }
+  }
+  if (missingMonths !== undefined) {
+    if (!isStringArray(missingMonths)) return false
+    info.missingMonths = missingMonths
+  }
+  return info
+}
+
 /**
  * 区切り 1 つの結果。形が違えば false (null は「作らなかった冊」なので別の値にする)。
  * 古い版の結果に残っている `kingaku` / `kingakuError` (c1133-31 の頃の時間の集計) は**読まずに無視する**
@@ -86,6 +125,8 @@ function parseResult(raw: unknown): LitigationOutputResult | false {
   if (rows !== null && !isCount(rows)) return false
   if (!isStringArray(missingDates) || !isCount(missingCount)) return false
   if (!isStringArray(warnings) || !isCount(warningsCount)) return false
+  const sourceInfo = parseSourceInfo(raw)
+  if (sourceInfo === false) return false
   return {
     driverCd,
     from,
@@ -97,6 +138,7 @@ function parseResult(raw: unknown): LitigationOutputResult | false {
     warnings,
     warningsCount,
     message,
+    ...sourceInfo,
   }
 }
 
