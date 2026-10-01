@@ -31,7 +31,6 @@ const reportRows: WageReportRow[] = summaries.map(s => ({
   fetched_at: null,
   last_verified_at: null,
   pay_kubun: 2,
-  daily_work_minutes: 480,
   wage: golden.find(g => g.driverCd === s.driverCd)!.wage as unknown as WageReportRow['wage'],
 }))
 
@@ -126,7 +125,7 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(row.csvOvertime).toBe(39200)
   })
 
-  // ---- 5 区分の集計と 基礎単価(実績)・労基法37条チェック (Refs #278) ----
+  // ---- 5 区分の集計と 基礎単価・労基法37条チェック (Refs #278) ----
 
   it('5 区分の推定既定: 通勤手当は両方除外、住宅手当は最低賃金のみ算入 (9901)', () => {
     const row = byCd['9901']!
@@ -144,43 +143,46 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     ])
   })
 
-  it('基礎単価(実績) = 割増基礎算入計 ÷ (日数 × 1 日の所定) — デジタコの法定内時間では割らない (9901。日数は明細の出勤日数 20 日)', () => {
-    const row = byCd['9901']!
-    // 20 日 × 8h = 160h。法定内時間 (9480 分 = 158h) で割った 1400 円ではない
-    expect(row.baseRateActual).toBe(221200 / 160) // 1382.5
-    expect(row.baseRateBasis).toMatchObject({ kind: 'days', days: 20, daysSource: 'csv', capped: false, dailyMinutes: 480, hours: 160, scheduled: 'resolved' })
-  })
+  // 37条の基礎単価 = max(割増基礎 ÷ golden の法定時間内, golden の最低賃金)、理論値 = 残業(計算) × 基礎単価 ÷ 最低賃金
+  const reverseRate = (cd: string, premium: number) => premium / (goldenByCd[cd]!.minutes.statutory / 60)
+  const minWageOf = (cd: string) => goldenByCd[cd]!.minWage!.rate
 
-  it('残業(基礎単価) 理論値 (37条): 9901 の理論値は所定で割った基礎単価から出る', () => {
+  it('基礎単価 = 割増基礎算入計 ÷ golden の法定時間内 (9901 は逆算が最低賃金以上 → 逆算を採用、理論値は 残業(計算) に比例)', () => {
     const row = byCd['9901']!
-    // 22h×1382.5×1.25 + 深夜 2h×1382.5×0.25 = 38018.75 + 691.25 = 38710
-    expect(row.baseRateOvertimePay).toBe(38710)
+    expect(row.baseRateActual).toBe(reverseRate('9901', 221200))
+    expect(row.baseRateActual!).toBeGreaterThan(minWageOf('9901'))
+    expect(row.baseRateBasis).toMatchObject({ kind: 'days', floored: false, none: null })
+    expect(row.baseRateOvertimePay).toBe(Math.round(row.sysOvertime! * row.baseRateActual! / minWageOf('9901')))
     // csvOvertime = 残業手当 39200 + 通常深夜の 深夜手当 1750 = 40950 → 理論値を上回る (適法)
-    expect(row.diffCsvVsBaseRateOvertime).toBe(40950 - 38710)
+    expect(row.diffCsvVsBaseRateOvertime).toBe(row.csvOvertime - row.baseRateOvertimePay!)
+    expect(row.diffCsvVsBaseRateOvertime!).toBeGreaterThan(0)
   })
 
-  it('9902: 基礎単価(実績) 900 円 — 通勤手当を除外した最低賃金算入分で割れが見える', () => {
+  it('9902: 逆算の基礎単価が最低賃金を下回る → 最低賃金を採用 (通勤手当を除外した最低賃金算入分で割れが見える)。理論値 = 残業(計算)', () => {
     const row = byCd['9902']!
-    expect(row.baseRateActual).toBe(144000 / 160) // = 900 < 最低賃金 956
+    expect(row.baseRateBasis.reverse).toBe(reverseRate('9902', 144000))
+    expect(row.baseRateBasis.reverse!).toBeLessThan(minWageOf('9902'))
+    expect(row.baseRateBasis.floored).toBe(true)
+    expect(row.baseRateActual).toBe(minWageOf('9902'))
+    expect(row.baseRateOvertimePay).toBe(row.sysOvertime)
+    expect(row.diffCsvVsBaseRateOvertime).toBe(row.diffOvertime)
     // 通勤手当 5000 は最低賃金の分子に混入しない (混入すると割れ見逃し方向)
     expect(row.csvMinWageEligible).toBe(144000)
     expect(row.csvTotal).toBe(149000)
   })
 
-  it('9903 (月60h超): 基礎単価は所定で割るので 480 円。60h を境に 1.25 → 1.5 になる理論値を支払が上回る', () => {
+  it('9903 (月60h超): 逆算を採用し、理論値は 残業(計算) × 基礎単価 ÷ 最低賃金 (60h 超の係数は wage report の値に入っている)。支払が下回る', () => {
     const row = byCd['9903']!
-    // 割増基礎 76800 ÷ (20 日 × 8h)。旧式 (÷ 法定内 80h) の 960 円ではない
-    expect(row.baseRateActual).toBe(76800 / 160) // = 480
-    // 60h×480×1.25 + 40h×480×1.5 = 36000 + 28800 = 64800
-    expect(row.baseRateOvertimePay).toBe(64800)
-    expect(row.diffCsvVsBaseRateOvertime).toBe(120000 - 64800)
-    // 絶対下限 (最低賃金 956 円ベース 129060) は割れている (こちらは基礎単価に依らない)
-    expect(row.diffOvertime!).toBeLessThan(0)
+    expect(row.baseRateActual).toBe(reverseRate('9903', 76800))
+    expect(row.baseRateBasis.floored).toBe(false)
+    expect(row.baseRateOvertimePay).toBe(Math.round(row.sysOvertime! * row.baseRateActual! / minWageOf('9903')))
+    expect(row.diffCsvVsBaseRateOvertime).toBe(120000 - row.baseRateOvertimePay!)
+    expect(row.diffCsvVsBaseRateOvertime!).toBeLessThan(0)
   })
 
-  it('9904 (単価マスタ未設定): 基礎単価(実績) は明細から出る (残業 0 なら理論値 0)', () => {
+  it('9904 (単価マスタ未設定): 基礎単価は明細と golden の法定時間内から出る (残業 0 なら理論値 0)', () => {
     const row = byCd['9904']!
-    expect(row.baseRateActual).toBe(152960 / 160) // = 956
+    expect(row.baseRateActual).toBe(Math.max(reverseRate('9904', 152960), minWageOf('9904')))
     expect(row.baseRateOvertimePay).toBe(0)
     expect(row.diffCsvVsBaseRateOvertime).toBe(0)
   })

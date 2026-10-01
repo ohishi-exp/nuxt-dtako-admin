@@ -231,7 +231,7 @@ describe('diffSignClass (差の符号で文字色)', () => {
   })
 })
 
-import { isBaseRateBelowMinWage, salaryRowCells } from '~/utils/litigation-salary'
+import { salaryRowCells } from '~/utils/litigation-salary'
 import type { SalaryComparisonRow } from '~/utils/salary-compare'
 
 describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の組み立て)', () => {
@@ -242,7 +242,7 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     overtimeFixed: false,
     baseRateActual: 1333.3, baseRateOvertimePay: 16667, diffCsvVsBaseRateOvertime: 13333,
     overtimeMinutes: 605, csvPremiumBase: 200000,
-    baseRateBasis: { kind: 'days', hours: 150, days: 20, daysSource: 'csv', capped: false, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null },
+    baseRateBasis: { kind: 'days', reverse: 1333.3, floored: false, hourlyRate: null, none: null },
     rateBasis: { hourlyRate: 1000, minWageRate: 1000 },
     csvBaseItems: [{ label: '基本給', amount: 190000 }, { label: '通勤手当', amount: 10000 }],
     csvOvertimeHours: 10.5,
@@ -294,54 +294,41 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
   it('37条は理論値があれば 5 項目 + 根拠、差が負のときだけ shortfall', () => {
     expect(salaryRowCells(base).over37).toEqual({
       rate: 1333.3, minutes: 605, theory: 16667, paid: 30000, diff: 13333, shortfall: false,
-      rateBasis: '割増基礎 200,000 円 ÷ (明細 20 日 × 7h30m)', rateNotes: [], belowMinWage: false, minWageRate: 1000,
+      rateBasis: '割増基礎 200,000 円 ÷ 法定時間内 150h00m', floored: false,
     })
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: -1 }).over37!.shortfall).toBe(true)
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: null }).over37!.shortfall).toBe(false)
   })
 
-  it('★ 基礎単価の根拠の文字列 (baseRateBasisText をそのまま運ぶ): 日給 = 明細の日数 × 1 日の所定 (頭打ち / デジタコ稼働) / 時給 / 月給・その他', () => {
-    const text = (b: Partial<SalaryComparisonRow['baseRateBasis']>) =>
-      salaryRowCells({ ...base, baseRateBasis: { ...base.baseRateBasis, ...b } }).over37!.rateBasis
-    expect(text({})).toBe('割増基礎 200,000 円 ÷ (明細 20 日 × 7h30m)')
-    expect(text({ days: 24, capped: true, hours: (40 * 365) / 7 / 12 }))
-      .toBe('割増基礎 200,000 円 ÷ 173.8h (明細 24 日 × 7h30m は週 40 時間相当を超えるため法定の月平均)')
-    expect(text({ daysSource: 'sys' })).toBe('割増基礎 200,000 円 ÷ (デジタコ稼働 20 日 × 7h30m)')
-    expect(text({ kind: 'hours', hourlyRate: 1200, hours: null, days: null, daysSource: null, dailyMinutes: null, scheduled: null }))
-      .toBe('明細の時給 1,200 円/h')
-    expect(text({ kind: 'monthly', hours: (40 * 365) / 7 / 12, days: null, daysSource: null, dailyMinutes: null, scheduled: null }))
-      .toBe('割増基礎 200,000 円 ÷ 法定の月平均 173.8h')
+  it('★ 基礎単価の根拠の文字列 (baseRateBasisText をそのまま運ぶ): 逆算 / 最低賃金を採用 (逆算の値つき) / 時給', () => {
+    const text = (b: Partial<SalaryComparisonRow['baseRateBasis']>, over: Partial<SalaryComparisonRow> = {}) =>
+      salaryRowCells({ ...base, ...over, baseRateBasis: { ...base.baseRateBasis, ...b } }).over37!.rateBasis
+    expect(text({})).toBe('割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(text({ kind: 'monthly' })).toBe('割増基礎 200,000 円 ÷ 法定時間内 150h00m')
+    expect(text({ floored: true, reverse: 800 }))
+      .toBe('最低賃金 1,000 円/h (割増基礎 200,000 円 ÷ 法定時間内 150h00m = 800 円/h は最低賃金を下回る)')
+    expect(text({ kind: 'hours', hourlyRate: 1200, reverse: 1200 })).toBe('明細の時給 1,200 円/h')
+    expect(text({ kind: 'hours', hourlyRate: 900, reverse: 900, floored: true }))
+      .toBe('最低賃金 1,000 円/h (明細の時給 900 円/h は最低賃金を下回る)')
   })
 
-  it('★ 根拠の注記 (baseRateBasisNotes をそのまま運ぶ): 所定を引けなかった理由は未設定と読めなかったで別の文言、日数をデジタコ稼働に倒した理由、無ければ空', () => {
-    const notes = (b: Partial<SalaryComparisonRow['baseRateBasis']>) =>
-      salaryRowCells({ ...base, baseRateBasis: { ...base.baseRateBasis, dailyMinutes: 480, ...b } }).over37!.rateNotes
-    expect(notes({ scheduled: 'resolved' })).toEqual([])
-    expect(notes({ scheduled: 'unset' })).toEqual(['所定未設定のため法定 8 時間で計算'])
-    expect(notes({ scheduled: 'unread' })).toEqual(['所定を読めなかったため法定 8 時間で計算 (古い保存物なら拘束の材料を取り直す)'])
-    expect(notes({ scheduled: null })).toEqual([])
-    expect(notes({ daysSource: 'sys' })).toEqual(['明細に出勤日数が無いためデジタコの稼働日数で計算'])
-    expect(notes({ daysSource: 'merged', scheduled: 'unset' })).toEqual(['複数会社の給与を合算した行のためデジタコの稼働日数で計算', '所定未設定のため法定 8 時間で計算'])
+  it('★ floored: 逆算の基礎単価が最低賃金を下回り最低賃金を採用した月だけ true (根拠の行を赤にする)。逆算を採用した月は false', () => {
+    const floored = (b: Partial<SalaryComparisonRow['baseRateBasis']>) =>
+      salaryRowCells({ ...base, baseRateBasis: { ...base.baseRateBasis, ...b } }).over37!.floored
+    expect(floored({ floored: true, reverse: 800 })).toBe(true)
+    expect(floored({ floored: false })).toBe(false)
   })
 
-  it('★ belowMinWage: 基礎単価 < その月の最低賃金のときだけ true。等しい・上回る・最低賃金が引けない月は false', () => {
-    const cell = (baseRateActual: number | null, minWageRate: number | null) =>
-      salaryRowCells({ ...base, baseRateActual, rateBasis: { ...base.rateBasis, minWageRate } } as SalaryComparisonRow).over37!
-    expect(cell(999.9, 1000)).toMatchObject({ belowMinWage: true, minWageRate: 1000 })
-    expect(cell(1000, 1000).belowMinWage).toBe(false)
-    expect(cell(1200, 1000).belowMinWage).toBe(false)
-    expect(cell(500, null)).toMatchObject({ belowMinWage: false, minWageRate: null })
-    expect(isBaseRateBelowMinWage({ baseRateActual: null, rateBasis: { minWageRate: 1000 } as SalaryComparisonRow['rateBasis'] })).toBe(false)
-  })
-
-  it('37条が出せないときは null と理由 (給与区分が不明 / 明細に時給の単価が無い / 割増の基礎に入る支給が 0 / 分母の日数が 0)', () => {
+  it('37条が出せないときは null と理由 (給与区分が不明 / 明細に時給の単価が無い / 割増の基礎に入る支給が 0 / 法定時間内が 0 / 最低賃金が引けない / 拘束時間が欠測)', () => {
     const reason = (none: SalaryComparisonRow['baseRateBasis']['none']) =>
       salaryRowCells({ ...base, baseRateOvertimePay: null, baseRateBasis: { ...base.baseRateBasis, none } }).over37NoneReason
     expect(salaryRowCells({ ...base, baseRateOvertimePay: null }).over37).toBeNull()
     expect(reason('unknown-kind')).toBe('(給与区分が不明)')
     expect(reason('no-hourly-rate')).toBe('(明細に時給の単価が無い)')
     expect(reason('no-premium-base')).toBe('(割増の基礎に入る支給が 0)')
-    expect(reason('no-denominator')).toBe('(分母の日数が 0 (明細の出勤 + 有休。無ければデジタコ稼働))')
+    expect(reason('no-denominator')).toBe('(法定時間内が 0)')
+    expect(reason('no-min-wage')).toBe('(その月の最低賃金が引けない)')
+    expect(reason('restraint-missing')).toBe('(拘束時間が欠測)')
     expect(salaryRowCells({ ...base, overtimeFixed: true }).overtimeFixed).toBe(true)
   })
 })

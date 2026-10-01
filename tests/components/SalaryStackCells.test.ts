@@ -47,35 +47,33 @@ describe('SalaryAmountCell', () => {
 describe('SalaryOver37Cell', () => {
   const over37 = {
     rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: -1, shortfall: true,
-    rateBasis: '割増基礎 200,000 円 ÷ (明細 20 日 × 7h30m)', rateNotes: [] as string[], belowMinWage: false, minWageRate: 1000 as number | null,
+    rateBasis: '割増基礎 200,000 円 ÷ 法定時間内 150h00m', floored: false,
   }
 
   it('基礎単価の次に根拠を積み、5 段。差が負のときだけ太字', () => {
     const w = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
     expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
-    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ (明細 20 日 × 7h30m)')
+    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ 法定時間内 150h00m')
     expect(w.find('[data-salary-line="diff37"]').classes()).toContain('font-bold')
     const ok = mount(SalaryOver37Cell, { props: { over37: { ...over37, diff: 5, shortfall: false }, noneReason: '', compact: true } })
     expect(ok.find('[data-salary-line="diff37"]').classes()).not.toContain('font-bold')
   })
 
-  it('根拠の注記 (日数をデジタコ稼働に倒した / 所定を引けなかった) は、あるぶんだけ根拠の下に 1 行ずつ出る', () => {
-    const notes = ['明細に出勤日数が無いためデジタコの稼働日数で計算', '所定未設定のため法定 8 時間で計算']
-    const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, rateNotes: notes }, noneReason: '' } })
-    expect(lines(w)).toEqual(['rate', 'rate-basis', 'rate-note', 'rate-note', 'minutes', 'theory', 'paid', 'diff37'])
-    expect(w.findAll('[data-salary-line="rate-note"]').map(n => n.text())).toEqual(notes)
-  })
-
-  it('★ 37条の基礎単価が最低賃金を下回る月: 基礎単価が赤太字で、最低賃金の額つきのエラー行が出る (画面も紙面も)', () => {
+  it('★ 逆算が最低賃金を下回り最低賃金を採用した月: 根拠の行だけ赤 (太字にしない)。基礎単価の行は通常の色で、専用のエラー行は出ない (画面も紙面も)', () => {
+    const basis = '最低賃金 1,000 円/h (割増基礎 200,000 円 ÷ 法定時間内 250h00m = 800 円/h は最低賃金を下回る)'
     for (const compact of [false, true]) {
-      const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, rate: 900, belowMinWage: true }, noneReason: '', compact } })
-      expect(lines(w)).toEqual(['rate', 'below-minwage', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
-      expect(w.find('[data-salary-line="rate"]').classes()).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
-      expect(w.find('[data-salary-line="below-minwage"]').text()).toBe('37条の基礎単価が最低賃金 1,000 円/h を下回る')
+      const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, rate: 1000, rateBasis: basis, floored: true }, noneReason: '', compact } })
+      expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
+      const line = w.find('[data-salary-line="rate-basis"]')
+      expect(line.text()).toBe(`= ${basis}`)
+      expect(line.classes()).toContain('text-red-600')
+      expect(line.classes()).not.toContain('font-bold')
+      expect(w.find('[data-salary-line="rate"]').classes()).not.toContain('text-red-600')
+      expect(w.find('[data-salary-line="rate"]').classes()).not.toContain('font-bold')
     }
+    // 逆算を採用した月は赤くしない (陽性対照)
     const ok = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
-    expect(ok.find('[data-salary-line="rate"]').classes()).not.toContain('font-bold')
-    expect(ok.find('[data-salary-line="below-minwage"]').exists()).toBe(false)
+    expect(ok.find('[data-salary-line="rate-basis"]').classes()).not.toContain('text-red-600')
   })
 
   it('出せないときは理由 1 行', () => {
