@@ -7203,7 +7203,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-2 text-right">差</th>
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
                       <th class="px-2 py-2 text-right" title="最低賃金を基礎額とみなした割増残業代の理論値 (単価マスタは使わず、デジタコ拘束時間データ×最低賃金で算出。時間は 時間外 + 時間外深夜 + 週40時間超で、右の 残業(基礎単価) と同じ時間)。絶対下限として併記">残業(計算)</th>
-                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(計算)。負なら実際に支払われた残業代が最低賃金換算の絶対下限すら下回っている。固定残業 (月給者) は定額なので差に意味が無く「固定」と出す — 判定は右の 37条 の差を見る">差</th>
+                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(計算)。負なら実際に支払われた残業代が最低賃金換算の絶対下限すら下回っている。固定残業 (月給者) の定額もこの差で見る">差</th>
                       <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="37条の基礎単価 (円/h)。分母は所定労働時間: 日給 = 割増基礎に算入する支給項目の合計 ÷ (明細の (出勤日数 + 有休日数) × 1 日の所定、引けなければ法定 8 時間。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無い行・複数会社を合算した行はデジタコの稼働日数) / 時給 = 給与明細の時給そのもの / 月給・その他 = 合計 ÷ 法定の月平均 (173.8h)。給与区分が不明な行は出さない">基礎単価(実績)</th>
                       <th class="px-2 py-2 text-right" title="基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条。月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)">残業(基礎単価)</th>
                       <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(基礎単価)。負なら実際の基礎単価に対する法定割増 (37条) を下回っている — 主判定">差</th>
@@ -7259,14 +7259,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         </template>
                         <span v-else class="text-xs text-gray-500">最低賃金未設定</span>
                       </td>
-                      <!-- 固定残業 (月給者) は定額 × 時間ではないので差を出さない (Refs #449)。
-                           正の差を「多く払っている = 問題なし」と読まれるのを止める -->
-                      <td
-                        v-if="row.overtimeFixed"
-                        class="px-2 py-1.5 text-right text-xs text-gray-500"
-                        title="月給者 = 固定残業とみなしています。定額と最低賃金ベースの差は判定に使えないので出しません。労基法37条の判定は右の「残業(基礎単価)」との差を見てください"
-                      >固定</td>
-                      <td v-else class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
+                      <!-- 固定残業 (月給者) も差を出す: 計算が最低賃金ベースなので、定額が最低賃金ベースの割増を下回っていないかを見る比較そのもの。
+                           負なら赤太字 (旧「残業(最低賃金)」の差の列と同じ見え方) -->
+                      <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
                       </td>
                       <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700" :title="[`割増基礎算入計 ${fmtYen(row.csvPremiumBase)}円 (${fmtItemsTitle(row.csvPremiumBaseItems)})`, baseRateBasisText(row), ...baseRateBasisNotes(row.baseRateBasis)].filter(Boolean).join(' / ')">

@@ -235,7 +235,7 @@ export function diffSignClass(v: number | null): string {
   return v > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-600 dark:text-red-400'
 }
 
-/** 差の表示 (+ は明細の方が多い)。計算できない (単価なし・固定残業) は「-」 */
+/** 差の表示 (+ は明細の方が多い)。計算できない (単価なし・最低賃金が引けない) は「-」 */
 export function fmtSalaryDiff(v: number | null): string {
   if (v === null) return '-'
   return `${v > 0 ? '+' : ''}${fmtYen(v)}`
@@ -273,7 +273,7 @@ export interface LitigationSalaryOver37 {
 export interface LitigationSalaryRowCells {
   /** 基本給・残業・総支給 (明細 / 計算 / 差) */
   amounts: LitigationSalaryAmountCell[]
-  /** 残業の差を出さない月給 (固定残業) */
+  /** 月給 (固定残業) — 残業のセルに注記を付ける */
   overtimeFixed: boolean
   /** 37条の比較。出せないときは null と、その理由 */
   over37: LitigationSalaryOver37 | null

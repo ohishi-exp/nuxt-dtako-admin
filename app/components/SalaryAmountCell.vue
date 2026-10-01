@@ -9,7 +9,7 @@ import { fmtYen } from '~/utils/restraint-wage-view'
 
 withDefaults(defineProps<{
   cell: LitigationSalaryAmountCell
-  /** 月給 (固定残業) — 残業の差を出さない旨の注記を付ける */
+  /** 月給 (固定残業) — 残業のセルにその旨の注記を付ける (差は他の月と同じく出す) */
   overtimeFixed?: boolean
   compact?: boolean
 }>(), { overtimeFixed: false, compact: false })
@@ -22,6 +22,6 @@ withDefaults(defineProps<{
     <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="sys"><span :class="compact ? '' : 'text-xs text-gray-500'">計算</span><span>{{ fmtYen(cell.sys) }}</span></div>
     <div v-if="cell.basis" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="basis">{{ cell.basis }}</div>
     <div class="flex justify-between" :class="[compact ? 'gap-1' : 'gap-3', diffSignClass(cell.diff), cell.key !== 'total' && (cell.diff ?? 0) < 0 ? 'font-bold' : '']" data-salary-line="diff"><span :class="compact ? '' : 'text-xs text-gray-500'">差</span><span>{{ fmtSalaryDiff(cell.diff) }}</span></div>
-    <div v-if="cell.key === 'overtime' && overtimeFixed" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'">月給 (固定残業) — 差は出さない</div>
+    <div v-if="cell.key === 'overtime' && overtimeFixed" class="text-right" :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'">月給 (固定残業)</div>
   </div>
 </template>

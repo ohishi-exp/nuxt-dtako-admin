@@ -63,8 +63,8 @@ const CSV_2026 = [
   row2026('1240', '山田 太郎', '2026年 2月', [70000, 0, 0, 20000, 0, 50000, 0], 140000),
 ].join('\r\n')
 
-describe('overtimeFixed — 固定残業の人は残業(計算)との差を出さない (Refs #449)', () => {
-  it('月給者は overtimeFixed が立ち diffOvertime を出さない', () => {
+describe('overtimeFixed — 固定残業の人にも残業(計算) = 最低賃金ベースとの差を出す (Refs #449 / #1133)', () => {
+  it('月給者は overtimeFixed が立ち、差は最低賃金ベースの残業代との差 (正も負も)', () => {
     const cmp = compareSalaryMonth(
       [csvRow({ driverCd: '1', cdKey: '1', driverName: '甲', amounts: { 残業手当: 130000 }, rates: { base: null, overtime: 806 } })],
       [reportRow('1', '甲', { payKubun: 1, overtimeMinutes: 4760, minWageOvertimePay: 50000, minWageNightOvertimePay: 0 })],
@@ -72,9 +72,21 @@ describe('overtimeFixed — 固定残業の人は残業(計算)との差を出�
       '2023-04',
       { entries: {} },
     )
-    expect(cmp.rows[0]).toMatchObject({ overtimeFixed: true, diffOvertime: null })
+    expect(cmp.rows[0]).toMatchObject({ overtimeFixed: true, diffOvertime: 130000 - 50000 })
     // 金額そのもの (最低賃金ベース) は残す — 桁感の目安としては読めるため
     expect(cmp.rows[0]!.sysOvertime).toBe(50000)
+  })
+
+  it('★ 月給 (固定残業) の定額が最低賃金ベースの残業代を下回れば差は負で出る (他の区分と同じ式。null にしない)', () => {
+    const diff = (payKubun: number) => compareSalaryMonth(
+      [csvRow({ driverCd: '1', cdKey: '1', driverName: '甲', amounts: { 残業手当: 30000 } })],
+      [reportRow('1', '甲', { payKubun, overtimeMinutes: 4760, minWageOvertimePay: 50000, minWageNightOvertimePay: 5000 })],
+      { items: { 残業手当: 'overtime' } },
+      '2023-04',
+      { entries: {} },
+    ).rows[0]!
+    expect(diff(1)).toMatchObject({ overtimeFixed: true, sysOvertime: 55000, diffOvertime: -25000 })
+    expect(diff(2)).toMatchObject({ overtimeFixed: false, diffOvertime: -25000 })
   })
 
   it('日給・時給・区分なしは従来どおり差を出す', () => {

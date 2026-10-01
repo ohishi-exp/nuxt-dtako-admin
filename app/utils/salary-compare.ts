@@ -495,17 +495,15 @@ export interface SalaryComparisonRow {
   /**
    * **固定残業 (みなし残業) の人か** (給与区分 = 月給、Refs #449)。
    *
-   * 月給者の残業扱い項目は役職手当のような**定額**で、「残業単価 × 実残業時間」で
-   * 払われたものではない。そのため `diffOvertime` (残業計(給与) − 残業(計算)) は
-   * 「最低賃金ベースより定額が大きい」以上の意味を持たず、**正の差を「多く払っている
-   * = 問題なし」と読むと誤る** (2026-07-26 指摘)。この人たちの判定は
-   * `diffCsvVsBaseRateOvertime` (労基法37条) だけが効く。
+   * 月給者の残業扱い項目は役職手当のような**定額**で、実残業時間で払われたものではない。
+   * 残業(計算) が最低賃金ベースの残業代なので、`diffOvertime` はこの人にも出す (定額が
+   * 最低賃金ベースの割増を下回っていないかの比較)。ただし**正の差は「多く払っている = 問題なし」
+   * ではない** (定額と時間の対応が無い) ので、画面は注記を添える。37条の判定は `diffCsvVsBaseRateOvertime`。
    */
   overtimeFixed: boolean
   /** CSV − システム (システム側が null なら null)。 */
   diffBase: number | null
-  /** `overtimeFixed` の人は **null** — 定額と最低賃金ベースの差に意味が無いため
-   * (画面に出すと誤読される)。 */
+  /** 残業(計算) が無い (最低賃金が引けない) 月は null。固定残業の人も他と同じく出す。 */
   diffOvertime: number | null
   diffTotal: number | null
   /** 割増基礎に算入する支給項目の合計 (base + premium-base-only、Refs #278)。 */
@@ -1071,7 +1069,7 @@ export function compareSalaryMonth(
       = report.wage.minWageOvertimePay !== null && report.wage.minWageNightOvertimePay !== null
         ? report.wage.minWageOvertimePay + report.wage.minWageNightOvertimePay
         : null
-    // 月給者 = 固定残業とみなす (Refs #449)。定額と最低賃金ベースの差は判定に使えない
+    // 月給者 = 固定残業とみなす (Refs #449)。注記と みなし時間数 の表示に使う。差は出す (計算が最低賃金ベースなので、定額が最低賃金ベースの割増を下回っていないかを見る比較そのもの)
     const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
 
@@ -1107,7 +1105,7 @@ export function compareSalaryMonth(
       overtimeMinutes,
       overtimeFixed,
       diffBase: sysBase === null ? null : base - sysBase,
-      diffOvertime: sysOvertime === null || overtimeFixed ? null : overtime - sysOvertime,
+      diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,
       diffTotal: sysTotal === null ? null : sums.total - sysTotal,
       csvPremiumBase: sums.premiumBase.total,
       csvPremiumBaseItems: sums.premiumBase.items,

@@ -30,6 +30,14 @@ describe('SalaryAmountCell', () => {
     expect(note('base', true)).toBe(false)
   })
 
+  it('★ 月給 (固定残業) でも残業の差は出て、負なら赤太字。注記は「月給 (固定残業)」だけ (差は出さない、とは書かない)', () => {
+    const w = mount(SalaryAmountCell, { props: { cell: amount({ diff: -25000 }), overtimeFixed: true } })
+    expect(w.find('[data-salary-line="diff"]').text()).toBe('差-25,000')
+    expect(w.find('[data-salary-line="diff"]').classes()).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
+    expect(w.text()).toContain('月給 (固定残業)')
+    expect(w.text()).not.toContain('差は出さない')
+  })
+
   it('compact は文字を小さくする class (text-xs) を付けない (紙面は親の 7.5px を使う)', () => {
     expect(mount(SalaryAmountCell, { props: { cell: amount() } }).html()).toContain('text-xs')
     expect(mount(SalaryAmountCell, { props: { cell: amount(), compact: true } }).html()).not.toContain('text-xs')

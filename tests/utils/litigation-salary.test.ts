@@ -260,6 +260,12 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     expect(c.overtimeFixed).toBe(false)
   })
 
+  it('★ 月給 (固定残業) の行でも残業の差を出す (負のまま運ぶ)。overtimeFixed は注記用に立つ', () => {
+    const c = salaryRowCells({ ...base, overtimeFixed: true, diffOvertime: -25000 } as SalaryComparisonRow)
+    expect(c.overtimeFixed).toBe(true)
+    expect(c.amounts[1]).toMatchObject({ key: 'overtime', diff: -25000 })
+  })
+
   it('★ 計算の根拠: 基本給 = 単価 × 法定時間内 (最低賃金と一致する月は「最低賃金」、違う月は「単価マスタ」、単価が無い月は計算なし)、残業 = 最低賃金ベース × 残業時間 (単価マスタとは書かない)', () => {
     const basis = (over: Partial<SalaryComparisonRow> = {}) => salaryRowCells({ ...base, ...over }).amounts.map(a => a.basis)
     expect(basis()).toEqual(['最低賃金 1,000 円/h × 法定時間内 150h00m', '最低賃金ベース × 残業時間 10h05m', null])
