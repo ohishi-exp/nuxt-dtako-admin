@@ -620,19 +620,18 @@ describe('給与比較タブ', () => {
       '/api/kyuyo/payroll?company=0200&month=2025-01',
       '/api/kyuyo/payroll?company=0200&month=2025-02',
     ])
-    // 給与コード 747 は社員マスタで 1078 に引き当たる。日額 10,000 × 20 日 = 200,000 で差 0
+    // 給与コード 747 は社員マスタで 1078 に引き当たる。この fixture の wage report は単価マスタ・最低賃金を持たず、基本給は計算なし
     const jan = w.find('[data-salary-row="1078|2025-01"]').text()
     expect(jan).toContain('比較済み')
     expect(jan).toContain('(2025-02)')
     const cell = (key: string) => w.findAll(`[data-salary-row="1078|2025-01"] [data-salary-cell="${key}"] [data-salary-line]`).map(l => l.text())
-    // 「計算」の下に根拠 (日額 × 日数) を出す
-    // (この fixture の wage report は単価マスタ・最低賃金を持たないので、最低賃金との比較は「比較なし」と言う)
-    expect(cell('base')).toEqual(['明細200,000', 'うち基本給 200,000 / 手当 0', '計算200,000', '10,000 円 × 20 日', '最低賃金との比較なし (単価マスタに単価が無い)', '差0'])
+    // 基本給(計算) は 単価マスタ × 法定時間内。単価が無い月は計算なしで根拠に理由を出す (日額 × 日数は出さない)
+    expect(cell('base')).toEqual(['明細200,000', 'うち基本給 200,000 / 手当 0', '計算-', '単価なし (単価マスタに単価が無い)', '差-'])
     // 残業は 1,500 円 × 10 h = 15,000 に対して明細 30,000 → +15,000
     expect(cell('overtime')).toEqual(['明細30,000', '計算15,000', '1,500 円/h × 10h00m', '最低賃金ベースの残業代なし (最低賃金が引けない)', '差+15,000'])
     // 総支給は基本給と残業の和なので根拠の行は無い (明細 / 計算 / 差 の 3 段)
     expect(cell('total')).toHaveLength(3)
-    // 差の色: 正 (残業 +15,000) は青、0 (基本給) は色なし
+    // 差の色: 正 (残業 +15,000) は青、計算なし (基本給) は色なし
     const diffClass = (key: string) => w.find(`[data-salary-row="1078|2025-01"] [data-salary-cell="${key}"] [data-salary-line="diff"]`).classes()
     expect(diffClass('overtime')).toContain('text-blue-600')
     expect(diffClass('base')).not.toContain('text-blue-600')
@@ -789,28 +788,39 @@ describe('給与比較タブ', () => {
     w.unmount()
   })
 
-  it('★ 基本給に最低賃金との比較の行: 最低賃金 × 法定内時間 と明細の差。上回る月は赤くしない', async () => {
+  it('★ 基本給の計算 = 最低賃金 × 法定内時間。根拠・差は 1 つにまとめ、同じ数字を別の行で出さない。上回る月は赤くしない', async () => {
     wageExtra = { '2025-01': FULL_WAGE }
     const w = await openAfterChecks()
     await openSalaryTab(w)
-    const line = w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="minwage"]')
-    expect(line.text()).toBe('最低賃金 1,000 円/h × 法定時間内 150h00m = 150,000 (明細との差 +50,000)')
-    expect(line.classes()).not.toContain('text-red-600')
+    const cell = w.findAll('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line]').map(l => l.text())
+    expect(cell).toEqual(['明細200,000', 'うち基本給 200,000 / 手当 0', '計算150,000', '最低賃金 1,000 円/h × 法定時間内 150h00m', '差+50,000'])
+    expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="minwage"]').exists()).toBe(false)
+    expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="diff"]').classes()).not.toContain('text-red-600')
     const ot = w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="overtime"] [data-salary-line="minwage"]')
     expect(ot.text()).toBe('最低賃金ベース 14,000 (明細との差 +16,000)')
+    // 日額 × 日数 (10,000 × 20 = 200,000) はどこにも出ない
+    expect(w.find('[data-salary-row="1078|2025-01"]').text()).not.toContain('10,000 円 × 20 日')
     const summary = w.find('[data-testid="litigation-salary-base-below-minwage"]')
     expect(summary.text()).toBe('基本給が 単価 × 法定時間内 を下回る 0 件 (比べられない 0 件)')
     expect(summary.classes()).not.toContain('text-red-600')
     w.unmount()
   })
 
-  it('★ 明細の基本給が 最低賃金 × 法定内時間 を下回る月は赤太字。サマリが件数を数える (画面)', async () => {
+  it('★ 単価マスタが最低賃金と違う月の根拠は「単価マスタ」と書く', async () => {
+    wageExtra = { '2025-01': { ...FULL_WAGE, hourlyRate: 1100 } }
+    const w = await openAfterChecks()
+    await openSalaryTab(w)
+    expect(w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="basis"]').text()).toBe('単価マスタ 1,100 円/h × 法定時間内 150h00m')
+    w.unmount()
+  })
+
+  it('★ 明細の基本給が 計算 (最低賃金 × 法定内時間) を下回る月は差が赤太字。サマリが件数を数える (画面)', async () => {
     wageExtra = { '2025-01': { ...FULL_WAGE, amounts: { statutory: 250000 } } }
     const w = await openAfterChecks()
     await openSalaryTab(w)
-    const line = w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="minwage"]')
-    expect(line.text()).toContain('= 250,000 (明細との差 -50,000)')
-    expect(line.classes()).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
+    const diff = w.find('[data-salary-row="1078|2025-01"] [data-salary-cell="base"] [data-salary-line="diff"]')
+    expect(diff.text()).toBe('差-50,000')
+    expect(diff.classes()).toEqual(expect.arrayContaining(['font-bold', 'text-red-600']))
     const summary = w.find('[data-testid="litigation-salary-base-below-minwage"]')
     expect(summary.text()).toBe('基本給が 単価 × 法定時間内 を下回る 1 件 (比べられない 0 件)')
     expect(summary.classes()).toContain('text-red-600')
@@ -1580,15 +1590,15 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     expect(salary.text()).toContain('37条の基礎単価が最低賃金を下回る 0 件') // 紙面のサマリにも 0 件で出る
     const janRow = salary.find('[data-print-salary-row="1078|2025-01"]')
     const jan = janRow.text()
-    // 基本給 (明細 200,000 / 計算 200,000 / 差 0)・残業の差 +15,000・37条の理論値と差 +13,333・勤務日 / 時間外
+    // 基本給 (明細 200,000 / この fixture は単価マスタが無いので計算なし)・残業の差 +15,000・37条の理論値と差 +13,333・勤務日 / 時間外
     expect(jan).toContain('200,000')
     expect(jan).toContain('+15,000')
     expect(jan).toContain('15,625')
     expect(jan).toContain('+14,375')
     expect(jan).toContain('(2025-02)')
-    // ★ 画面と同じ縦に積んだセル: 基本給・残業は 明細 / 計算 / (根拠) / 差、総支給は 3 段、37条は 5 段
+    // ★ 画面と同じ縦に積んだセル: 基本給・残業は 明細 / 計算 / (根拠) / 差 (基本給は最低賃金ベースの行を持たない。残業だけ持つ)、総支給は 3 段、37条は 5 段
     const lines = (col: number) => janRow.findAll('td').at(col)!.findAll('[data-salary-line]').map(l => l.attributes('data-salary-line'))
-    expect(lines(3)).toEqual(['csv', 'breakdown', 'sys', 'basis', 'minwage', 'diff'])
+    expect(lines(3)).toEqual(['csv', 'breakdown', 'sys', 'basis', 'diff'])
     expect(lines(4)).toEqual(['csv', 'sys', 'basis', 'minwage', 'diff'])
     expect(lines(5)).toEqual(['csv', 'sys', 'diff'])
     // ★ 紙面の列数は 8 のまま。最後の列が計算に使った時間 (デジタコ / 明細 / 37条の分母)
@@ -1597,7 +1607,7 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     expect(janRow.findAll('td').at(7)!.text()).toContain('37条の分母: 所定 160.0h (= 明細 20 日 × 8h00m)')
     expect(salary.text()).toContain('基本給が 単価 × 法定時間内 を下回る 0 件 (比べられない 1 件)')
     expect(lines(6)).toEqual(['rate', 'rate-basis', 'rate-note', 'minutes', 'theory', 'paid', 'diff37'])
-    expect(janRow.find('[data-salary-line="basis"]').text()).toBe('10,000 円 × 20 日')
+    expect(janRow.find('[data-salary-line="basis"]').text()).toBe('単価なし (単価マスタに単価が無い)')
     expect(janRow.findAll('[data-salary-line="basis"]').at(1)!.text()).toBe('1,500 円/h × 10h00m')
     // 37条の基礎単価の根拠も紙面に出る (この行の stub は所定のキーが無い = 読めなかった)
     expect(janRow.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ (明細 20 日 × 8h00m)')

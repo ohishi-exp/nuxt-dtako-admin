@@ -7,8 +7,8 @@
 // 同じ入力から 2 つのタブがそれぞれの観点 (単価マスタ設定の事前チェック /
 // 支払い実績の事後チェック) で計算することをテスト構造で保証する。
 //
-// 給与比較の計算側 (sysBase/sysOvertime) は**給与明細の【 補助 】単価基準**で
-// 単価マスタを参照しない (タブ責務分離、docs/plan-268-wage-tab-separation.md)。
+// 給与比較の計算側: 基本給(計算) = wage report の 単価マスタ × 法定時間内 (給与区分に関わらず同じ式)、
+// 残業(計算) = 給与明細の【 補助 】残業単価 × 残業時間 (Refs #1133)。
 import { describe, expect, it } from 'vitest'
 import {
   compareSalaryMonth,
@@ -24,9 +24,9 @@ import csvText from '../fixtures/restraint-wage/salary-2026-07.csv?raw'
 
 /** 共有 fixture から wage-report 相当の行を組み立てる (wage は golden = 本物の計算出力)。
  *
- * `pay_kubun` は**日給 (2)** — この fixture は乗務員 4 名で、基本給(計算)を
- * `日額 × 稼働日数` で検算するのがこのテストの主眼だから (Refs #429)。月給・時給・
- * 不明の分岐は salary-compare.test.ts の computeSysBase テストが持つ。 */
+ * `pay_kubun` は**日給 (2)** — この fixture は乗務員 4 名で、残業(計算)を
+ * `残業単価 × 残業時間` で検算するのがこのテストの主眼だから。基本給(計算) は給与区分に関わらず
+ * 同じ式 (salary-compare.test.ts が区分ごとに持つ)。 */
 const reportRows: WageReportRow[] = summaries.map(s => ({
   summary: s as unknown as WageReportRow['summary'],
   fetched_at: null,
@@ -68,14 +68,14 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(result.warnings).toEqual([])
   })
 
-  it('計算側は給与明細の【 補助 】単価基準 (単価マスタ非参照): 9901', () => {
+  it('計算側: 基本給 = golden の法定時間内の金額、残業 = 給与明細の【 補助 】残業単価 × 残業時間: 9901', () => {
     const row = byCd['9901']!
     // 深夜手当 は suggestCategory の既定で残業扱い。通勤手当 (excluded)・
     // 住宅手当 (minwage-only) は基本給計に混入しない (Refs #278)
     expect(row.csvBase).toBe(221200)
     expect(row.csvOvertime).toBe(39200 + 1750)
-    // sysBase = 基本単価(日額) × 稼働日数、sysOvertime = 残業単価(時給) × 残業時間 (wage report の 時間外+時間外深夜+週40超)
-    expect(row.sysBase).toBe(11060 * 20)
+    // sysBase = wage report の 単価マスタ × 法定時間内 (golden の amounts.statutory)、sysOvertime = 残業単価(時給) × 残業時間 (wage report の 時間外+時間外深夜+週40超)
+    expect(row.sysBase).toBe(goldenByCd['9901']!.amounts!.statutory)
     expect(row.overtimeMinutes).toBe(1200 + 120)
     expect(row.overtimeMinutes).toBe(goldenByCd['9901']!.overtimeMinutes + goldenByCd['9901']!.nightOvertimeMinutes)
     expect(row.sysOvertime).toBe(Math.round((1750 * (1200 + 120)) / 60))

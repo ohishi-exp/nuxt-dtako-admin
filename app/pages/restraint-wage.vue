@@ -7090,7 +7090,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
                 <span class="font-semibold">比較結果 ({{ fmtYm(month) }})</span>
-                <span class="text-xs text-gray-500">給与明細の区分集計 vs 給与明細の単価 × システム集計 (基本単価×稼働日数 / 残業単価×時間外)</span>
+                <span class="text-xs text-gray-500">給与明細の区分集計 vs 計算 (基本給 = 単価マスタ × 法定時間内 / 残業 = 残業単価×時間外)</span>
                 <div class="flex-1" />
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="loadingReport" @click="loadWageReport" />
               </div>
@@ -7199,7 +7199,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-2">乗務員CD</th>
                       <th class="px-2 py-2">氏名</th>
                       <th class="px-2 py-2 text-right">基本給計(給与)</th>
-                      <th class="px-2 py-2 text-right" title="給与明細の基本単価 (日額) × システム計算の稼働日数">基本給(計算)</th>
+                      <th class="px-2 py-2 text-right" title="単価マスタ × 法定時間内 (wage report の金額)">基本給(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
                       <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × 残業時間 (賃金計算の 時間外 + 時間外深夜 + 週40時間超。右の 残業(基礎単価)・残業(最低賃金) と同じ時間)。固定残業 (月給者) には当てはまらない">残業(計算)</th>
@@ -7246,7 +7246,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         </UBadge>
                       </td>
                       <td class="px-2 py-1.5 text-right" :title="fmtItemsTitle(row.csvBaseItems)">{{ fmtYen(row.csvBase) }}</td>
-                      <td class="px-2 py-1.5 text-right" :title="row.sysBase !== null ? `基本単価 × 稼働 ${row.sysWorkDays} 日` : undefined">
+                      <td class="px-2 py-1.5 text-right" :title="row.sysBase !== null ? '単価マスタ × 法定時間内' : undefined">
                         <template v-if="row.sysBase !== null">{{ fmtYen(row.sysBase) }}</template>
                         <span v-else class="text-xs text-gray-500">単価なし</span>
                       </td>
@@ -7328,8 +7328,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 </table>
               </div>
               <p class="text-xs text-gray-500 mt-2">
-                差 = 給与明細 − 計算。計算 = 給与明細【 補助 】の 基本単価 (日額) × システム稼働日数、
-                残業単価 (時給) × 残業時間 (賃金計算の 時間外 + 時間外深夜 + 週40時間超)。給与明細に単価が無い行は「単価なし」(独自の按分計算はしません)。
+                差 = 給与明細 − 計算。計算 = 基本給は 単価マスタ × 法定時間内 (wage report の金額)、
+                残業は給与明細【 補助 】の 残業単価 (時給) × 残業時間 (賃金計算の 時間外 + 時間外深夜 + 週40時間超)。給与明細に単価が無い行は「単価なし」(独自の按分計算はしません)。
                 基本給計/残業計にカーソルを合わせると支給項目の内訳を表示します。
                 * は 支給合計額 列と支給項目の合算が一致しない行。<br>
                 基礎単価(実績) = 割増基礎に算入する支給項目 (支給項目区分タブで「割増基礎○」の区分) の合計 ÷ 所定労働時間 (労基則19条。実際に働いた時間ではない)。日給 = ÷ (明細の (出勤日数 + 有休日数) × 1日の所定。勤務設定の所定を引けなければ法定8時間。週40時間相当の月平均 173.8h を超える月は 173.8h で割る。明細に日数が無い行・複数会社を合算した行はデジタコの稼働日数で数え、セルにカーソルを合わせるとその旨を表示)、時給 = 給与明細の時給そのもの (割り算なし)、月給・その他 = ÷ 法定の月平均 173.8h。給与区分が不明な行は出しません。

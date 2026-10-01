@@ -17,7 +17,6 @@ import {
   baseRateBasisText,
   baseRateDaysOf,
   computeBaseRate,
-  computeSysBase,
   mergeSalaryCsvRows,
   computeOvertimePayAtRate,
   effectiveCategory,
@@ -388,6 +387,9 @@ function reportRow(
     drivingMinutes?: number | null
     /** デジタコの法定内時間 (wage 側の素材。**37条の基礎単価の分母には使わない**)。 */
     statutoryMinutes?: number
+    /** 単価マスタ × 法定時間内の金額 (wage-report の `wage.amounts.statutory`、**基本給(計算) の出どころ**)。
+     * 既定は `null` = 金額が出ていない (単価マスタに単価が無い月)。 */
+    statutoryAmount?: number | null
     /** 1 日の所定 (分、wage-report の `daily_work_minutes`)。**既定は 480**。`null` = 所定マスタを読めたが
      * 該当なし / `'absent'` = キーが無い (読めなかった・古い保存物)。 */
     dailyWorkMinutes?: number | null | 'absent'
@@ -424,88 +426,62 @@ function reportRow(
       nightOvertimeMinutes: over.overtimeNightMinutes ?? 0,
       minWageOvertimePay: null,
       minWageNightOvertimePay: null,
+      amounts: over.statutoryAmount == null ? null : { statutory: over.statutoryAmount },
     },
   } as unknown as WageReportRow
 }
 
-describe('computeSysBase (給与区分による分岐、Refs #429)', () => {
-  it('日給 (2) は 日額 × 稼働日数 (根拠は日額と日数)', () => {
-    expect(computeSysBase(11060, 2, 20, 9600)).toEqual({ value: 221200, rate: 11060, kind: 'days', quantity: 20 })
-  })
-
-  it('時給 (3) は 時給 × 実働時間 (分は 60 で割って円未満四捨五入。根拠の量は分)', () => {
-    // 1,031 円 × 192h08m (11528 分) = 198,089.46… → 198,089
-    expect(computeSysBase(1031, 3, 24, 11528)).toEqual({ value: 198089, rate: 1031, kind: 'hours', quantity: 11528 })
-  })
-
-  it('月給 (1)・その他 (4) は value null (monthly) — 月額に稼働日数を掛けても実額に対応しない', () => {
-    // これが 110,000 × 24 = 2,640,000 と表示されていた壊れ方 (実データ)
-    expect(computeSysBase(110000, 1, 24, 11528)).toEqual({ value: null, rate: 110000, kind: 'monthly', quantity: null })
-    expect(computeSysBase(11060, 4, 20, 9600)).toEqual({ value: null, rate: 11060, kind: 'monthly', quantity: null })
-  })
-
-  it('未設定 (0)・不明 (null) は value null (unknown) — 月給と言い切らない', () => {
-    // 既定を日給にすると、月給者へ日額計算を掛ける今回の壊れ方が再発する
-    expect(computeSysBase(11060, 0, 20, 9600)).toEqual({ value: null, rate: 11060, kind: 'unknown', quantity: null })
-    expect(computeSysBase(11060, null, 20, 9600)).toEqual({ value: null, rate: 11060, kind: 'unknown', quantity: null })
-  })
-
-  it('単価が無ければ区分に関わらず norate (従来どおり「単価なし」)', () => {
-    const none = { value: null, rate: null, kind: 'norate', quantity: null }
-    expect(computeSysBase(null, 2, 20, 9600)).toEqual(none)
-    expect(computeSysBase(null, 3, 20, 9600)).toEqual(none)
-  })
-
-  it('稼働 0 日・実働 0 分でも value 0 を返す (null と区別する)', () => {
-    expect(computeSysBase(11060, 2, 0, 0).value).toBe(0)
-    expect(computeSysBase(1031, 3, 0, 0).value).toBe(0)
-  })
-})
-
-describe('compareSalaryMonth — 給与区分 (Refs #429)', () => {
+describe('compareSalaryMonth — 基本給(計算) = wage report の 単価マスタ × 法定時間内 (Refs #1133)', () => {
   const config: SalaryItemConfig = { items: { 基本給: 'base', 残業手当: 'overtime' } }
+  // 時給 1,200 円 × 法定時間内 160h = 192,000 (架空値)
+  const STATUTORY = 192000
 
-  it('月給者は基本給の計算列と差分を出さない (実額だけ残る)', () => {
-    const csv = csvRow({ driverCd: '1380', cdKey: '1380', driverName: '谷西 由恵', amounts: { 基本給: 165000 }, rates: { base: 110000, overtime: null } })
-    const [row] = compareSalaryMonth([csv], [reportRow('1380', '谷西 由恵', { workDays: 24, payKubun: 1 })], config, '2023-04').rows
-    expect(row!.csvBase).toBe(165000)
+  it.each([
+    ['月給 (1)', 1],
+    ['日給 (2)', 2],
+    ['時給 (3)', 3],
+    ['その他 (4)', 4],
+    ['給与区分が不明 (null)', null],
+    ['未設定 (0)', 0],
+  ])('%s でも 基本給(計算) は wage report の法定時間内の金額そのもの、差 = 明細 − 計算', (_label, payKubun) => {
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 180000 }, rates: { base: 10000, overtime: null } })
+    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { workDays: 24, workingMinutes: 11528, payKubun, statutoryAmount: STATUTORY })], config, '2023-04').rows
+    expect(row!.sysBase).toBe(STATUTORY)
+    expect(row!.diffBase).toBe(180000 - STATUTORY)
+  })
+
+  it('明細の基本単価・稼働日数は 基本給(計算) に効かない (単価 × 日数にすると 10,000 × 24 になる)', () => {
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 180000 }, rates: { base: 10000, overtime: null } })
+    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { workDays: 24, payKubun: 2, statutoryAmount: STATUTORY })], config, '2023-04').rows
+    expect(row!.sysBase).not.toBe(10000 * 24)
+    expect(row!.sysBase).toBe(STATUTORY)
+  })
+
+  it('単価マスタに単価が無い月 (金額が出ていない) は 基本給(計算) も差も総支給(計算) も null。明細の基本単価があっても計算しない', () => {
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 180000 }, rates: { base: 10000, overtime: 1500 } })
+    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { workDays: 20, payKubun: 2 })], config, '2023-04').rows
+    expect(row!.csvBase).toBe(180000)
     expect(row!.sysBase).toBeNull()
     expect(row!.diffBase).toBeNull()
     expect(row!.sysTotal).toBeNull()
     expect(row!.diffTotal).toBeNull()
-    expect(row!.sysBaseBasis).toEqual({ kind: 'monthly', rate: 110000, quantity: null })
+    expect(row!.sysOvertime).toBe(0) // 残業(計算) は従来どおり 残業単価 × 残業時間
   })
 
-  it('★ 根拠が行に写る: 日給 = 日額と日数 / 残業単価 / 単価なし (計算結果は変えない)', () => {
+  it('法定時間内が 0 の月は金額 0 (null と区別する)。差 = 明細', () => {
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 5000 } })
+    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { statutoryAmount: 0 })], config, '2023-04').rows
+    expect(row!.sysBase).toBe(0)
+    expect(row!.diffBase).toBe(5000)
+  })
+
+  it('残業(計算) の根拠: 残業単価が行に写る。単価なしは null', () => {
     const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', rates: { base: 10000, overtime: 1500 } })
     const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { workDays: 20, payKubun: 2 })], config, '2023-04').rows
-    expect(row!.sysBaseBasis).toEqual({ kind: 'days', rate: 10000, quantity: 20 })
     expect(row!.sysOvertimeRate).toBe(1500)
     const none = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', rates: { base: null, overtime: null } })
     const [r2] = compareSalaryMonth([none], [reportRow('99001', '架空 花子', { payKubun: 2 })], config, '2023-04').rows
-    expect(r2!.sysBaseBasis).toEqual({ kind: 'norate', rate: null, quantity: null })
     expect(r2!.sysOvertimeRate).toBeNull()
-  })
-
-  it('時給者は実働時間で計算する', () => {
-    const csv = csvRow({ driverCd: '91', cdKey: '91', driverName: '時給 太郎', amounts: { 基本給: 200000 }, rates: { base: 1031, overtime: null } })
-    const [row] = compareSalaryMonth([csv], [reportRow('91', '時給 太郎', { workDays: 24, workingMinutes: 11528, payKubun: 3 })], config, '2023-04').rows
-    expect(row!.sysBase).toBe(198089)
-    expect(row!.diffBase).toBe(200000 - 198089)
-    expect(row!.sysBaseBasis).toEqual({ kind: 'hours', rate: 1031, quantity: 11528 })
-  })
-
-  it('時給者の実働が null (theearth CSV の欠損) でも 0 として扱う', () => {
-    const csv = csvRow({ driverCd: '91', cdKey: '91', driverName: '時給 太郎', amounts: { 基本給: 200000 }, rates: { base: 1031, overtime: null } })
-    const [row] = compareSalaryMonth([csv], [reportRow('91', '時給 太郎', { workingMinutes: null, payKubun: 3 })], config, '2023-04').rows
-    expect(row!.sysBase).toBe(0)
-  })
-
-  it('区分が引けない行 (社員マスタ未取り込み) も計算列を出さない', () => {
-    const csv = csvRow({ driverCd: '1', cdKey: '1', driverName: '未取込 太郎', amounts: { 基本給: 100000 }, rates: { base: 5000, overtime: null } })
-    const [row] = compareSalaryMonth([csv], [reportRow('1', '未取込 太郎', { workDays: 20, payKubun: null })], config, '2023-04').rows
-    expect(row!.sysBase).toBeNull()
-    expect(row!.sysBaseBasis.kind).toBe('unknown')
   })
 })
 
@@ -692,12 +668,12 @@ describe('suggestCdMapEntries', () => {
 describe('compareSalaryMonth', () => {
   const config: SalaryItemConfig = { items: {} }
 
-  it('乗務員CD (前ゼロ・数値同値) で突合し、給与明細の単価 × システム集計で差額を計算する', () => {
+  it('乗務員CD (前ゼロ・数値同値) で突合し、基本給は 単価マスタ × 法定時間内、残業は明細の残業単価 × 残業時間 で差額を計算する', () => {
     const out = compareSalaryMonth(
-      // 基本単価 3679 円/日、残業単価 1430 円/h (実データの城田氏の単価)
+      // 残業単価 1430 円/h (基本単価は計算に使わない)
       [csvRow({ driverCd: '01239', cdKey: '1239', rates: { base: 3679, overtime: 1430 } })],
-      // 稼働 22 日、時間外 90h + 時間外深夜 2h
-      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 90 * 60, overtimeNightMinutes: 120 })],
+      // 稼働 22 日、時間外 90h + 時間外深夜 2h、法定時間内の金額 80,938
+      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 90 * 60, overtimeNightMinutes: 120, statutoryAmount: 80938 })],
       config,
       '2023-04',
     )
@@ -706,9 +682,8 @@ describe('compareSalaryMonth', () => {
     expect(r.csvBase).toBe(80000)
     expect(r.csvOvertime).toBe(30000)
     expect(r.csvTotal).toBe(110000)
-    expect(r.sysWorkDays).toBe(22)
     expect(r.overtimeMinutes).toBe(92 * 60)
-    expect(r.sysBase).toBe(3679 * 22) // 80,938
+    expect(r.sysBase).toBe(80938)
     expect(r.sysOvertime).toBe(1430 * 92) // 131,560
     expect(r.sysTotal).toBe(80938 + 131560)
     expect(r.diffBase).toBe(80000 - 80938)
@@ -747,7 +722,7 @@ describe('compareSalaryMonth', () => {
   })
 
   // Refs #1133: 計算で使った労働時間 (表示用の写し)。wage report の欄をそのまま運び、給与比較の側で数え直さない
-  it('hours / wageStatutoryAmount: wage report の稼働日数・実働・法定区分ごとの分・法定内の金額をそのまま写す。金額が無ければ null', () => {
+  it('hours / sysBase: wage report の稼働日数・実働・法定区分ごとの分・法定内の金額をそのまま写す。金額が無ければ null', () => {
     const fake = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 太郎' })
     const r = reportRow('99001', '架空 太郎', { workDays: 18, workingMinutes: 8000 })
     const minutes = { statutory: 7000, overtime: 500, night: 60, overtimeNight: 30, nonLegalHoliday: 0, nonLegalHolidayNight: 0, legalHoliday: 0, legalHolidayNight: 0, weekly40Excess: 400 }
@@ -755,13 +730,13 @@ describe('compareSalaryMonth', () => {
     const hit = compareSalaryMonth([fake], [r], config, '2025-01').rows[0]!
     expect(hit.hours).toEqual({ workDays: 18, workingMinutes: 8000, minutes })
     expect(hit.hours.minutes).toBe(minutes) // 写し (同じ欄をそのまま運ぶ。足し引きしない)
-    expect(hit.wageStatutoryAmount).toBe(123456)
+    expect(hit.sysBase).toBe(123456) // 基本給(計算) と同じ 1 欄 (別の欄に二重に持たない)
     // 実働が無い (null) 行は 0、単価が無く金額が出ていない行 (amounts null) は null
     const none = reportRow('99001', '架空 太郎', { workDays: 3, workingMinutes: null })
     none.wage = { ...none.wage, amounts: null }
     const row = compareSalaryMonth([fake], [none], config, '2025-01').rows[0]!
     expect(row.hours).toMatchObject({ workDays: 3, workingMinutes: 0 })
-    expect(row.wageStatutoryAmount).toBeNull()
+    expect(row.sysBase).toBeNull()
   })
 
   it('分単位の残業は時給を按分して円未満を四捨五入する', () => {
@@ -777,7 +752,7 @@ describe('compareSalaryMonth', () => {
   it('summary の時間外が null でも 0 として扱う', () => {
     const out = compareSalaryMonth(
       [csvRow({ rates: { base: 3679, overtime: 1430 } })],
-      [reportRow('1239', '城田 秀幸', { workDays: 10, overtimeMinutes: null, overtimeNightMinutes: null })],
+      [reportRow('1239', '城田 秀幸', { workDays: 10, overtimeMinutes: null, overtimeNightMinutes: null, statutoryAmount: 36790 })],
       config,
       '2023-04',
     )
@@ -789,7 +764,7 @@ describe('compareSalaryMonth', () => {
     // 明細: 日額 10,000 円・残業単価 1,500 円/h・出勤 20 日。summary の時間外 10h、週 40 時間超 6h は wage 側にだけ乗る
     const r = compareSalaryMonth(
       [csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 200000, 残業手当: 30000 }, reportedTotal: 230000, rates: { base: 10000, overtime: 1500 }, attendance: { 出勤日数: 20 } })],
-      [reportRow('99001', '架空 花子', { workDays: 20, overtimeMinutes: 10 * 60, weekly40ExcessMinutes: 6 * 60 })],
+      [reportRow('99001', '架空 花子', { workDays: 20, overtimeMinutes: 10 * 60, weekly40ExcessMinutes: 6 * 60, statutoryAmount: 200000 })],
       config,
       '2023-04',
     ).rows[0]!
@@ -803,7 +778,7 @@ describe('compareSalaryMonth', () => {
     expect(overtimeHoursComparison({ ...r, csvOvertimeHours: 12 }).diffMinutes).toBe(16 * 60 - 12 * 60)
   })
 
-  it('基本単価・残業単価が無い行は独自の按分計算をせず null にする (「単価なし」)', () => {
+  it('単価マスタの金額も残業単価も無い行は独自の按分計算をせず null にする (「単価なし」)', () => {
     const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 60 * 60 })], config, '2023-04')
     const r = out.rows[0]!
     expect(r.sysBase).toBeNull()
@@ -814,7 +789,7 @@ describe('compareSalaryMonth', () => {
     expect(r.diffTotal).toBeNull()
   })
 
-  it('基本単価だけ無い行は基本給(計算)のみ null、残業単価があれば残業(計算)は出る', () => {
+  it('単価マスタの金額が無い月は基本給(計算)のみ null、残業単価があれば残業(計算)は出る', () => {
     const out = compareSalaryMonth(
       [csvRow({ rates: { base: null, overtime: 1430 } })],
       [reportRow('1239', '城田 秀幸', { overtimeMinutes: 90 })], // 1.5h
@@ -1194,9 +1169,8 @@ describe('compareSalaryMonth', () => {
       expect(notes('sys', undefined, 1)).toEqual([]) // 月給は日数も所定も使わない
     })
 
-    it('区分→種別の対応は 1 か所 (payKubunKind) — 基本給(計算) と基礎単価が同じ種別になる', () => {
+    it('区分→種別の対応は 1 か所 (payKubunKind) — 基礎単価 (37条) が使う', () => {
       expect([1, 2, 3, 4, 0, null].map(payKubunKind)).toEqual(['monthly', 'days', 'hours', 'monthly', 'unknown', 'unknown'])
-      expect(computeSysBase(100, 2, 1, 1).kind).toBe('days')
       expect(computeBaseRate(2, 80000, { value: 20, source: 'sys' }, 480, null).basis.kind).toBe('days')
     })
   })
@@ -1442,7 +1416,7 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
     expect(out.warnings).toEqual([])
   })
 
-  it('会社ごとに単価が違う合算は計算列が「単価なし」になり警告に明記される', () => {
+  it('会社ごとに単価が違う合算は警告に明記される (基本給(計算) は wage report の金額なので単価は効かない)', () => {
     const out = compareSalaryMonth(
       [
         csvRow({ company: '有限会社', driverCd: '1649', cdKey: '1649', driverName: '鵜瀬 裕一', rates: { base: 12000, overtime: 1500 } }),
@@ -1453,11 +1427,10 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
       '2023-04',
       cdMap,
     )
-    expect(out.rows[0]!.sysBase).toBeNull()
     expect(out.warnings[0]).toContain('会社ごとに単価が異なるため')
   })
 
-  it('単価が全社同値の合算は計算列が出る (警告に単価の注記は付かない)', () => {
+  it('単価が全社同値の合算は警告に単価の注記が付かない', () => {
     const out = compareSalaryMonth(
       [
         csvRow({ company: '有限会社', driverCd: '1649', cdKey: '1649', driverName: '鵜瀬 裕一', rates: { base: 12000, overtime: 1500 } }),
@@ -1468,7 +1441,6 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
       '2023-04',
       cdMap,
     )
-    expect(out.rows[0]!.sysBase).not.toBeNull()
     expect(out.warnings[0]).not.toContain('単価が異なる')
   })
 

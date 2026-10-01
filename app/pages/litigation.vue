@@ -95,8 +95,6 @@ import {
   rateBasisStatus,
   isBaseRateBelowMinWage,
   salaryRowCells,
-  isBaseBelowMinWageStatutory,
-  minWageBaseCompare,
   splitPayrollTargets,
   type LitigationRegisterCandidate,
   type PayrollTarget,
@@ -860,10 +858,10 @@ const salaryBelowMinWage37Count = computed(() =>
   salaryRows.value.filter(r => r.compared && isBaseRateBelowMinWage(r.compared)).length)
 // 明細の基本給が 単価マスタ × 法定内時間 (wage report の金額) を下回る行 — エラー (0 件でも出す)。比べられない行は数えない
 const salaryBaseBelowMinWageCount = computed(() =>
-  salaryRows.value.filter(r => r.compared && isBaseBelowMinWageStatutory(r.compared)).length)
+  salaryRows.value.filter(r => (r.compared?.diffBase ?? 0) < 0).length)
 // 比較済みの行のうち、単価マスタに単価が無く基本給を比べられない行
 const salaryBaseMinWageUnknownCount = computed(() =>
-  salaryRows.value.filter(r => r.compared && minWageBaseCompare(r.compared).diffBase === null).length)
+  salaryRows.value.filter(r => r.compared && r.compared.diffBase === null).length)
 // 計算に使った単価が、その月の最低賃金と違う行 (上下どちらも) / 判定できない行 (Refs #1133)
 const salaryRateBasisCounts = computed(() => {
   let mismatch = 0
@@ -1803,7 +1801,7 @@ function fmtDateTime(iso: string): string {
                   <th class="px-3 py-2 font-medium">乗務員</th>
                   <th class="px-3 py-2 font-medium">勤務月 (支給月)</th>
                   <th class="px-3 py-2 font-medium">状態</th>
-                  <th class="px-3 py-2 font-medium text-right" title="明細 = 割増基礎に入る支給 (区分 base: 基本給の項目 + 手当) の合計 / 計算 = 明細の基本単価 (日額) × デジタコ稼働日数。最低賃金・実働時間は使っていない。最低賃金との比較の行 = 単価マスタ (最低賃金) × 法定時間内 と明細の基本給の差 (明細が下回る月は赤)">基本給</th>
+                  <th class="px-3 py-2 font-medium text-right" title="明細 = 割増基礎に入る支給 (区分 base: 基本給の項目 + 手当) の合計 / 計算 = 単価マスタ (最低賃金) × 法定時間内 (wage report の金額。単価が無い月は計算なし)。差 = 明細 − 計算 (明細が下回る月は赤太字)">基本給</th>
                   <th class="px-3 py-2 font-medium text-right">残業</th>
                   <th class="px-3 py-2 font-medium text-right">総支給</th>
                   <th class="px-3 py-2 font-medium text-right" title="基礎単価 = 割増の基礎に入る支給 ÷ 所定労働時間 (日給 = 明細の (出勤日数 + 有休日数) × 1 日の所定。週 40 時間相当の月平均 173.8h を超えたら 173.8h。明細に日数が無ければデジタコの稼働日数、時給 = 明細の時給そのもの、月給・その他 = 法定の月平均)。理論値 = 基礎単価 × 割増 (月60時間超の1.5倍は2023-04勤務月から)">残業代 (37条)</th>

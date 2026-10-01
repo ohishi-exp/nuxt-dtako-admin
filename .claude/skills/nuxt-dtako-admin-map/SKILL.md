@@ -645,7 +645,7 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
 ④給与比較 (給与明細 CSV をブラウザ内のみで解析し wage-report と突合 —
 **基礎単価(実績) = 割増基礎算入計÷所定労働時間 (労基則19条。日給 = ÷min(日数×1日の所定、法定の月平均173.8h)。日数 = 明細の 出勤日数+有休日数 (`baseRateDaysOf`。明細に無い行・複数会社の合算行はデジタコ稼働日数)、所定 = relay の `daily_work_minutes`、引けなければ法定8h / 時給 = 明細の時給そのもの / 月給・その他 = ÷法定の月平均173.8h / 区分不明は出さない。`computeBaseRate`、Refs #1133) と 残業(基礎単価) 理論値の
 労基法37条主判定 + 残業(最低賃金) の絶対下限併記**、Refs #278)
-訴訟準備 (`/litigation`) の給与比較の表は、金額を `SalaryAmountCell`・37条を `SalaryOver37Cell`・**計算で使った労働時間を `SalaryHoursCell`** (デジタコの稼働日数・実働・法定区分 = wage report の欄の写し `SalaryComparisonRow.hours` / 明細の勤怠 / 37条の分母) に縦積みする (行の組み立ては `salaryRowCells`)。基本給のセルには 明細の内訳 (うち基本給 / 手当、`CSV_BASE_SALARY_ITEM_LABEL`) と **最低賃金との比較** (既存 `minWageCompareRow` を拘束×賃金の最低賃金チェックと同じ呼び方で使う: 単価マスタ × 法定内時間 と 明細の基本給)。
+訴訟準備 (`/litigation`) の給与比較の表は、金額を `SalaryAmountCell`・37条を `SalaryOver37Cell`・**計算で使った労働時間を `SalaryHoursCell`** (デジタコの稼働日数・実働・法定区分 = wage report の欄の写し `SalaryComparisonRow.hours` / 明細の勤怠 / 37条の分母) に縦積みする (行の組み立ては `salaryRowCells`)。基本給のセルは 明細 / うち基本給・手当 (`CSV_BASE_SALARY_ITEM_LABEL`) / 計算 / 根拠 / 差。**基本給(計算) = wage report の `wage.amounts.statutory` (単価マスタ × 法定時間内) の 1 欄 (`sysBase`)** で、給与区分に関わらず同じ式 (明細の基本単価 × 日数は使わない)。根拠は 単価マスタが最低賃金と一致する月 =「最低賃金 N 円/h × 法定時間内 H」/ 違う月 =「単価マスタ N 円/h × …」/ 単価なし。差が負は赤太字。
 ⑤支給項目区分 (**割増基礎 (37条) × 最低賃金 (4条3項) の 2 軸 5 区分**:
 base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存値は
 後方互換。集計意味論は `app/utils/salary-compare.ts` の `SALARY_CATEGORY_FLAGS`)
@@ -1055,7 +1055,7 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 | `app/utils/timecard-view.ts` | 日別サマリ → タイムカード表の行 + 勤務区分の日数 (pure、100% gate) |
 | `app/utils/kosoku-daily.ts` | **ドライバー**の打刻基準日別サマリの受け取り (`GET /restraint-api/kintai/kosoku-daily` → 乗務員CD 引き、pure、100% gate、Refs #472)。ドライバーは打刻を持たないので wage-report の `source === 'timecard'` に出てこない — タイムカード表にドライバーを出すための別経路。**タイムカード表の並び順もここ** (`groupTimecardSheetsByCompany` / `timecardJobGroup`): 給与大臣の会社コード昇順で区切り、中は 事務 → 作業 → 整備 → 乗務 → その他 → 乗務員CD 順 (2026-07-28)。職種は `employee_attrs.job_name` (`SHOZOKU.NAME2`) の**部分一致**で振り分ける — 実測値に `一般事務管理` `作業員点呼者` `乗務員(トレーラ-)` のような表記ゆれがある |
 | `app/utils/restraint-wage-view.ts` | 共有型 + WAGE_COLUMNS + 表示ヘルパ |
-| `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック + `computeSysBase` (給与区分で単価の掛け方を分岐) (pure) |
+| `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック + 基本給(計算) (= wage report の 単価マスタ × 法定時間内、`sysBase`) (pure) |
 | `workers/dtako-scraper-relay/src/restraint-wage.ts` | 賃金計算 pure (100% gate) |
 | `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | summary v2 (日別 + 派生指標) |
 

@@ -14,7 +14,7 @@
  * **金額と氏名はブラウザに残さない** (拘束×賃金と同じ方針、Refs #467) — 給与明細はメモリだけに持ち、
  * 開き直したら読み直す (保存済みの月は給与大臣を開かずに返るので速い)。
  */
-import { fmtMinutes, fmtYen, minWageCompareRow, nextYm, WAGE_COLUMNS } from './restraint-wage-view'
+import { fmtMinutes, fmtYen, nextYm, WAGE_COLUMNS } from './restraint-wage-view'
 import type { WageCategoryKey, WageReportResponse, WageReportRow } from './restraint-wage-view'
 import {
   BASE_RATE_NONE_LABELS, baseRateBasisNotes, baseRateBasisText, baseRateDaysSourceLabel, compareSalaryMonth,
@@ -246,11 +246,11 @@ export interface LitigationSalaryAmountCell {
   csv: number
   sys: number | null
   diff: number | null
-  /** 「計算」の根拠 (`10,000 円 × 20 日` など)。総支給は null (基本給と残業の和なので根拠を持たない) */
+  /** 「計算」の根拠 (基本給 = `最低賃金 1,000 円/h × 法定時間内 150h00m`、残業 = `1,500 円/h × 10h00m`)。総支給は null (基本給と残業の和なので根拠を持たない) */
   basis: string | null
   /** 基本給の明細の内訳 (`うち基本給 N / 手当 M`)。基本給だけ。 */
   breakdown: string | null
-  /** 最低賃金ベースの比較 (基本給 = 単価 × 法定内時間、残業 = 最低賃金ベースの残業代)。総支給は null */
+  /** 残業だけ: 最低賃金ベースの残業代との比較。基本給の単価 × 法定内時間は「計算」そのものなのでここに出さない。基本給・総支給は null */
   minWage: LitigationSalaryMinWageLine | null
 }
 
@@ -313,17 +313,6 @@ export interface LitigationSalaryRowCells {
 
 const yen = (v: number) => v.toLocaleString('ja-JP')
 
-/** 基本給(計算) の根拠。掛けた単価・区分・量は `computeSysBase` が決めたもの (区分の分岐はそこ 1 か所)。 */
-function sysBaseBasisText(b: SalaryComparisonRow['sysBaseBasis']): string {
-  switch (b.kind) {
-    case 'days': return `${yen(b.rate!)} 円 × ${b.quantity} 日`
-    case 'hours': return `${yen(b.rate!)} 円/h × ${fmtMinutes(b.quantity)}`
-    case 'monthly': return '計算なし (月給)'
-    case 'unknown': return '計算なし (給与区分が不明)'
-    case 'norate': return '単価なし'
-  }
-}
-
 const WAGE_LABEL = Object.fromEntries(WAGE_COLUMNS.map(c => [c.key, c.label])) as Record<WageCategoryKey, string>
 
 /** 基本給の明細 (区分 base) を 項目名「基本給」とそれ以外 (割増基礎に入る手当) に分けた内訳。 */
@@ -334,35 +323,14 @@ function baseBreakdownText(items: SalaryComparisonRow['csvBaseItems']): string {
 }
 
 /**
- * 基本給の最低賃金との比較。**拘束×賃金の最低賃金チェックと同じ `minWageCompareRow`** を同じ呼び方で使う
- * (計算 = 単価マスタ × 法定内時間 = `wage.amounts.statutory`、給与 = 明細の基本給 `csvBase`、差 = 給与 − 計算)。
- * ここで掛け算も判定もしない — 単価も時間も wage report の値。
+ * 基本給(計算) の根拠。計算 = 単価マスタ × 法定時間内 (wage report の金額。ここで掛け算しない)。
+ * 掛けた単価は単価マスタ。最低賃金と一致する月 (右端の列と同じ `rateBasisStatus` が ok) だけ「最低賃金」と呼び、違う月は単価マスタと書く。
  */
-export function minWageBaseCompare(c: Pick<SalaryComparisonRow, 'wageStatutoryAmount' | 'csvBase' | 'csvOvertime'>) {
-  return minWageCompareRow(
-    { base: c.wageStatutoryAmount, overtime: null, total: null },
-    { base: c.csvBase, overtime: c.csvOvertime },
-  )
-}
-
-/** 基本給の明細が 最低賃金 × 法定内時間 を下回るか (比べられない月は false — 判定しない)。 */
-export function isBaseBelowMinWageStatutory(c: Pick<SalaryComparisonRow, 'wageStatutoryAmount' | 'csvBase' | 'csvOvertime'>): boolean {
-  return (minWageBaseCompare(c).diffBase ?? 0) < 0
-}
-
-function baseMinWageLine(c: SalaryComparisonRow): LitigationSalaryMinWageLine {
-  const cmp = minWageBaseCompare(c)
+function baseBasisText(c: SalaryComparisonRow): string {
   const rate = c.rateBasis.hourlyRate
-  if (cmp.calcBase === null || rate === null) {
-    return { text: '最低賃金との比較なし (単価マスタに単価が無い)', diff: null, shortfall: false }
-  }
-  // 掛けた単価は単価マスタ。最低賃金と一致する月 (右端の列と同じ `rateBasisStatus` が ok) だけ「最低賃金」と呼び、違う月は単価マスタと書く
+  if (c.sysBase === null || rate === null) return '単価なし (単価マスタに単価が無い)'
   const name = rateBasisStatus(c.rateBasis).status === 'ok' ? '最低賃金' : '単価マスタ'
-  return {
-    text: `${name} ${yen(rate)} 円/h × ${WAGE_LABEL.statutory} ${fmtMinutes(c.hours.minutes.statutory)} = ${yen(cmp.calcBase)}`,
-    diff: cmp.diffBase,
-    shortfall: isBaseBelowMinWageStatutory(c),
-  }
+  return `${name} ${yen(rate)} 円/h × ${WAGE_LABEL.statutory} ${fmtMinutes(c.hours.minutes.statutory)}`
 }
 
 function overtimeMinWageLine(c: SalaryComparisonRow): LitigationSalaryMinWageLine {
@@ -406,8 +374,8 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
   return {
     amounts: [
       {
-        key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: sysBaseBasisText(c.sysBaseBasis),
-        breakdown: baseBreakdownText(c.csvBaseItems), minWage: baseMinWageLine(c),
+        key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: baseBasisText(c),
+        breakdown: baseBreakdownText(c.csvBaseItems), minWage: null,
       },
       {
         key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime,
