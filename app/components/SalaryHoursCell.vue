@@ -13,7 +13,8 @@ withDefaults(defineProps<{
 </script>
 
 <template>
-  <div class="tabular-nums" :class="compact ? 'leading-tight' : ''">
+  <!-- compact は幅を締める: 行を横に流す (flex-wrap) ままだと列の max-content が全部 1 行ぶんになり、ほかの列を押し潰して紙面の行が高くなる -->
+  <div class="tabular-nums" :class="compact ? 'leading-tight w-44' : ''">
     <div :class="compact ? 'text-gray-600' : 'text-xs text-gray-500'" data-salary-line="hours-digitaco-head">デジタコ</div>
     <div :class="compact ? 'flex flex-wrap gap-x-2' : ''">
       <div
