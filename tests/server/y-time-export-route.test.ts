@@ -364,6 +364,49 @@ describe('POST /api/y-time-export — Y金額 の時間の行 (Refs #1133 c1133-
     expect(decodeURIComponent(h['x-y-time-kingaku-error']!)).toBe('テンプレに「要素」シートが無い')
   })
 
+  it('★ 集計が例外で落ちても xlsx は 200 で返り、理由だけをヘッダに載せる (既存のヘッダは変わらない)', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: ['2030-07-05'], inputDays: INPUT_DAYS })
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', json: async () => ({ rows: [{}, {}], warnings: ['w'] }),
+    })
+    readSheetCellsMock.mockRejectedValue(new Error('テンプレの zip が壊れている'))
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    const { 'x-y-time-kingaku-error': reason, ...rest } = headersOf()
+    expect(reason).toMatch(/^[\x21-\x7e]+$/)
+    expect(decodeURIComponent(reason!)).toBe('集計中にエラーが起きた: テンプレの zip が壊れている')
+    expect(rest).toEqual({
+      'x-y-time-rows': '2',
+      'x-y-time-missing-count': '1',
+      'x-y-time-warnings-count': '1',
+      'x-y-time-missing-dates': '2030-07-05',
+      'x-y-time-warnings': 'w',
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'content-disposition': 'attachment; filename="y-time_0001_2030-07-01_2030-07-31.xlsx"',
+    })
+
+    // Error でない値が投げられても同じ (文字にして載せる)。計算の途中で落ちた場合も同じ扱い
+    setResponseHeaderMock.mockClear()
+    readSheetCellsMock.mockRejectedValue('文字の例外')
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    expect(decodeURIComponent(headersOf()['x-y-time-kingaku-error']!)).toBe('集計中にエラーが起きた: 文字の例外')
+    expect(headersOf()).not.toHaveProperty('x-y-time-kingaku')
+
+    setResponseHeaderMock.mockClear()
+    readSheetCellsMock.mockResolvedValue(settingCells())
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: [], inputDays: undefined })
+    expect(await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).toBe(XLSX_BYTES)
+    expect(decodeURIComponent(headersOf()['x-y-time-kingaku-error']!)).toMatch(/^集計中にエラーが起きた: /)
+    expect(headersOf()).not.toHaveProperty('x-y-time-kingaku')
+  })
+
+  it('集計の外 (xlsx の書き込み) の失敗は今までどおり throw する', async () => {
+    readBodyMock.mockResolvedValue(REWRITE)
+    writeYTimeRowsMock.mockRejectedValue(new Error('sheet "Y時間" not found in template'))
+    await expect(call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).rejects.toThrow('sheet "Y時間" not found in template')
+    expect(readSheetCellsMock).not.toHaveBeenCalled()
+  })
+
   it('書けた日が 1 日も無い冊 (運行 0 件) は月度 0 行', async () => {
     readBodyMock.mockResolvedValue(REWRITE)
     await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))

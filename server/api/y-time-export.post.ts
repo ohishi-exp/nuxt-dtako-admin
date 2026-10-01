@@ -59,6 +59,7 @@
  * `~/utils/y-kingaku` で、**いま xlsx に書いた入力** (`writeYTimeRows` の `inputDays`) と
  * テンプレの `要素` シートの設定から計算する。値は月度の配列の JSON を URI encode したもの。
  * 設定が読めないテンプレでは既定値で計算せず、理由を `-error` に載せる (xlsx はそのまま返す)。
+ * 集計が例外で落ちたときも同じく `-error` に載せ、xlsx は返す (集計のせいで Excel を失わない)。
  * 追加の通信はしない (上流もテンプレも、この応答のために既に取ってある)。
  *
  * ## 上流の 404 だけ `data.upstream = 'alc'` を付ける
@@ -201,17 +202,28 @@ export default defineEventHandler(async (event) => {
   }
 
   // Y金額 シートの時間の行 (訴訟準備の出力タブが表にする)。入力は「シートに書いた値」
+  // **集計は付け足しで、主機能は xlsx を返すこと** — 想定外のテンプレで集計が落ちても Excel は返す
+  // (try の中は集計だけ。ヘッダは値が揃ってから 1 本だけ付ける)
   if (body.period_rewrite === true) {
-    const settings = parseYKingakuSettings(
-      await readSheetCells(tplBytes, Y_KINGAKU_SETTING_SHEET, Y_KINGAKU_SETTING_REFS),
-    )
-    if (settings.ok) {
-      const months = computeYKingaku(result.inputDays, { from: body.from, to: body.to }, settings.settings)
-      setResponseHeader(event, 'x-y-time-kingaku', encodeYKingakuHeader(months))
+    let kingaku: { name: string, value: string }
+    try {
+      const settings = parseYKingakuSettings(
+        await readSheetCells(tplBytes, Y_KINGAKU_SETTING_SHEET, Y_KINGAKU_SETTING_REFS),
+      )
+      kingaku = settings.ok
+        ? {
+            name: 'x-y-time-kingaku',
+            value: encodeYKingakuHeader(
+              computeYKingaku(result.inputDays, { from: body.from, to: body.to }, settings.settings),
+            ),
+          }
+        : { name: 'x-y-time-kingaku-error', value: encodeURIComponent(settings.reason) }
     }
-    else {
-      setResponseHeader(event, 'x-y-time-kingaku-error', encodeURIComponent(settings.reason))
+    catch (e) {
+      const detail = e instanceof Error ? e.message : String(e)
+      kingaku = { name: 'x-y-time-kingaku-error', value: encodeURIComponent(`集計中にエラーが起きた: ${detail}`) }
     }
+    setResponseHeader(event, kingaku.name, kingaku.value)
   }
 
   // 4. response
