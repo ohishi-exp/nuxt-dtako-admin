@@ -192,7 +192,10 @@ function allRegisteredCompIds(accounts: DtakoAccountEntry[]): Set<string> {
  *
  * ★ この module の「role は見ない」の**例外**。あちらは「**どの会社**を見てよいか」の
  * 軸の話で、ここは「**運行を消して入れ直す書き込み**をしてよいか」。会社の軸は
- * 変わらず `allowedViewerComps` (tenant + `org_wide`) が決め、この判定はその**後に AND** する。 */
+ * 変わらず `allowedViewerComps` (tenant + `org_wide`) が決め、この判定はその**後に AND** する。
+ *
+ * 訴訟準備の 案件の削除・復活・出力の版 の 8 口 (`litigation-output.ts` の `isLitigationAdminRoute`、
+ * c1133-32) も同じ述語を使う — 名前は「取り込み」のままだが、線は同じ admin / payroll (2 つ目を書かない)。 */
 export const LITIGATION_UPLOAD_ROLES: readonly string[] = ["admin", "payroll"];
 
 /** `role` が {@link LITIGATION_UPLOAD_ROLES} に入っているか。**文字列以外 (`undefined` =

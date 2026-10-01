@@ -337,10 +337,35 @@ import {
   buildLitigationDeletedCaseListStatement,
   buildLitigationExpiredCaseListStatement,
   buildLitigationExpiredCasePurgeStatements,
+  buildLitigationExpiredVersionListStatement,
+  buildLitigationOutputFileCountStatement,
+  buildLitigationOutputFileGetStatement,
+  buildLitigationOutputFileListStatement,
+  buildLitigationOutputFileUpsertStatement,
+  buildLitigationOutputR2Key,
+  buildLitigationOutputVersionFileListStatement,
+  buildLitigationOutputVersionGetStatement,
+  buildLitigationOutputVersionId,
+  buildLitigationOutputVersionInsertStatement,
+  buildLitigationOutputVersionListResponse,
+  buildLitigationOutputVersionListStatement,
+  buildLitigationOutputVersionPurgeStatements,
+  buildLitigationOutputVersionResponse,
   isLitigationAdminRoute,
+  isLitigationOutputTooLarge,
   LITIGATION_ADMIN_FORBIDDEN,
+  LITIGATION_OUTPUT_MAX_FILES,
   litigationDeletedCutoffIso,
+  litigationOutputContentType,
+  litigationOutputDeclaredTooLarge,
+  normalizeLitigationOutputCaseId,
+  normalizeLitigationOutputCreate,
+  normalizeLitigationOutputFileName,
+  normalizeLitigationOutputLabel,
+  normalizeLitigationOutputVersionId,
   type LitigationDeletedCaseD1Row,
+  type LitigationOutputFileD1Row,
+  type LitigationOutputVersionD1Row,
 } from "./litigation-output";
 import {
   isClericalJob,
@@ -4489,7 +4514,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/litigation/alc-upload-driver" && request.method === "POST") {
       return this.handleLitigationAlcUploadDriver(request, url, routing);
     }
-    // 案件の削除・復活 (Refs #1133 c1133-32)。上と同じ理由で、保存済み theearth
+    // 案件の削除・復活と、出力の版 (Refs #1133 c1133-32)。上と同じ理由で、保存済み theearth
     // セッションの読み出しより前で分ける (role を見る口)。
     if (isLitigationAdminRoute(request.method, url.pathname)) {
       return this.dispatchLitigationAdmin(request, url, routing);
@@ -5662,7 +5687,194 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/litigation-cases/restore") {
       return this.handleLitigationCaseRestore(db, request, record);
     }
-    return this.handleLitigationCasesDelete(db, record, url);
+    if (url.pathname === "/restraint-api/litigation-cases") {
+      return this.handleLitigationCasesDelete(db, record, url);
+    }
+    // ---- 出力の版 (D1 が索引、R2 が Excel の実体) ----
+    try {
+      if (url.pathname === "/restraint-api/litigation-outputs") {
+        return request.method === "POST"
+          ? await this.handleLitigationOutputCreate(db, request, record)
+          : await this.handleLitigationOutputsGet(db, record, url);
+      }
+      const bucket = this.env.DTAKO_R2;
+      if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+      return request.method === "PUT"
+        ? await this.handleLitigationOutputFilePut(db, bucket, request, record, url)
+        : await this.handleLitigationOutputFileGet(db, bucket, record, url);
+    } catch (err) {
+      if (err instanceof LitigationCaseError) return dvrJsonError(400, err.message);
+      console.error(JSON.stringify({ litigation_outputs: "error", path: url.pathname, error: describeUnknownError(err) }));
+      return dvrJsonError(502, "出力の版の読み書きに失敗しました");
+    }
+  }
+
+  /** 出力の口の共通の前提: 案件が同じ会社の cases の表に在るか。削除済みの案件は偽
+   * (復活するまで、その版・ファイルは取れない)。 */
+  private async litigationCaseExists(db: D1Database, compId: string, caseId: string): Promise<boolean> {
+    const stmt = buildLitigationCaseGetStatement(compId, caseId);
+    return (await db.prepare(stmt.sql).bind(...stmt.params).first<LitigationCaseD1Row>()) !== null;
+  }
+
+  /**
+   * POST /restraint-api/litigation-outputs — body `{ caseId, results }`。出力 1 回ぶんの版の行を作る
+   * (ファイルはこの後 `/file` へ 1 つずつ上げる)。`r2_prefix` は自 env。応答 `{ versionId, createdAt }`。
+   * 入力の不正 (`LitigationCaseError`) は呼び出し元 (`dispatchLitigationAdmin`) が 400 にする。
+   */
+  private async handleLitigationOutputCreate(
+    db: D1Database,
+    request: Request,
+    record: TheearthSessionRecord,
+  ): Promise<Response> {
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const input = normalizeLitigationOutputCreate(raw);
+    if (!(await this.litigationCaseExists(db, record.compId, input.caseId))) {
+      return dvrJsonError(404, "案件が見つかりません");
+    }
+    const now = new Date();
+    const versionId = buildLitigationOutputVersionId(now, crypto.getRandomValues(new Uint8Array(6)));
+    const r2Prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    // キーに使えない case_id (`csv`・`v-…`) は、版を作る前にここで 400 にする
+    buildLitigationOutputR2Key(r2Prefix, record.compId, input.caseId, versionId, "probe.xlsx");
+    const createdAt = now.toISOString();
+    const stmt = buildLitigationOutputVersionInsertStatement({
+      compId: record.compId,
+      caseId: input.caseId,
+      versionId,
+      r2Prefix,
+      createdAt,
+      createdBy: record.viewerEmail ?? null,
+      results: input.results,
+    });
+    await db.prepare(stmt.sql).bind(...stmt.params).run();
+    return Response.json({ versionId, createdAt });
+  }
+
+  /**
+   * GET /restraint-api/litigation-outputs?case_id= — 版の一覧 (新しい順、results なし)。
+   * `&version_id=` を付けると、その 1 版を results つきで返す。どちらも自 env の prefix の版だけ。
+   */
+  private async handleLitigationOutputsGet(db: D1Database, record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const caseId = normalizeLitigationOutputCaseId(url.searchParams.get("case_id"));
+    const versionParam = url.searchParams.get("version_id");
+    const versionId = versionParam === null ? null : normalizeLitigationOutputVersionId(versionParam);
+    if (!(await this.litigationCaseExists(db, record.compId, caseId))) {
+      return dvrJsonError(404, "案件が見つかりません");
+    }
+    const r2Prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const noStore = { headers: { "Cache-Control": "no-store" } };
+    if (versionId !== null) {
+      const getStmt = buildLitigationOutputVersionGetStatement(record.compId, caseId, versionId, r2Prefix);
+      const version = await db.prepare(getStmt.sql).bind(...getStmt.params).first<LitigationOutputVersionD1Row>();
+      if (!version) return dvrJsonError(404, "出力の版が見つかりません");
+      const filesStmt = buildLitigationOutputVersionFileListStatement(record.compId, caseId, versionId);
+      const files = await db.prepare(filesStmt.sql).bind(...filesStmt.params).all<LitigationOutputFileD1Row>();
+      return Response.json({ version: buildLitigationOutputVersionResponse(version, files.results ?? []) }, noStore);
+    }
+    const listStmt = buildLitigationOutputVersionListStatement(record.compId, caseId, r2Prefix);
+    const versions = await db.prepare(listStmt.sql).bind(...listStmt.params).all<LitigationOutputVersionD1Row>();
+    const filesStmt = buildLitigationOutputFileListStatement(record.compId, caseId, r2Prefix);
+    const files = await db.prepare(filesStmt.sql).bind(...filesStmt.params).all<LitigationOutputFileD1Row>();
+    return Response.json(
+      { versions: buildLitigationOutputVersionListResponse(versions.results ?? [], files.results ?? []) },
+      noStore,
+    );
+  }
+
+  /**
+   * PUT /restraint-api/litigation-outputs/file?case_id=&version_id=&name=&label= — body = バイト列。
+   * 1 通信 1 ファイル。relay は中身が当時の出力かを検証できない (作ったのは front) ので、
+   * 大きさ・sha256・日時を刻むだけ。上限超えは body を読む前 (`content-length`) と
+   * 読んだ後 (実際の長さ) の両方で 413。応答 `{ name, size, sha256 }`。
+   */
+  private async handleLitigationOutputFilePut(
+    db: D1Database,
+    bucket: R2Bucket,
+    request: Request,
+    record: TheearthSessionRecord,
+    url: URL,
+  ): Promise<Response> {
+    const caseId = normalizeLitigationOutputCaseId(url.searchParams.get("case_id"));
+    const versionId = normalizeLitigationOutputVersionId(url.searchParams.get("version_id"));
+    if (!(await this.litigationCaseExists(db, record.compId, caseId))) {
+      return dvrJsonError(404, "案件が見つかりません");
+    }
+    const r2Prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const versionStmt = buildLitigationOutputVersionGetStatement(record.compId, caseId, versionId, r2Prefix);
+    const version = await db.prepare(versionStmt.sql).bind(...versionStmt.params).first<LitigationOutputVersionD1Row>();
+    if (!version) return dvrJsonError(404, "出力の版が見つかりません");
+    const name = normalizeLitigationOutputFileName(url.searchParams.get("name"));
+    const label = normalizeLitigationOutputLabel(url.searchParams.get("label"), name);
+    const r2Key = buildLitigationOutputR2Key(r2Prefix, record.compId, caseId, versionId, name);
+    const countStmt = buildLitigationOutputFileCountStatement(record.compId, caseId, versionId, name);
+    const others = await db.prepare(countStmt.sql).bind(...countStmt.params).first<{ n: number }>();
+    if ((others?.n ?? 0) >= LITIGATION_OUTPUT_MAX_FILES) {
+      return dvrJsonError(400, `1 つの版に保存できるファイルは ${LITIGATION_OUTPUT_MAX_FILES} 個までです`);
+    }
+    if (litigationOutputDeclaredTooLarge(request.headers.get("content-length"))) {
+      return dvrJsonError(413, "ファイルが大きすぎます (1 ファイル 20MB まで)");
+    }
+    const bytes = await request.arrayBuffer();
+    if (isLitigationOutputTooLarge(bytes.byteLength)) {
+      return dvrJsonError(413, "ファイルが大きすぎます (1 ファイル 20MB まで)");
+    }
+    if (bytes.byteLength === 0) return dvrJsonError(400, "body (ファイルの中身) が必要です");
+    const sha256 = await this.sha256Hex(bytes);
+    await bucket.put(r2Key, bytes, {
+      httpMetadata: { contentType: litigationOutputContentType(name) },
+      customMetadata: { sha256 },
+    });
+    const upsert = buildLitigationOutputFileUpsertStatement({
+      compId: record.compId,
+      caseId,
+      versionId,
+      name,
+      label,
+      size: bytes.byteLength,
+      sha256,
+      r2Key,
+      uploadedAt: new Date().toISOString(),
+    });
+    await db.prepare(upsert.sql).bind(...upsert.params).run();
+    return Response.json({ name, size: bytes.byteLength, sha256 });
+  }
+
+  /**
+   * GET /restraint-api/litigation-outputs/file?case_id=&version_id=&name= — 保存したファイルをそのまま返す。
+   * R2 のキーは受け取らない — 同じ会社・自 env の prefix の版のファイルの行に保存してある
+   * `r2_key` だけで読む。
+   */
+  private async handleLitigationOutputFileGet(
+    db: D1Database,
+    bucket: R2Bucket,
+    record: TheearthSessionRecord,
+    url: URL,
+  ): Promise<Response> {
+    const caseId = normalizeLitigationOutputCaseId(url.searchParams.get("case_id"));
+    const versionId = normalizeLitigationOutputVersionId(url.searchParams.get("version_id"));
+    const name = normalizeLitigationOutputFileName(url.searchParams.get("name"));
+    if (!(await this.litigationCaseExists(db, record.compId, caseId))) {
+      return dvrJsonError(404, "案件が見つかりません");
+    }
+    const r2Prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const stmt = buildLitigationOutputFileGetStatement(record.compId, caseId, versionId, name, r2Prefix);
+    const row = await db.prepare(stmt.sql).bind(...stmt.params).first<LitigationOutputFileD1Row>();
+    if (!row) return dvrJsonError(404, "ファイルが見つかりません");
+    const obj = await bucket.get(row.r2_key);
+    if (!obj) return dvrJsonError(404, "ファイルが見つかりません");
+    return new Response(obj.body, {
+      status: 200,
+      headers: {
+        "content-type": litigationOutputContentType(row.storage_name),
+        "content-disposition": `attachment; filename="${row.storage_name}"`,
+        "cache-control": "no-store",
+      },
+    });
   }
 
   /**
@@ -5743,13 +5955,54 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /**
    * 30 日を過ぎた「削除した案件」の掃除 (案件の一覧 GET の `ctx.waitUntil` から呼ぶ)。
-   * 検知結果と deleted の行を消す。**throw しない** (失敗は構造化ログ。一覧の応答は変えない)。
+   *
+   * 1. 期限切れの案件の版を 3 つまで: ファイルの行の `r2_key` を R2 からまとめて消し
+   *    (1 版 300 キー以下 = delete 1 回)、ファイルの行と版の行を消す。**R2 の削除に失敗した
+   *    版は行を残して次回に回す** (行を先に消すと R2 に孤児が残る)。env を問わず全 prefix の版が対象。
+   * 2. 版が 1 つも残っていない期限切れの案件: 検知結果と deleted の行を消す。
+   *
+   * **throw しない** (失敗は構造化ログ。一覧の応答は変えない)。
    * ★ この中でさらに `ctx.waitUntil` を呼ばない — 内側の D1 書き込みが完了を保証されず
    * 消える (`saveNet780ToR2` の doc comment の実害)。全部 `await` で直列にする。
    */
   private async sweepExpiredLitigationCases(db: D1Database, compId: string): Promise<void> {
     try {
       const cutoffIso = litigationDeletedCutoffIso(Date.now());
+      const versionsStmt = buildLitigationExpiredVersionListStatement(compId, cutoffIso);
+      const versions = await db
+        .prepare(versionsStmt.sql)
+        .bind(...versionsStmt.params)
+        .all<{ case_id: string; version_id: string }>();
+      let versionsDeleted = 0;
+      let r2Failed = 0;
+      for (const v of versions.results ?? []) {
+        const filesStmt = buildLitigationOutputVersionFileListStatement(compId, v.case_id, v.version_id);
+        const files = await db.prepare(filesStmt.sql).bind(...filesStmt.params).all<LitigationOutputFileD1Row>();
+        const keys = (files.results ?? []).map((f) => f.r2_key);
+        if (keys.length > 0) {
+          try {
+            const bucket = this.env.DTAKO_R2;
+            if (!bucket) throw new Error("R2 (DTAKO_R2) が未設定です");
+            await bucket.delete(keys);
+          } catch (err) {
+            r2Failed += 1;
+            console.error(
+              JSON.stringify({
+                litigation_sweep: "r2-delete-failed",
+                comp: compId,
+                case_id: v.case_id,
+                version_id: v.version_id,
+                error: describeUnknownError(err),
+              }),
+            );
+            continue;
+          }
+        }
+        const purge = buildLitigationOutputVersionPurgeStatements(compId, v.case_id, v.version_id);
+        await db.batch(purge.map((s) => db.prepare(s.sql).bind(...s.params)));
+        versionsDeleted += 1;
+      }
+
       const listStmt = buildLitigationExpiredCaseListStatement(compId, cutoffIso);
       const expired = await db.prepare(listStmt.sql).bind(...listStmt.params).all<{ case_id: string }>();
       const caseIds = (expired.results ?? []).map((r) => r.case_id);
@@ -5757,8 +6010,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         const statements = buildLitigationExpiredCasePurgeStatements(compId, caseId, cutoffIso);
         await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
       }
-      if (caseIds.length > 0) {
-        console.log(JSON.stringify({ litigation_sweep: "done", comp: compId, cases: caseIds.length }));
+      if (caseIds.length > 0 || versionsDeleted > 0 || r2Failed > 0) {
+        console.log(
+          JSON.stringify({
+            litigation_sweep: "done",
+            comp: compId,
+            versions: versionsDeleted,
+            r2_failed: r2Failed,
+            cases: caseIds.length,
+          }),
+        );
       }
     } catch (err) {
       console.error(JSON.stringify({ litigation_sweep: "error", comp: compId, error: describeUnknownError(err) }));

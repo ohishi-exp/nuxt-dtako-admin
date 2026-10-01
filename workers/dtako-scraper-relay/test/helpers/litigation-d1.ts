@@ -172,3 +172,34 @@ export function seedCheck(db: SqliteD1, compId: string, caseId: string, key = "1
     key,
   );
 }
+
+/** 出力の版 1 つ (+ ファイルの行) を直接置く。R2 のキーは実装と同じ形で組む。 */
+export function seedVersion(
+  db: SqliteD1,
+  v: { compId: string; caseId: string; versionId: string; r2Prefix: string; createdAt?: string; files?: string[] },
+): string[] {
+  db.exec(
+    `INSERT INTO litigation_output_versions (comp_id, case_id, version_id, r2_prefix, created_at, created_by, results)
+     VALUES (?, ?, ?, ?, ?, 'admin@example.com', '{"seed":true}')`,
+    v.compId,
+    v.caseId,
+    v.versionId,
+    v.r2Prefix,
+    v.createdAt ?? "2026-09-01T00:00:00.000Z",
+  );
+  return (v.files ?? []).map((name) => {
+    const key = `${v.r2Prefix}/${v.compId}/litigation/${v.caseId}/${v.versionId}/${name}`;
+    db.exec(
+      `INSERT INTO litigation_output_files
+         (comp_id, case_id, version_id, storage_name, label, size, sha256, r2_key, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, 3, 'seed-sha', ?, '2026-09-01T00:00:01.000Z')`,
+      v.compId,
+      v.caseId,
+      v.versionId,
+      name,
+      `表示名 ${name}`,
+      key,
+    );
+    return key;
+  });
+}
