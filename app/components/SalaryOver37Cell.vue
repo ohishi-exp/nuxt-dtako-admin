@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
- * 給与比較の「残業代 (37条)」セルの中身。基礎単価 (と根拠) / 残業時間 / 理論値 / 支給 / 差の 5 段、
+ * 給与比較の「残業・深夜・休日 (37条)」セルの中身。基礎単価 (と根拠) / 時間 (残業・深夜・休日の内訳) / 理論値 / 支給 / 差の 5 段、
  * 出せないときはその理由。基礎単価 = 逆算と最低賃金の高いほうで、最低賃金を採用した月は根拠の行だけ赤。画面の表と印刷の紙面が同じ部品を使う (紙面は `compact`)。
  * 値は `salaryRowCells` が運んだもの — ここは並べるだけ。
  */
 import { diffSignClass, fmtSalaryDiff, type LitigationSalaryOver37 } from '~/utils/litigation-salary'
-import { fmtMinutes, fmtRatePerHour, fmtYen } from '~/utils/restraint-wage-view'
+import { fmtRatePerHour, fmtYen } from '~/utils/restraint-wage-view'
 
 withDefaults(defineProps<{
   over37: LitigationSalaryOver37 | null
@@ -20,7 +20,7 @@ withDefaults(defineProps<{
     <template v-if="over37">
       <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="rate"><span :class="compact ? '' : 'text-xs text-gray-500'">基礎単価</span><span>{{ fmtRatePerHour(over37.rate) }} 円/h</span></div>
       <div class="text-right" :class="[compact ? '' : 'text-xs', over37.floored ? 'text-red-600 dark:text-red-400' : compact ? 'text-gray-600' : 'text-gray-500']" data-salary-line="rate-basis">= {{ over37.rateBasis }}</div>
-      <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="minutes"><span :class="compact ? '' : 'text-xs text-gray-500'">残業時間</span><span>{{ fmtMinutes(over37.minutes) }}</span></div>
+      <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="minutes"><span :class="compact ? '' : 'text-xs text-gray-500'">時間</span><span>{{ over37.minutesText }}</span></div>
       <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="theory"><span :class="compact ? '' : 'text-xs text-gray-500'">理論値</span><span>{{ fmtYen(over37.theory) }}</span></div>
       <div class="flex justify-between" :class="compact ? 'gap-1' : 'gap-3'" data-salary-line="paid"><span :class="compact ? '' : 'text-xs text-gray-500'">支給</span><span>{{ fmtYen(over37.paid) }}</span></div>
       <div class="flex justify-between" :class="[compact ? 'gap-1' : 'gap-3', diffSignClass(over37.diff), over37.shortfall ? 'font-bold' : '']" data-salary-line="diff37"><span :class="compact ? '' : 'text-xs text-gray-500'">差</span><span>{{ fmtSalaryDiff(over37.diff) }}</span></div>

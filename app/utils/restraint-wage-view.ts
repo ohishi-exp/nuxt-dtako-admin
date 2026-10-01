@@ -124,6 +124,9 @@ export interface WageRow {
   minWageTotalPay: number | null
   minWageStatutoryPay: number | null
   minWageNightPay: number | null
+  /** 休日労働 (法定休日・法定外休日、深夜ぶんを含む) の最低賃金換算。**古い応答・保存物には無い** (Refs #1133) —
+   * 無い行を 0 として足さない (給与比較は `compareSalaryMonth` が計算を出さず、取り直しを促す)。 */
+  minWageHolidayPay?: number | null
   totalPayDiff: number | null
   overtimeMinutes: number
   minWageOvertimeRate: number | null
@@ -647,11 +650,46 @@ export function isMonthlyOvertimeOver60h(
 
 /**
  * その月の残業時間 (分) = 時間外 + 週40超過 + 時間外深夜。**wage report が正本で、ここは足すだけ**。
- * 給与比較の「残業時間」(`compareSalaryMonth`)・月 60h 超の判定・訴訟準備の出力タブの
- * 「法外残業」が同じこの式を通る (同じ月で違う時間を出さない)。
+ * 給与比較の「残業時間」(`compareSalaryMonth`。深夜・休日を添えるときは `premiumMinutesOf`)・月 60h 超の判定・
+ * 訴訟準備の出力タブの「法外残業」が同じこの式を通る (同じ月で違う時間を出さない)。
  */
 export function monthlyOvertimeMinutes(wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>): number {
   return wage.overtimeMinutes + wage.nightOvertimeMinutes
+}
+
+/** 給与比較の「残業・深夜・休日」の金額に添える時間の内訳 (分)。 */
+export interface PremiumMinutes {
+  /** 残業 = 時間外 + 週40超過 + 時間外深夜 (`monthlyOvertimeMinutes`) */
+  overtime: number
+  /** 法定時間内の深夜 (割増 0.25 だけが乗る時間。時間外深夜は `overtime` の側) */
+  night: number
+  /** 休日労働 = 法定休日 + 法定休日深夜 + 法定外休日 + 法定外休日深夜 */
+  holiday: number
+}
+
+/**
+ * 「残業・深夜・休日」の金額 (給与比較の計算・37条の理論値) が対象にしている時間の内訳。
+ * **wage report が正本で、ここは区分を束ねるだけ** — 金額に時間を添える箇所は全部これを通す
+ * (金額は深夜と休日を含むのに、添えた時間が残業だけ、という食い違いを作らない)。
+ */
+export function premiumMinutesOf(
+  wage: Pick<WageRow, 'minutes' | 'overtimeMinutes' | 'nightOvertimeMinutes'>,
+): PremiumMinutes {
+  const m = wage.minutes
+  return {
+    overtime: monthlyOvertimeMinutes(wage),
+    night: m.night,
+    holiday: m.legalHoliday + m.legalHolidayNight + m.nonLegalHoliday + m.nonLegalHolidayNight,
+  }
+}
+
+/** 内訳の表示 (`残業 10h00m・深夜 2h00m・休日 8h00m`)。深夜・休日は 0 分なら省く (残業は 0 分でも出す)。 */
+export function premiumMinutesText(p: PremiumMinutes): string {
+  return [
+    `残業 ${fmtMinutes(p.overtime)}`,
+    ...(p.night > 0 ? [`深夜 ${fmtMinutes(p.night)}`] : []),
+    ...(p.holiday > 0 ? [`休日 ${fmtMinutes(p.holiday)}`] : []),
+  ].join('・')
 }
 
 /**

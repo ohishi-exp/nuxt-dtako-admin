@@ -15,7 +15,8 @@ function reportRow(cd: string, name: string, workDays = 20): WageReportRow {
     summary: { driverCd: cd, driverName: name, workDays, workingMinutes: 9600, overtimeMinutes: 600, overtimeNightMinutes: 0, days: [] },
     pay_kubun: 2,
     // 単価 1,200 円/h × 法定時間内 150h = 180,000 (架空値)
-    wage: { minutes: { statutory: 9000 }, amounts: { statutory: 180000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: 14000, minWageNightOvertimePay: 1000 },
+    // 深夜も休日も無い月 (新しい形の行: 深夜の割増・休日労働の欄は 0)
+    wage: { minutes: { statutory: 9000, night: 0, legalHoliday: 0, legalHolidayNight: 0, nonLegalHoliday: 0, nonLegalHolidayNight: 0 }, amounts: { statutory: 180000 }, overtimeMinutes: 600, nightOvertimeMinutes: 0, minWageOvertimePay: 14000, minWageNightOvertimePay: 1000, minWageNightPay: 0, minWageHolidayPay: 0 },
   } as unknown as WageReportRow
 }
 
@@ -66,6 +67,23 @@ describe('buildLitigationSalaryRows', () => {
     const [row] = buildLitigationSalaryRows(input())
     expect(row).toMatchObject({ driverCd: '9101', month: '2023-06', payMonth: '2023-07', state: 'ok' })
     expect(row!.compared).toMatchObject({ csvBase: 200000, sysBase: 180000, diffBase: 20000, csvOvertime: 30000, sysOvertime: 15000, diffOvertime: 15000 })
+  })
+
+  it('★ 保存済みの古い行 (休日の金額の欄が無い) は捨てずに比較へ入れ、残業・深夜・休日の計算だけを出さない (0 として足さない)', () => {
+    // 既定の入力の行から休日の金額の欄だけを落とす (ほかは同じ)
+    const base = input()
+    const [key, entry] = [...base.wageReports][0]!
+    const old = structuredClone((entry as { ok: true, value: WageReportResponse }).value.rows[0]!)
+    delete (old.wage as { minWageHolidayPay?: number | null }).minWageHolidayPay
+    old.wage.minWage = { rate: 1000, prefecture: '架空県', mapped: true }
+    const [row] = buildLitigationSalaryRows(input({ wageReports: new Map([[key, wage([old])]]) }))
+    expect(row!.state).toBe('ok')
+    expect(row!.compared).toMatchObject({
+      wageRowOutdated: true, sysBase: 180000, diffBase: 20000,
+      sysOvertime: null, diffOvertime: null, sysTotal: null, baseRateOvertimePay: null,
+    })
+    expect(salaryRowCells(row!.compared!).amounts[1]!.basis).toEqual(['拘束の材料が古い形 (深夜と休日の欄が無い) — 取り直すと計算が出ます'])
+    expect(salaryRowCells(row!.compared!).over37NoneReason).toBe('(拘束の材料が古い形 — 取り直しが要る)')
   })
 
   it('★ 同じ月の明細でも支給月がずれていれば (勤務月ラベルの明細) 突き合わせない', () => {
@@ -242,6 +260,9 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     overtimeFixed: false,
     baseRateActual: 1333.3, baseRateOvertimePay: 16667, diffCsvVsBaseRateOvertime: 13333,
     overtimeMinutes: 605, csvPremiumBase: 200000,
+    sysOvertimeParts: { overtime: 14000, nightOvertime: 0, night: 0, holiday: 0 },
+    premiumMinutes: { overtime: 605, night: 0, holiday: 0 },
+    wageRowOutdated: false,
     baseRateBasis: { kind: 'days', reverse: 1333.3, floored: false, hourlyRate: null, none: null },
     rateBasis: { hourlyRate: 1000, minWageRate: 1000 },
     csvBaseItems: [{ label: '基本給', amount: 190000 }, { label: '通勤手当', amount: 10000 }],
@@ -249,14 +270,14 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     statutoryMinutes: 9000,
   } as unknown as SalaryComparisonRow
 
-  it('基本給・残業・総支給を 明細 / 計算 / 差 の順で返し、時間外は小数 1 桁の時間にする (残業の根拠・37条・時間外の列が同じ overtimeMinutes)', () => {
+  it('基本給・残業 (残業・深夜・休日)・総支給を 明細 / 計算 / 差 の順で返す。残業の根拠と 37条が同じ時間の内訳 (premiumMinutes) を出す', () => {
     const c = salaryRowCells(base)
     expect(c.amounts).toEqual([
-      { key: 'base', csv: 200000, sys: 150000, diff: 50000, basis: '最低賃金 1,000 円/h × 法定時間内 150h00m', breakdown: 'うち基本給 190,000 / 手当 10,000' },
-      { key: 'overtime', csv: 30000, sys: 14000, diff: 16000, basis: '最低賃金ベース × 残業時間 10h05m', breakdown: null },
-      { key: 'total', csv: 250000, sys: 164000, diff: 86000, basis: null, breakdown: null },
+      { key: 'base', csv: 200000, sys: 150000, diff: 50000, basis: ['最低賃金 1,000 円/h × 法定時間内 150h00m'], breakdown: 'うち基本給 190,000 / 手当 10,000' },
+      { key: 'overtime', csv: 30000, sys: 14000, diff: 16000, basis: ['最低賃金ベース (残業 10h05m)', '残業 14,000 円'], breakdown: null },
+      { key: 'total', csv: 250000, sys: 164000, diff: 86000, basis: [], breakdown: null },
     ])
-    expect(c.over37!.minutes).toBe(605)
+    expect(c.over37!.minutesText).toBe('残業 10h05m')
     expect(c.overtimeFixed).toBe(false)
   })
 
@@ -266,16 +287,30 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     expect(c.amounts[1]).toMatchObject({ key: 'overtime', diff: -25000 })
   })
 
-  it('★ 計算の根拠: 基本給 = 単価 × 法定時間内 (最低賃金と一致する月は「最低賃金」、違う月は「単価マスタ」、単価が無い月は計算なし)、残業 = 最低賃金ベース × 残業時間 (単価マスタとは書かない)', () => {
+  it('★ 計算の根拠: 基本給 = 単価 × 法定時間内 (最低賃金と一致する月は「最低賃金」、違う月は「単価マスタ」、単価が無い月は計算なし)、残業・深夜・休日 = 最低賃金ベースの時間と金額の内訳 (単価マスタとは書かない)', () => {
     const basis = (over: Partial<SalaryComparisonRow> = {}) => salaryRowCells({ ...base, ...over }).amounts.map(a => a.basis)
-    expect(basis()).toEqual(['最低賃金 1,000 円/h × 法定時間内 150h00m', '最低賃金ベース × 残業時間 10h05m', null])
-    expect(basis({ rateBasis: { hourlyRate: 1200, minWageRate: 1000 } } as Partial<SalaryComparisonRow>)[0]).toBe('単価マスタ 1,200 円/h × 法定時間内 150h00m')
-    expect(basis({ rateBasis: { hourlyRate: 1200, minWageRate: 1000 } } as Partial<SalaryComparisonRow>)[1]).toBe('最低賃金ベース × 残業時間 10h05m')
-    expect(basis({ rateBasis: { hourlyRate: 1000, minWageRate: null } } as Partial<SalaryComparisonRow>)[0]).toBe('単価マスタ 1,000 円/h × 法定時間内 150h00m')
+    expect(basis()).toEqual([['最低賃金 1,000 円/h × 法定時間内 150h00m'], ['最低賃金ベース (残業 10h05m)', '残業 14,000 円'], []])
+    expect(basis({ rateBasis: { hourlyRate: 1200, minWageRate: 1000 } } as Partial<SalaryComparisonRow>)[0]).toEqual(['単価マスタ 1,200 円/h × 法定時間内 150h00m'])
+    expect(basis({ rateBasis: { hourlyRate: 1200, minWageRate: 1000 } } as Partial<SalaryComparisonRow>)[1]).toEqual(['最低賃金ベース (残業 10h05m)', '残業 14,000 円'])
+    expect(basis({ rateBasis: { hourlyRate: 1000, minWageRate: null } } as Partial<SalaryComparisonRow>)[0]).toEqual(['単価マスタ 1,000 円/h × 法定時間内 150h00m'])
     expect(basis({ sysBase: null, diffBase: null, rateBasis: { hourlyRate: null, minWageRate: 1000 } } as Partial<SalaryComparisonRow>)[0])
-      .toBe('単価なし (単価マスタに単価が無い)')
-    expect(basis({ sysOvertime: null, diffOvertime: null } as Partial<SalaryComparisonRow>)[1]).toBe('最低賃金ベースの残業代なし (最低賃金が引けない)')
-    expect(salaryRowCells({ ...base, overtimeMinutes: 630 }).amounts[1]!.basis).toBe('最低賃金ベース × 残業時間 10h30m')
+      .toEqual(['単価なし (単価マスタに単価が無い)'])
+    // 計算を出せない月の理由は 3 通り: 最低賃金が引けない / 拘束時間が欠測 / 古い形の拘束の材料
+    const none = { sysOvertime: null, sysOvertimeParts: null, diffOvertime: null }
+    expect(basis({ ...none, rateBasis: { hourlyRate: 1000, minWageRate: null } } as Partial<SalaryComparisonRow>)[1]).toEqual(['最低賃金ベースの金額なし (最低賃金が引けない)'])
+    expect(basis(none as Partial<SalaryComparisonRow>)[1]).toEqual(['最低賃金ベースの金額なし (拘束時間が欠測)'])
+    expect(basis({ ...none, wageRowOutdated: true } as Partial<SalaryComparisonRow>)[1]).toEqual(['拘束の材料が古い形 (深夜と休日の欄が無い) — 取り直すと計算が出ます'])
+    // 時間は premiumMinutes (残業・深夜・休日) で、残業だけの overtimeMinutes ではない
+    expect(salaryRowCells({ ...base, overtimeMinutes: 630 }).amounts[1]!.basis[0]).toBe('最低賃金ベース (残業 10h05m)')
+    const withNightHoliday = salaryRowCells({
+      ...base,
+      sysOvertimeParts: { overtime: 14000, nightOvertime: 1500, night: 700, holiday: 9000 },
+      premiumMinutes: { overtime: 605, night: 180, holiday: 400 },
+    })
+    expect(withNightHoliday.amounts[1]!.basis).toEqual([
+      '最低賃金ベース (残業 10h05m・深夜 3h00m・休日 6h40m)', '残業 14,000 円', '時間外深夜 1,500 円', '法定時間内の深夜の割増 700 円', '休日労働 9,000 円',
+    ])
+    expect(withNightHoliday.over37!.minutesText).toBe('残業 10h05m・深夜 3h00m・休日 6h40m')
   })
 
   it('★ 基本給・残業の差が負 (明細が下回る) の月は diff が負で返る (画面が赤太字にする)。等しい月は 0、比べられない月は null', () => {
@@ -293,7 +328,7 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
 
   it('37条は理論値があれば 5 項目 + 根拠、差が負のときだけ shortfall', () => {
     expect(salaryRowCells(base).over37).toEqual({
-      rate: 1333.3, minutes: 605, theory: 16667, paid: 30000, diff: 13333, shortfall: false,
+      rate: 1333.3, minutesText: '残業 10h05m', theory: 16667, paid: 30000, diff: 13333, shortfall: false,
       rateBasis: '割増基礎 200,000 円 ÷ 150h00m', floored: false,
     })
     expect(salaryRowCells({ ...base, diffCsvVsBaseRateOvertime: -1 }).over37!.shortfall).toBe(true)
@@ -319,7 +354,7 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     expect(floored({ floored: false })).toBe(false)
   })
 
-  it('37条が出せないときは null と理由 (給与区分が不明 / 明細に時給の単価が無い / 割増の基礎に入る支給が 0 / 法定時間内が 0 / 最低賃金が引けない / 拘束時間が欠測)', () => {
+  it('37条が出せないときは null と理由 (給与区分が不明 / 明細に時給の単価が無い / 割増の基礎に入る支給が 0 / 法定時間内が 0 / 最低賃金が引けない / 拘束時間が欠測 / 拘束の材料が古い形)', () => {
     const reason = (none: SalaryComparisonRow['baseRateBasis']['none']) =>
       salaryRowCells({ ...base, baseRateOvertimePay: null, baseRateBasis: { ...base.baseRateBasis, none } }).over37NoneReason
     expect(salaryRowCells({ ...base, baseRateOvertimePay: null }).over37).toBeNull()
@@ -329,6 +364,7 @@ describe('salaryRowCells (画面の 3 段と紙面の 1 行が共用する行の
     expect(reason('no-denominator')).toBe('(法定時間内が 0)')
     expect(reason('no-min-wage')).toBe('(その月の最低賃金が引けない)')
     expect(reason('restraint-missing')).toBe('(拘束時間が欠測)')
+    expect(reason('wage-row-outdated')).toBe('(拘束の材料が古い形 — 取り直しが要る)')
     expect(salaryRowCells({ ...base, overtimeFixed: true }).overtimeFixed).toBe(true)
   })
 })
@@ -439,6 +475,9 @@ describe('salaryRowCells: 基本給の内訳・計算の根拠 (Refs #1133)', ()
     sysBase: 150000, diffBase: 50000, sysOvertime: 14000, diffOvertime: 16000,
     rateBasis: { hourlyRate: 1000, minWageRate: 1000 },
     overtimeMinutes: 600,
+    sysOvertimeParts: { overtime: 14000, nightOvertime: 0, night: 0, holiday: 0 },
+    premiumMinutes: { overtime: 600, night: 0, holiday: 0 },
+    wageRowOutdated: false,
     baseRateOvertimePay: 16667, baseRateActual: 1250, diffCsvVsBaseRateOvertime: 13333, csvPremiumBase: 200000,
     baseRateBasis: { kind: 'days', hours: 150, days: 20, daysSource: 'csv', capped: false, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null },
   } as unknown as SalaryComparisonRow
@@ -453,26 +492,27 @@ describe('salaryRowCells: 基本給の内訳・計算の根拠 (Refs #1133)', ()
 
   it('★ 基本給(計算) の根拠: 単価 × 法定時間内。最低賃金と一致する月は「最低賃金」。上回る月 (差が正) は負にならない', () => {
     const c = cells().amounts[0]!
-    expect(c).toMatchObject({ sys: 150000, diff: 50000, basis: '最低賃金 1,000 円/h × 法定時間内 150h00m' })
+    expect(c).toMatchObject({ sys: 150000, diff: 50000, basis: ['最低賃金 1,000 円/h × 法定時間内 150h00m'] })
   })
 
   it('★ 法定時間内の分が変われば根拠の時間も変わる (計算に使った時間 = wage report の法定時間内)', () => {
-    expect(cells({ statutoryMinutes: 9600 }).amounts[0]!.basis).toBe('最低賃金 1,000 円/h × 法定時間内 160h00m')
+    expect(cells({ statutoryMinutes: 9600 }).amounts[0]!.basis).toEqual(['最低賃金 1,000 円/h × 法定時間内 160h00m'])
   })
 
   it('単価マスタと最低賃金が違う月は「単価マスタ」と書く (最低賃金と呼ばない)。最低賃金が引けない月も同じ', () => {
-    expect(cells({ rateBasis: { hourlyRate: 1000, minWageRate: 1100 } }).amounts[0]!.basis).toBe('単価マスタ 1,000 円/h × 法定時間内 150h00m')
-    expect(cells({ rateBasis: { hourlyRate: 1000, minWageRate: null } }).amounts[0]!.basis).toContain('単価マスタ 1,000 円/h')
+    expect(cells({ rateBasis: { hourlyRate: 1000, minWageRate: 1100 } }).amounts[0]!.basis).toEqual(['単価マスタ 1,000 円/h × 法定時間内 150h00m'])
+    expect(cells({ rateBasis: { hourlyRate: 1000, minWageRate: null } }).amounts[0]!.basis[0]).toContain('単価マスタ 1,000 円/h')
   })
 
   it('★ 単価が無い (金額が引けない) 月は計算なし: 理由 1 行で計算も差も null', () => {
     const none = cells({ sysBase: null, diffBase: null, rateBasis: { hourlyRate: null, minWageRate: 1000 } }).amounts[0]!
-    expect(none).toMatchObject({ sys: null, diff: null, basis: '単価なし (単価マスタに単価が無い)' })
+    expect(none).toMatchObject({ sys: null, diff: null, basis: ['単価なし (単価マスタに単価が無い)'] })
   })
 
-  it('★ 残業(計算) = 行の最低賃金ベースの残業代、根拠は「最低賃金ベース × 残業時間 H」(単価マスタの名前も明細の残業単価も出さない)。引けなければ計算なし + 理由', () => {
-    expect(cells().amounts[1]).toMatchObject({ sys: 14000, diff: 16000, basis: '最低賃金ベース × 残業時間 10h00m' })
-    expect(cells({ rateBasis: { hourlyRate: 1200, minWageRate: 1000 } }).amounts[1]!.basis).toBe('最低賃金ベース × 残業時間 10h00m')
-    expect(cells({ sysOvertime: null, diffOvertime: null }).amounts[1]).toMatchObject({ sys: null, diff: null, basis: '最低賃金ベースの残業代なし (最低賃金が引けない)' })
+  it('★ 残業・深夜・休日(計算) = 行の最低賃金ベースの金額、根拠は「最低賃金ベース (時間の内訳)」+ 金額の内訳 (単価マスタの名前も明細の残業単価も出さない)。引けなければ計算なし + 理由', () => {
+    expect(cells().amounts[1]).toMatchObject({ sys: 14000, diff: 16000, basis: ['最低賃金ベース (残業 10h00m)', '残業 14,000 円'] })
+    expect(cells({ rateBasis: { hourlyRate: 1200, minWageRate: 1000 } }).amounts[1]!.basis).toEqual(['最低賃金ベース (残業 10h00m)', '残業 14,000 円'])
+    expect(cells({ sysOvertime: null, sysOvertimeParts: null, diffOvertime: null, rateBasis: { hourlyRate: 1000, minWageRate: null } }).amounts[1])
+      .toMatchObject({ sys: null, diff: null, basis: ['最低賃金ベースの金額なし (最低賃金が引けない)'] })
   })
 })

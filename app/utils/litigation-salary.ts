@@ -3,8 +3,8 @@
  *
  * 拘束×賃金の給与比較タブ (`restraint-wage.vue`) と**同じ比較** (`compareSalaryMonth`) を、
  * 案件の乗務員 × 月に並べる。比べるのは給与明細の実支給 (基本給・残業代・総支給) と、
- * 明細の【補助】単価 × システムの勤務日数・残業時間で出した額。残業時間は wage report が正本
- * (`SalaryComparisonRow.overtimeMinutes`、週 40 時間超を含む) で、ここでは数え直さない。
+ * wage report から出した計算 (基本給 = 単価マスタ × 法定時間内 / 残業・深夜・休日 = 最低賃金ベースの割増)。
+ * 金額も時間も wage report が正本 (`SalaryComparisonRow.sysOvertimeParts` / `premiumMinutes`) で、ここでは数え直さない。
  *
  * | 側 | 素材 | 口 |
  * | --- | --- | --- |
@@ -14,11 +14,11 @@
  * **金額と氏名はブラウザに残さない** (拘束×賃金と同じ方針、Refs #467) — 給与明細はメモリだけに持ち、
  * 開き直したら読み直す (保存済みの月は給与大臣を開かずに返るので速い)。
  */
-import { fmtMinutes, fmtYen, nextYm, WAGE_COLUMNS } from './restraint-wage-view'
+import { fmtMinutes, fmtYen, nextYm, premiumMinutesText, WAGE_COLUMNS } from './restraint-wage-view'
 import type { WageCategoryKey, WageReportResponse, WageReportRow } from './restraint-wage-view'
 import {
   BASE_RATE_NONE_LABELS, baseRateBasisText, compareSalaryMonth,
-  CSV_BASE_SALARY_ITEM_LABEL, suggestCdMapEntries,
+  CSV_BASE_SALARY_ITEM_LABEL, suggestCdMapEntries, sysOvertimeBasisLines,
 } from './salary-compare'
 import type { SalaryCdMap, SalaryComparisonRow, SalaryCsvRow, SalaryItemConfig, SalaryRateBasis } from './salary-compare'
 import { splitCdMapKey } from './employee-master'
@@ -246,15 +246,17 @@ export interface LitigationSalaryAmountCell {
   csv: number
   sys: number | null
   diff: number | null
-  /** 「計算」の根拠 (基本給 = `最低賃金 1,000 円/h × 法定時間内 150h00m`、残業 = `最低賃金ベース × 残業時間 10h00m`)。総支給は null (基本給と残業の和なので根拠を持たない) */
-  basis: string | null
+  /** 「計算」の根拠 (1 要素 = 1 行)。基本給 = `最低賃金 1,000 円/h × 法定時間内 150h00m` の 1 行、
+   * 残業・深夜・休日 = 時間の内訳と金額の内訳 (`sysOvertimeBasisLines`)。総支給は空 (基本給と 残業・深夜・休日 の和なので根拠を持たない) */
+  basis: string[]
   /** 基本給の明細の内訳 (`うち基本給 N / 手当 M`)。基本給だけ。 */
   breakdown: string | null
 }
 
 export interface LitigationSalaryOver37 {
   rate: number | null
-  minutes: number
+  /** 理論値が対象にしている時間の内訳 (`残業 10h00m・深夜 2h00m・休日 8h00m`。残業・深夜・休日(計算) と同じ時間) */
+  minutesText: string
   theory: number
   paid: number
   diff: number | null
@@ -267,7 +269,7 @@ export interface LitigationSalaryOver37 {
 }
 
 export interface LitigationSalaryRowCells {
-  /** 基本給・残業・総支給 (明細 / 計算 / 差) */
+  /** 基本給・残業 (残業・深夜・休日)・総支給 (明細 / 計算 / 差) */
   amounts: LitigationSalaryAmountCell[]
   /** 月給 (固定残業) — 残業のセルに注記を付ける */
   overtimeFixed: boolean
@@ -299,15 +301,6 @@ function baseBasisText(c: SalaryComparisonRow): string {
 }
 
 /**
- * 残業(計算) の根拠。計算 = wage report の最低賃金ベースの残業代 (最低賃金を基礎額にした割増。ここで掛け算しない)。
- * 時間は行の `overtimeMinutes` (足し直さない)。最低賃金ベースなので単価マスタの名前は出さない。
- */
-function overtimeBasisText(c: SalaryComparisonRow): string {
-  if (c.sysOvertime === null) return '最低賃金ベースの残業代なし (最低賃金が引けない)'
-  return `最低賃金ベース × 残業時間 ${fmtMinutes(c.overtimeMinutes)}`
-}
-
-/**
  * 比較済みの 1 行を、表示用のセル一式にする。画面と印刷の紙面は同じ縦に積んだセル
  * (明細 / 計算 / 差 + 根拠) をこれで組む。
  */
@@ -315,21 +308,21 @@ export function salaryRowCells(c: SalaryComparisonRow): LitigationSalaryRowCells
   return {
     amounts: [
       {
-        key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: baseBasisText(c),
+        key: 'base', csv: c.csvBase, sys: c.sysBase, diff: c.diffBase, basis: [baseBasisText(c)],
         breakdown: baseBreakdownText(c.csvBaseItems),
       },
       {
         key: 'overtime', csv: c.csvOvertime, sys: c.sysOvertime, diff: c.diffOvertime,
-        basis: overtimeBasisText(c), breakdown: null,
+        basis: sysOvertimeBasisLines(c), breakdown: null,
       },
-      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal, basis: null, breakdown: null },
+      { key: 'total', csv: c.csvTotal, sys: c.sysTotal, diff: c.diffTotal, basis: [], breakdown: null },
     ],
     overtimeFixed: c.overtimeFixed,
     over37: c.baseRateOvertimePay === null
       ? null
       : {
           rate: c.baseRateActual,
-          minutes: c.overtimeMinutes,
+          minutesText: premiumMinutesText(c.premiumMinutes),
           theory: c.baseRateOvertimePay,
           paid: c.csvOvertime,
           diff: c.diffCsvVsBaseRateOvertime,

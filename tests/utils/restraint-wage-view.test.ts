@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs, TimecardKosokuState, WageInvariantCheck, WageReportResponse } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, fmtRatePerHour, groupMinWageRows, isMonthlyOvertimeOver60h, isOver60hPremiumMonth, OVERTIME_OVER60H_EFFECTIVE_FROM, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthlyOvertimeMinutes, monthlyOvertimeOver60hMinutes, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, fmtRatePerHour, groupMinWageRows, isMonthlyOvertimeOver60h, isOver60hPremiumMonth, OVERTIME_OVER60H_EFFECTIVE_FROM, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthlyOvertimeMinutes, monthlyOvertimeOver60hMinutes, premiumMinutesOf, premiumMinutesText, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -515,6 +515,33 @@ describe('fmtYen が `-0` を出さない (Refs #843)', () => {
     expect(fmtYen(50000)).toBe('50,000')
     expect(fmtYen(null)).toBe('-')
     expect(fmtYen(undefined)).toBe('-')
+  })
+})
+
+describe('premiumMinutesOf / premiumMinutesText (給与比較の「残業・深夜・休日」の金額に添える時間、Refs #1133)', () => {
+  const minutes = { statutory: 9000, overtime: 3000, night: 240, overtimeNight: 420, nonLegalHoliday: 300, nonLegalHolidayNight: 60, legalHoliday: 480, legalHolidayNight: 30, weekly40Excess: 510 }
+  const wage = { minutes, overtimeMinutes: 3510, nightOvertimeMinutes: 420 }
+
+  it('残業 = 時間外 + 週40超過 + 時間外深夜 (monthlyOvertimeMinutes と同じ) / 深夜 = 法定時間内の深夜 / 休日 = 休日の 4 区分の和', () => {
+    const p = premiumMinutesOf(wage)
+    expect(p).toEqual({ overtime: 3930, night: 240, holiday: 300 + 60 + 480 + 30 })
+    expect(p.overtime).toBe(monthlyOvertimeMinutes(wage))
+    // 法定時間内・時間外深夜は 深夜 にも 休日 にも入らない
+    expect(premiumMinutesOf({ ...wage, minutes: { ...minutes, statutory: 0, overtimeNight: 0 } })).toEqual(p)
+  })
+
+  it('休日の 4 区分はどれを変えても 休日 が動く / 深夜だけを変えても 残業・休日 は動かない', () => {
+    for (const key of ['legalHoliday', 'legalHolidayNight', 'nonLegalHoliday', 'nonLegalHolidayNight'] as const) {
+      expect(premiumMinutesOf({ ...wage, minutes: { ...minutes, [key]: minutes[key] + 60 } }).holiday).toBe(870 + 60)
+    }
+    expect(premiumMinutesOf({ ...wage, minutes: { ...minutes, night: 0 } })).toEqual({ overtime: 3930, night: 0, holiday: 870 })
+  })
+
+  it('表示は「残業 a・深夜 b・休日 c」。深夜・休日は 0 分なら省き、残業は 0 分でも出す', () => {
+    expect(premiumMinutesText({ overtime: 3930, night: 240, holiday: 870 })).toBe('残業 65h30m・深夜 4h00m・休日 14h30m')
+    expect(premiumMinutesText({ overtime: 600, night: 0, holiday: 0 })).toBe('残業 10h00m')
+    expect(premiumMinutesText({ overtime: 0, night: 30, holiday: 0 })).toBe('残業 0h00m・深夜 0h30m')
+    expect(premiumMinutesText({ overtime: 0, night: 0, holiday: 480 })).toBe('残業 0h00m・休日 8h00m')
   })
 })
 
