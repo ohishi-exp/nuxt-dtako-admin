@@ -1295,6 +1295,14 @@ describe("checkKyuyoAccess — 上流切替 (Refs ohishi-exp/rust-ichibanboshi#3
     expect(await checkKyuyoAccess(worker(reply(res(404))), "jwt")).toEqual(unreachable);
   });
 
+  it("worker: 戻りが null / status が数値でない / body 無しでも 503 (許可にも未設定の文にも倒れない)", async () => {
+    const bad = (v: unknown) => worker(async () => v as Res);
+    expect(await checkKyuyoAccess(bad(null), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(bad(undefined), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(bad({ status: "200", body: "" }), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(bad({ status: 503 }), "jwt")).toEqual(unreachable);
+  });
+
   it("worker: binding 未設定 / reject は 503", async () => {
     expect(
       await checkKyuyoAccess({ ...base, kyuyoUpstream: { mode: "worker", binding: undefined } }, "jwt"),

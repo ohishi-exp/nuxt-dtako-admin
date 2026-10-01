@@ -964,18 +964,22 @@ async function checkKyuyoAccessViaWorker(
 ): Promise<KyuyoAccessDenial | null> {
   const unreachable = { status: 503, message: KYUYO_WORKER_UNREACHABLE_MESSAGE };
   if (!binding) return unreachable;
-  let res: { status: number; body: string };
+  let raw: unknown;
   try {
-    res = await binding.authorize(token);
+    raw = await binding.authorize(token);
   } catch {
     return unreachable;
   }
+  // RPC の戻りは型で守られない (null / status が数値でない値)。許可に倒さず 503 に寄せる
+  const res = raw as { status?: unknown; body?: unknown } | null;
+  if (!res || typeof res.status !== "number") return unreachable;
+  const body = typeof res.body === "string" ? res.body : "";
   if (res.status === 200) return null;
   if (res.status === 401) {
     return { status: KYUYO_ACCESS_UNIDENTIFIED_STATUS, message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE };
   }
   if (res.status === 403) return { status: 403, message: "給与の閲覧許可リストに無いアカウントです" };
-  if (kyuyoAccessMessage(res.body, res.status) === "kyuyo_allowlist_unset") {
+  if (kyuyoAccessMessage(body, res.status) === "kyuyo_allowlist_unset") {
     return { status: 503, message: "給与の閲覧許可リストが未設定です" };
   }
   return unreachable;
