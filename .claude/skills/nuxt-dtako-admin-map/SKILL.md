@@ -308,8 +308,11 @@ Environment Variable であり、wrangler.toml には無い (git 履歴に平文
 
 ## Y時間 エクスポート (`/y-time-export` ページ)
 
-京都ソフト案件などの拘束時間管理 Excel テンプレに、KUDGIVT.csv 由来の日別始業/終業/休憩を
-追記してダウンロードする機能。
+京都ソフト案件などの拘束時間管理 Excel テンプレに、日別始業/終業/休憩を追記してダウンロードする機能。
+**行の元は勤怠の勤務の記録** (wage report と同じ元)。勤怠の記録が無い会社・勤怠の設定が無い環境だけ、
+運行 (デジタコの KUDGIVT.csv) から作る — 下の「…勤怠の勤務の記録から作る」の節が正。
+このページのプレビュー (`POST /api/y-time-rows`) とダウンロード (`POST /api/y-time-export`) は同じ util を通り、
+どちらの元で作ったかを画面に出す。
 
 ### アーキテクチャ
 
@@ -318,10 +321,12 @@ Environment Variable であり、wrangler.toml には無い (git 履歴に平文
   │ POST /api/y-time-export
   ▼
 [Worker server route /api/y-time-export]
-  │ 1. backend (rust-alc-api) GET /api/dtako/y-time-export を auth-worker /alc-proxy
-  │    経由で叩く (server/utils/alc-proxy.ts の alcProxyFetch、OIDC mint は auth-worker
-  │    に委譲。Cloud Run IAM lockdown 対応、Refs rust-alc-api#434 step 3 方式 B)
-  │    └ backend は parallel R2 fetch (buffer_unordered 16) で 5-15s で結果返却
+  │ 1. Y時間 の行を取る (server/utils/y-time-rows.ts の fetchYTimeRows)。
+  │    勤怠の元: relay POST /kintai-relay/y-time-shifts → backend POST /api/dtako/y-time-rows
+  │    運行の元 (倒したときだけ): backend (rust-alc-api) GET /api/dtako/y-time-export
+  │    backend はどちらも auth-worker /alc-proxy 経由 (server/utils/alc-proxy.ts の alcProxyFetch、
+  │    OIDC mint は auth-worker に委譲。Cloud Run IAM lockdown 対応、Refs rust-alc-api#434 step 3 方式 B)
+  │    └ 運行の元の backend は parallel R2 fetch (buffer_unordered 16) で 5-15s で結果返却
   │ 2. R2 binding (DTAKO_R2) でテンプレ xlsx fetch
   │ 3. JSZip single-pass row-batch で Y時間 シート書き込み (PR #30 で 150x 高速化)
   └ xlsx blob 返却
@@ -396,10 +401,12 @@ fail することが本番で発覚 → revert。
 
 | ファイル | 役割 |
 |---|---|
-| `app/pages/y-time-export.vue` | UI、`fetch('/api/y-time-export')` で server route 呼び出し |
-| `server/api/y-time-export.post.ts` | backend GET → R2 テンプレ → JSZip xlsx 生成 |
+| `app/pages/y-time-export.vue` | UI、`fetch('/api/y-time-export')` で server route 呼び出し。プレビューは `getYTimeRows()` |
+| `server/api/y-time-export.post.ts` | Y時間 の行 (`fetchYTimeRows`) → R2 テンプレ → JSZip xlsx 生成 |
+| `server/api/y-time-rows.post.ts` | 同じ行を JSON で返す (プレビューと、訴訟準備のエラータブの検知) |
+| `server/utils/y-time-rows.ts` | 行の元・倒し方・1 社固定の認可・失敗の形・2 つの route の body の検証 |
 | `app/utils/y-time-xlsx.ts` | JSZip single-pass writer (PR #30)。`yTimeRowInputCells` (1 行が入力列 F〜O のどのセルに何を書くか) もここ |
-| `app/utils/api.ts` | `getYTimePreview()` (preview ボタン用、sync GET) |
+| `app/utils/api.ts` | `getYTimeRows()` (`POST /api/y-time-rows` を呼ぶ。失敗は status と本文つきの `ResponseFailure`) |
 
 ### 訴訟準備の出力タブの「月ごとの時間」は wage report から作る (Refs #1133 c1133-36)
 
@@ -448,15 +455,19 @@ relay の機械用の口 `POST /kintai-relay/y-time-shifts` — body `{driver_cd
 - 手元の確認: relay を `wrangler dev --local` で起こし、`AUTH_WORKER` を `/ichibanboshi-proxy/api/kintai/shift-days`
   を返すスタブの worker へ向けて curl する (`dev-login-local-verify` の relay の行)
 
-### 訴訟準備の Y時間 の Excel は勤怠の勤務の記録から作る (Refs #1133 c1133-46)
+### Y時間 の行は勤怠の勤務の記録から作る (Refs #1133 c1133-46 / c1133-47)
 
-`POST /api/y-time-export` の行の元は 2 つ。**どちらで作るか・倒し方・1 社固定の認可・失敗の形は
-`server/utils/y-time-rows.ts` の `fetchYTimeRows` が持つ** (route は呼んで Excel に書くだけ)。
+Y時間 の行の元は 2 つ。**どちらで作るか・倒し方・1 社固定の認可・失敗の形は
+`server/utils/y-time-rows.ts` の `fetchYTimeRows` が持つ**。呼び手は route 2 本で、どちらも呼ぶだけ:
+`POST /api/y-time-export` (Excel に書く。訴訟準備の出力タブと `/y-time-export` ページのダウンロード) と
+`POST /api/y-time-rows` (JSON で返す。訴訟準備のエラータブの「検知を実行」と `/y-time-export` ページのプレビュー)。
+**どの呼び出しも勤怠の元を試す** — 同じ人・同じ期間なら、4 つの画面の口が同じ元の行を見る。
+`period_rewrite` は「テンプレの期間を振り直すか」だけで、行の元とは関係ない。
 
 | 元 | 経路 | いつ |
 |---|---|---|
-| `kintai` | relay `POST /kintai-relay/y-time-shifts` → 上流 `POST /api/dtako/y-time-rows` | `period_rewrite: true` (訴訟準備の出力) |
-| `alc` | 上流 `GET /api/dtako/y-time-export` (運行 = デジタコ) | `period_rewrite` の無い呼び出し (`/y-time-export` ページ)、と下の 3 つの形 |
+| `kintai` | relay `POST /kintai-relay/y-time-shifts` → 上流 `POST /api/dtako/y-time-rows` | いつも (まずこちらを試す) |
+| `alc` | 上流 `GET /api/dtako/y-time-export` (運行 = デジタコ) | 下の 3 つの形のときだけ |
 
 - **行の規則・休憩の配り方・時間の計算をこの repo に書かない。** relay の `shifts` をそのまま上流へ、
   上流の `rows` をそのまま `writeYTimeRows` へ (wage report と同じ元。2 つ目の計算を置かない)
@@ -465,23 +476,44 @@ relay の機械用の口 `POST /kintai-relay/y-time-shifts` — body `{driver_cd
   (`out_of_scope`)。**それ以外の失敗は倒さず投げる** (読めなかったことを運行の元にすり替えない)
 - **1 社固定の認可**: relay へ渡す `tenant_id` は `requireAuth` の結果 (利用者の body からは取らない)。
   **relay の応答の `tenant_id` が認証結果と一致してから**上流へ渡す (違えば 500・上流を呼ばない)。
-  認証結果に `tenant_id` が無ければ relay も呼ばず 500 (勤怠を試す呼び出しだけ)
+  認証結果に `tenant_id` が無ければ relay も呼ばず 500 (どの呼び出しも。照合できない状態を通さない)
+- **前置き (secret → `requireAuth` → role) は `server/utils/scraper-relay.ts` の `authorizeScraperRelay` 1 本** —
+  戻り値が `tenantId` (認証結果の値) を持ち、2 つの route はそれをそのまま `fetchYTimeRows` へ渡す
+  (`requireAuth` は 1 回)。`driver_cd` / `from` / `to` の検証も util の `yTimeRowsInputFromBody` 1 本。
+  **`POST /api/y-time-rows` は role の関門 (admin / payroll) を通る** — 以前のプレビュー (ブラウザが上流の GET を
+  中継ごしに叩く) は通っていなかったので、admin / payroll でない利用者のプレビューは 403 になる
+- **期間が 400 日を超える呼び出しは、勤怠の元では失敗する** (relay の検証が 400 を返し、util が 400 のまま投げる。
+  文に relay の理由が出る)。訴訟準備は 1 冊 12 か月なので当たらない。`/y-time-export` ページは期間が自由入力で、
+  テンプレ既定の期間 (407 日) をそのまま入れると当たる
 - 勤怠の経路の失敗は `data: {source: 'kintai', stage, status, error, reason}` で、**`upstream: 'alc'` を付けない**
   (画面は 404 + `upstream: 'alc'` を「乗務員CD が alc に未登録」と読む)。画面に出す 1 文は `message`、
-  `statusMessage` は ASCII。利用者へ返す status は、上流の 401 / 403 と 5xx だけそのまま、relay の 4xx と
-  上流のほかの 4xx は 502 (利用者が送った内容の話ではないため)
+  `statusMessage` は ASCII。利用者へ返す status は、上流の 401 / 403・**relay の 400** (入力の検証 = 利用者が
+  直せる内容)・5xx だけそのまま、relay のほかの 4xx と上流のほかの 4xx は 502 (利用者が送った内容の話ではないため)
 - 応答ヘッダ (`yTimeSourceHeaders`。値は ASCII の決まった語だけ): `x-y-time-source` /
   `-source-reason` / `-excluded-reasons` (`reason=件数`、全件) / `-excluded` (先頭 20 件の `始業の日付:reason`) /
-  `-missing-months`。読む側は `app/utils/litigation-output.ts` の `yTimeSourceFromHeaders` (冊を引数に取らない)
+  `-missing-months`。読む側は `app/utils/litigation-output.ts` の `yTimeSourceFromHeaders` (冊を引数に取らない)。
+  JSON の口は本文で同じ内容を返し (`{source, source_reason, rows, warnings, excluded, missing_months}`。
+  `driver` / `period` は運行の元だけ — 勤怠の元に補わない)、front は `parseYTimeRowsPreview` で形を検査して
+  `yTimeSourceFromPreview` で同じ 5 欄にする (`/y-time-export` ページは名前を乗務員の一覧から、期間を入力から出す)
+- 失敗の読み (front): `getYTimeRows` は status と本文つきの `ResponseFailure` (`app/utils/api-error.ts`) を投げる。
+  「乗務員CD が alc に未登録」は **404 かつ本文の `data.upstream = 'alc'`** のときだけで、判定は `isAlcDriverNotFound`
+  1 か所 (出力タブ・エラータブ・`/y-time-export` ページが共用)。`source` の語の一覧の定義も 1 か所
+  (`litigation-errors.ts` の `Y_TIME_SOURCES` / `Y_TIME_SOURCE_REASONS`)
 - 画面: 結果の 5 欄 (`source` / `sourceReason` / `excludedReasons` / `excluded` / `missingMonths`) は**どれも optional**。
   **欄の無い結果 (前に保存した版) は運行から作ったものとして読む** — 元を決めるのは
   `litigation-errors.ts` の `litigationResultFromKintai` 1 か所。行が 0 件の文は `litigationEmptyMessage`、
   冊ごとの表示 (元・行を作れなかった勤務・「勤怠の畳み直しが要ります」・勤務の記録が無い月) は
   `litigationOutputSourceLines` (出力タブの表と紙面が共用)。版の形の番号は上げていない
-- エラータブ: 出力タブの結果からの早回り (検知の前に「alc の運行」を異常ありにして取り込みのボタンを出す) は
-  **運行の元のときだけ**。勤怠の元の 0 件は未実行のまま。行を作れなかった勤務が在る冊は「Y時間の欠け」が異常あり
-- **検知の列 (「検知を実行」= 運行の経路のプレビュー) と `/y-time-export` ページはまだ運行の元** — 出力タブ (勤怠の元) と
-  物差しが違う。そろえるのは次の作業 (同じ util を使う)
+- エラータブの 1 列目 (保存の `kind` は `alcOps` のまま) の見出しは元を言わない **「Y時間の勤務日」** で、セルの文が元を言う
+  (勤怠の元 = 「勤務日 N 日 (勤怠の記録)」/ 0 日は「勤怠の記録から作れた勤務日が 0 日」)。**列の名前を文に書くところは
+  `LITIGATION_CHECK_LABELS` から組む** (見出しを変えても文が追随する)。
+  **運行の取り込みのボタン (`canImport`) は運行の元で異常ありのときだけ** — 勤怠の元の 0 日は運行を取り込んでも直らない。
+  出力タブの結果からの早回り (検知の前に 1 列目を異常ありにする) も運行の元のときだけで、勤怠の元の 0 件は未実行のまま
+- エラータブの 2 列目「Y時間の欠け」: 勤怠の元は、**その月に振り分けた「行を作れなかった勤務」が 1 件でも在れば異常あり**
+  (`foldYTimeExcludedByMonth`: 始業の月 → 区切りの外なら終業の月 → どちらも外なら区切りの最初の月。落とさない)。
+  運行NO の形の警告を拾う検知 (`foldYTimeDroppedByMonth`) は運行の元のときだけ。ZIP を作った冊は出力タブの結果も合わせる
+- 保存済みの検知結果: entry の `source` / `excluded` は **optional**。**欄の無い保存 (前の形) は捨てず、運行から読んだ結果として出す**
+  (`restoreAlcOps` は「在れば型を検査、無ければ通す」)。出力タブの版と同じ読み方
 - 手元の確認: front の dev は `SCRAPER_RELAY` の binding が無いので必ず `not_configured` に倒れる。勤怠の元を見るには、
   relay と上流を肩代わりするスタブの worker を別 port で立てて service binding で向ける (`dev-login-local-verify`)
 

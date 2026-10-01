@@ -8,6 +8,8 @@
  *    認証結果に tenant が無ければ relay も呼ばない
  * 3. 運行の経路へ倒すのは 3 つの形だけ。それ以外の失敗は投げて、運行の GET を呼ばない
  * 4. 勤怠の経路の失敗に `upstream: 'alc'` を付けない (404 を「乗務員CD が alc に未登録」と読ませない)
+ * 5. どの呼び出しも勤怠の元を試す (試さない呼び方は無い。Refs #1133 c1133-47)
+ * 6. route の body の検証 (`yTimeRowsInputFromBody`) — 2 つの route が共用する
  *
  * 値はすべて架空。
  */
@@ -21,10 +23,10 @@ const { sendToScraperRelayMock, alcProxyFetchMock } = vi.hoisted(() => ({
 vi.mock('../../server/utils/scraper-relay', () => ({ sendToScraperRelay: sendToScraperRelayMock }))
 vi.mock('../../server/utils/alc-proxy', () => ({ alcProxyFetch: alcProxyFetchMock }))
 
-import { fetchYTimeRows, yTimeSourceHeaders, Y_TIME_EXCLUDED_HEADER_LIMIT, type YTimeRowsResult } from '../../server/utils/y-time-rows'
+import { fetchYTimeRows, yTimeRowsInputFromBody, yTimeSourceHeaders, Y_TIME_EXCLUDED_HEADER_LIMIT, type YTimeRowsResult } from '../../server/utils/y-time-rows'
 
 const INPUT = { driverCd: '9001', from: '2025-01-01', to: '2025-12-31' }
-const KINTAI = { tryKintai: true, tenantId: 'tenant-a', sharedSecret: 'secret-x' }
+const KINTAI = { tenantId: 'tenant-a', sharedSecret: 'secret-x' }
 
 const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { env } } }) as unknown as H3Event
 /** binding が在る環境 (中身は `sendToScraperRelay` を mock しているので呼ばれない) */
@@ -213,7 +215,8 @@ describe('fetchYTimeRows — 倒さない失敗 (黙って運行の元にすり�
     ['502 (1 つの月が読めない)', 502, { error: 'gcp kintai shift-days 2025-03: failed' }, 502],
     ['401 (secret が合わない)', 401, { error: 'Unauthorized' }, 502],
     ['404', 404, null, 502],
-    ['400 (検証)', 400, { error: 'period too long' }, 502],
+    // relay の 400 は入力の検証でしか出ない (利用者が直せる) ので、400 のまま返す。ほかの 4xx は 502
+    ['400 (検証)', 400, { error: 'from〜to は 400 日以内にしてください: 2025-01-01..2026-03-31' }, 400],
     ['reason の無い 503', 503, { error: 'kintai-relay not configured' }, 503],
     ['tenant not resolved の 503', 503, { error: 'tenant not resolved from dtako_accounts' }, 503],
     ['error が別の 403', 403, { error: 'forbidden' }, 502],
@@ -229,6 +232,19 @@ describe('fetchYTimeRows — 倒さない失敗 (黙って運行の元にすり�
     expect(e.statusCode).toBe(expected)
     expect(e.data).toMatchObject({ source: 'kintai', stage: 'relay', status })
     expect(e.data).not.toHaveProperty('upstream')
+    expect(alcProxyFetchMock).not.toHaveBeenCalled()
+  })
+
+  it('★ relay の 400 は 400 のまま: 画面の 1 文に relay の理由が読め、data と statusMessage の形は変わらない', async () => {
+    const error = 'from〜to は 400 日以内にしてください: 2025-01-01..2026-03-31'
+    sendToScraperRelayMock.mockRejectedValue(relayError(400, { error }))
+    routeUpstream({ rows: () => rowsOk(), alc: () => alcOk() })
+    const e = await rejection(fetchYTimeRows(withRelay(), INPUT, KINTAI))
+    expect(e.statusCode).toBe(400)
+    expect(e.message).toBe(`勤怠の勤務の記録を読めませんでした (relay 400: ${error})`)
+    expect(e.statusMessage).toBe('kintai y-time rows failed (relay)')
+    expect(e.data).toEqual({ source: 'kintai', stage: 'relay', status: 400, error })
+    // 倒さない (運行の GET を呼ばない)・上流も呼ばない
     expect(alcProxyFetchMock).not.toHaveBeenCalled()
   })
 
@@ -272,20 +288,49 @@ describe('fetchYTimeRows — 倒さない失敗 (黙って運行の元にすり�
   })
 })
 
-describe('fetchYTimeRows — 勤怠を試さない呼び出し', () => {
-  it('★ relay を呼ばず、tenant が無くても今までの運行の GET だけを呼ぶ (倒した理由は持たない)', async () => {
-    routeUpstream({ alc: () => alcOk() })
-    const res = await fetchYTimeRows(withRelay(), INPUT, { tryKintai: false, tenantId: undefined, sharedSecret: 'secret-x' })
-    expect(sendToScraperRelayMock).not.toHaveBeenCalled()
-    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-export'])
-    expect(res).toMatchObject({ source: 'alc', sourceReason: null, rows: [{ date: '2025-03-01' }] })
+describe('fetchYTimeRows — 試さない呼び方は無い (Refs #1133 c1133-47)', () => {
+  it('★ 認可の結果 (`authorizeScraperRelay` の戻り値の形) をそのまま渡せば、relay を呼ぶ', async () => {
+    sendToScraperRelayMock.mockResolvedValue(relayOk())
+    routeUpstream({ rows: () => rowsOk(), alc: () => alcOk() })
+    const res = await fetchYTimeRows(withRelay(), INPUT, { sharedSecret: 'secret-x', tenantId: 'tenant-a' })
+    expect(sendToScraperRelayMock).toHaveBeenCalledTimes(1)
+    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-rows'])
+    expect(res.source).toBe('kintai')
   })
 
-  it('運行の GET の失敗は status と本文で投げる (本文が読めなければ statusText)', async () => {
+  it('倒した先の運行の GET で本文が読めなければ statusText を理由にする', async () => {
     routeUpstream({ alc: () => ({ ok: false, status: 502, statusText: 'Bad Gateway', text: async () => { throw new Error('x') } }) as unknown as Response })
-    const e = await rejection(fetchYTimeRows(withRelay(), INPUT, { tryKintai: false, tenantId: 'tenant-a', sharedSecret: 's' }))
+    const e = await rejection(fetchYTimeRows(eventWith({}), INPUT, KINTAI))
     expect(e.statusCode).toBe(502)
     expect(e.statusMessage).toBe('backend error: Bad Gateway')
+  })
+})
+
+describe('yTimeRowsInputFromBody — 2 つの route が共用する body の検証', () => {
+  it('★ 3 欄を読んで返す。body のほかの欄 (tenant_id・template_key) は読まない', () => {
+    expect(yTimeRowsInputFromBody({ driver_cd: '9001', from: '2025-01-01', to: '2025-01-31', tenant_id: 'tenant-b', template_key: 'templates/x.xlsx' }))
+      .toStrictEqual({ driverCd: '9001', from: '2025-01-01', to: '2025-01-31' })
+  })
+
+  it.each([
+    ['null', null],
+    ['文字列', 'x'],
+    ['配列', ['9001', '2025-01-01', '2025-01-31']],
+    ['空の object', {}],
+    ['driver_cd が空', { driver_cd: '', from: '2025-01-01', to: '2025-01-31' }],
+    ['driver_cd が数', { driver_cd: 9001, from: '2025-01-01', to: '2025-01-31' }],
+    ['from が無い', { driver_cd: '9001', to: '2025-01-31' }],
+    ['to が空', { driver_cd: '9001', from: '2025-01-01', to: '' }],
+  ])('★ %s は 400 (statusMessage は ASCII)', (_name, body) => {
+    let thrown: { statusCode?: number, statusMessage?: string } = {}
+    try {
+      yTimeRowsInputFromBody(body)
+    }
+    catch (e) {
+      thrown = e as typeof thrown
+    }
+    expect(thrown.statusCode).toBe(400)
+    expect(thrown.statusMessage).toBe('driver_cd / from / to are required')
   })
 })
 

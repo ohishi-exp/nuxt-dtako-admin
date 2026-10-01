@@ -20,7 +20,7 @@ import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
 
 const { api, saved } = vi.hoisted(() => ({
-  api: { getDrivers: vi.fn(), getYTimePreview: vi.fn(), getDtakoOperationChanges: vi.fn() },
+  api: { getDrivers: vi.fn(), getYTimeRows: vi.fn(), getDtakoOperationChanges: vi.fn() },
   saved: [] as { blob: Blob, name: string }[],
 }))
 
@@ -33,7 +33,7 @@ vi.mock('@ippoan/auth-client', () => ({ useAuth: () => ({ token: { value: 'jwt-t
 vi.mock('~/utils/api', async importOriginal => ({
   ...(await importOriginal<typeof import('~/utils/api')>()),
   getDrivers: api.getDrivers,
-  getYTimePreview: api.getYTimePreview,
+  getYTimeRows: api.getYTimeRows,
   getDtakoOperationChanges: api.getDtakoOperationChanges,
 }))
 
@@ -139,7 +139,7 @@ beforeEach(() => {
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
   api.getDrivers.mockResolvedValue([{ id: 'd1', driver_cd: '1078', driver_name: '甲野太郎' }])
-  api.getYTimePreview.mockResolvedValue({ driver: { cd: '1078', name: '甲野太郎' }, period: {}, rows: [], warnings: [] })
+  api.getYTimeRows.mockResolvedValue({ source: 'alc', source_reason: 'not_configured', rows: [], warnings: [], excluded: [], missing_months: [] })
   kintaiHandler = () => ({
     driver: '1078', recording_since: '2026-09-25',
     changes: [{

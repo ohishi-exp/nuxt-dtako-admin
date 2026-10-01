@@ -13,7 +13,9 @@ import {
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
   foldYTimeDroppedByMonth,
+  foldYTimeExcludedByMonth,
   invariantsCell,
+  litigationAlcOpsEntries,
   litigationAlcOpsFailure,
   litigationChunkMonths,
   litigationChunkWarnings,
@@ -29,6 +31,8 @@ import {
   restoreLitigationChecks,
   unkoGapsCell,
   yTimeCell,
+  LITIGATION_CHECK_LABELS,
+  LITIGATION_REFOLD_NOTICE,
   type LitigationAlcOpsEntry,
   type LitigationErrorInput,
   type LitigationDtakoOps,
@@ -36,6 +40,7 @@ import {
 } from '~/utils/litigation-errors'
 import type { LitigationOutputChunk, LitigationOutputResult } from '~/utils/litigation-output'
 import type { WageInvariantCheck, WageReportResponse, WageReportRow } from '~/utils/restraint-wage-view'
+import type { YTimeRow, YTimeRowsPreview } from '~/types'
 
 function result(over: Partial<LitigationOutputResult> = {}): LitigationOutputResult {
   return {
@@ -103,21 +108,50 @@ describe('月の小道具', () => {
   })
 })
 
-describe('alcOpsCell (alc の運行)', () => {
+describe('alcOpsCell (Y時間の勤務日)', () => {
+  it('★ 列の見出しは元を言わない「Y時間の勤務日」(元はセルの文で言う)', () => {
+    expect(LITIGATION_CHECK_LABELS.alcOps).toBe('Y時間の勤務日')
+  })
+
   it('★ 0 日は異常あり、1 日以上は異常なし', () => {
     expect(alcOpsCell({ ok: true, days: 0, dropped: [] }, null)).toEqual({ state: 'ng', message: 'alc に運行が 0 件 (Y時間の勤務日 0 日)' })
     expect(alcOpsCell({ ok: true, days: 12, dropped: [] }, null)).toEqual({ state: 'ok', message: '勤務日 12 日' })
   })
 
   it('★ 取れなかったときは 0 件と言わず判定できない (理由つき)', () => {
-    expect(alcOpsCell(litigationAlcOpsFailure(500, '500 失敗しました'), null)).toEqual({ state: 'unknown', message: '500 失敗しました' })
-    expect(alcOpsCell(litigationAlcOpsFailure(null, 'サーバに接続できませんでした'), null).state).toBe('unknown')
+    expect(alcOpsCell(litigationAlcOpsFailure(500, null, '500 失敗しました'), null)).toEqual({ state: 'unknown', message: '500 失敗しました' })
+    expect(alcOpsCell(litigationAlcOpsFailure(null, null, 'サーバに接続できませんでした'), null).state).toBe('unknown')
   })
 
-  it('404 は乗務員CD が alc に未登録 — 数えられないので判定できない', () => {
-    const entry = litigationAlcOpsFailure(404, '404 …')
+  it('404 かつ本文の印 (data.upstream = alc) は乗務員CD が alc に未登録 — 数えられないので判定できない', () => {
+    const entry = litigationAlcOpsFailure(404, { data: { upstream: 'alc' } }, '404 …')
     expect(entry).toEqual({ ok: false, notFound: true, reason: '404 …' })
     expect(alcOpsCell(entry, null)).toEqual({ state: 'unknown', message: '乗務員CD が alc に未登録 (404) — 運行を数えられない' })
+  })
+
+  it('★ 404 でも、運行の経路の印が無い失敗 (勤怠の経路・印なし) は「alc に未登録」と言わず、届いた 1 文をそのまま出す', () => {
+    const reason = '404 勤務の記録から Y時間 の行を作れませんでした (上流 404: no route)'
+    for (const body of [{ data: { source: 'kintai', stage: 'upstream', status: 404 } }, { statusMessage: 'Not Found' }, null]) {
+      const entry = litigationAlcOpsFailure(404, body, reason)
+      expect(entry).toEqual({ ok: false, notFound: false, reason })
+      expect(alcOpsCell(entry, null)).toEqual({ state: 'unknown', message: reason })
+      // Y時間の欠けも「未登録で作れない」(異常あり) にしない
+      expect(yTimeCell('2025-01', null, entry)).toEqual({ state: 'unknown', message: reason })
+    }
+  })
+
+  it('★ 勤怠の元: 文で元を言う。0 日は異常ありだが「alc に運行が 0 件」とは言わない', () => {
+    expect(alcOpsCell({ ok: true, days: 12, dropped: [], source: 'kintai', excluded: [] }, null))
+      .toEqual({ state: 'ok', message: '勤務日 12 日 (勤怠の記録)' })
+    expect(alcOpsCell({ ok: true, days: 0, dropped: [], source: 'kintai', excluded: [] }, null))
+      .toEqual({ state: 'ng', message: '勤怠の記録から作れた勤務日が 0 日' })
+  })
+
+  it('運行の元と明示された結果 (倒した結果) は、欄の無い旧い保存と同じ文', () => {
+    expect(alcOpsCell({ ok: true, days: 0, dropped: [], source: 'alc', excluded: [] }, null))
+      .toEqual(alcOpsCell({ ok: true, days: 0, dropped: [] }, null))
+    expect(alcOpsCell({ ok: true, days: 12, dropped: [], source: 'alc', excluded: [] }, null))
+      .toEqual({ state: 'ok', message: '勤務日 12 日' })
   })
 
   it('月単位を読む前でも、運行から作った出力タブの結果が冊ごと 0 件なら異常あり (元の欄の無い旧い結果も運行の元)', () => {
@@ -198,8 +232,47 @@ describe('yTimeCell (Y時間の欠け)', () => {
     expect(yTimeCell('2025-01', result({}), clean)).toEqual({ state: 'ok', message: '書けなかった日なし' })
   })
 
-  it('運行 0 件の月は、欠けなしだが alc の運行の列を見るよう添える', () => {
-    expect(yTimeCell('2025-01', null, { ok: true, days: 0, dropped: [] }).message).toContain('「alc の運行」の列を見てください')
+  it('運行 0 件の月は、欠けなしだが 1 列目 (見出しの定数の名前) を見るよう添える', () => {
+    expect(yTimeCell('2025-01', null, { ok: true, days: 0, dropped: [] }))
+      .toEqual({ state: 'ok', message: '欠けなし (この月は運行 0 件 — 「Y時間の勤務日」の列を見てください)' })
+    expect(yTimeCell('2025-01', null, { ok: true, days: 0, dropped: [] }).message).toContain(`「${LITIGATION_CHECK_LABELS.alcOps}」`)
+  })
+
+  it('★ 勤怠の元: その月に行を作れなかった勤務が 1 件でも在れば異常あり (理由ごとの件数。畳み直しで直る理由が在れば案内)', () => {
+    const entry: LitigationAlcOpsEntry = {
+      ok: true, days: 18, dropped: [], source: 'kintai',
+      excluded: [
+        { start: '2025-01-08 08:00:00', reason: 'no_non_working' },
+        { start: '2025-01-09 08:00:00', reason: 'no_non_working' },
+        { start: '2025-01-20 22:00:00', reason: 'overlap' },
+      ],
+    }
+    expect(yTimeCell('2025-01', null, entry)).toEqual({
+      state: 'ng',
+      message: `行を作れなかった勤務 3 件: まだ畳み直していない 2 件・別の勤務と時間が重なる 1 件 — ${LITIGATION_REFOLD_NOTICE}`,
+    })
+    // 畳み直しで直る理由が無ければ案内を付けない
+    expect(yTimeCell('2025-01', null, { ...entry, excluded: [{ start: '2025-01-20 22:00:00', reason: 'three_days' }] }))
+      .toEqual({ state: 'ng', message: '行を作れなかった勤務 1 件: 3 暦日以上にまたがる 1 件' })
+    // 勤務日が 0 日でも、除外が在れば「欠けなし」にしない
+    expect(yTimeCell('2025-01', null, { ...entry, days: 0 }).state).toBe('ng')
+  })
+
+  it('★ 勤怠の元で除外が無い月: 欠けなし。0 日なら 1 列目を見るよう添える (「運行 0 件」とは言わない)', () => {
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped: [], source: 'kintai', excluded: [] }))
+      .toEqual({ state: 'ok', message: '欠けなし' })
+    expect(yTimeCell('2025-01', null, { ok: true, days: 0, dropped: [], source: 'kintai', excluded: [] }))
+      .toEqual({ state: 'ok', message: '欠けなし (この月は勤務日 0 日 — 「Y時間の勤務日」の列を見てください)' })
+    // 除外の欄を持たない勤怠の元の結果も 0 件として読む (落ちない)
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped: [], source: 'kintai' })).toEqual({ state: 'ok', message: '欠けなし' })
+  })
+
+  it('★ 勤怠の元では運行NO の警告 (dropped) を見ない / 運行の元では除外を見ない', () => {
+    const dropped = [{ unkoNo: '2501050000000000000001', reason: '出庫/帰庫が無い' }]
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped, source: 'kintai', excluded: [] }).state).toBe('ok')
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped, source: 'alc', excluded: [] }).state).toBe('ng')
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped: [], source: 'alc', excluded: [{ start: '2025-01-08 08:00:00', reason: 'overlap' }] }))
+      .toEqual({ state: 'ok', message: '欠けなし' })
   })
 
   it('失敗は判定できない (出力タブの理由をそのまま)', () => {
@@ -225,9 +298,9 @@ describe('yTimeCell (Y時間の欠け)', () => {
   })
 
   it('運行から作った 0 件の冊は欠けなしだが、alc の運行の列を見るよう添える', () => {
-    expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0 })).message).toContain('「alc の運行」の列を見てください')
+    expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0 })).message).toContain('「Y時間の勤務日」の列を見てください')
     expect(yTimeCell('2025-01', result({ status: 'empty', rows: 0, source: 'alc', sourceReason: 'out_of_scope' })))
-      .toEqual({ state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「alc の運行」の列を見てください)' })
+      .toEqual({ state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「Y時間の勤務日」の列を見てください)' })
   })
 
   it('★ 勤怠の元で除外が 0 の 0 件の冊は「勤務 0 件」と言い、alc の運行の列へ案内しない', () => {
@@ -255,6 +328,68 @@ describe('yTimeCell (Y時間の欠け)', () => {
     expect(yTimeCell('2025-01', result({ ...excluded, status: 'error', message: '500 …' }))).toEqual({ state: 'unknown', message: '500 …' })
     expect(yTimeCell('2025-01', result({ ...excluded, missingDates: ['2025-01-05'], missingCount: 1 })).message).toBe('テンプレに行が無く書けなかった日: 2025-01-05')
     expect(yTimeCell('2025-03', result({ ...excluded, missingDates: ['2025-01-05'], missingCount: 31 })).state).toBe('unknown')
+  })
+})
+
+describe('行の応答を月ごとの素材に畳む (Refs #1133 c1133-47。値はすべて架空)', () => {
+  const MONTHS = ['2025-01', '2025-02', '2025-03']
+  const row = (date: string) => ({ date }) as YTimeRow
+  const preview = (over: Partial<YTimeRowsPreview> = {}): YTimeRowsPreview => ({
+    source: 'kintai', source_reason: null, rows: [], warnings: [], excluded: [], missing_months: [], ...over,
+  })
+
+  it('★ 除外を月に振り分ける: 始業の月 / 区切りの外なら終業の月 / どちらも外なら区切りの最初の月 (落とさない)', () => {
+    const got = foldYTimeExcludedByMonth([
+      { start: '2025-02-10 08:00:00', end: '2025-02-10 17:00:00', reason: 'no_non_working' },
+      // 前の月に始まって区切りの中で終わる勤務
+      { start: '2024-12-31 22:00:00', end: '2025-01-01 07:00:00', reason: 'overlap' },
+      // 始業が区切りの中で、終業が区切りの外
+      { start: '2025-03-31T22:00:00', end: '2025-04-01T07:00:00', reason: 'night_bands' },
+      // どちらも区切りの外
+      { start: '2024-11-01 08:00:00', end: '2024-11-01 17:00:00', reason: 'three_days' },
+    ], MONTHS)
+    expect(got).toEqual({
+      '2025-01': [
+        { start: '2024-12-31 22:00:00', reason: 'overlap' },
+        { start: '2024-11-01 08:00:00', reason: 'three_days' },
+      ],
+      '2025-02': [{ start: '2025-02-10 08:00:00', reason: 'no_non_working' }],
+      '2025-03': [{ start: '2025-03-31T22:00:00', reason: 'night_bands' }],
+    })
+    // 件数は振り分けの前後で変わらない
+    expect(Object.values(got).flat()).toHaveLength(4)
+  })
+
+  it('除外が無ければ、どの月も空 (キーは持つ)。月が 1 つも無ければ空', () => {
+    expect(foldYTimeExcludedByMonth([], MONTHS)).toEqual({ '2025-01': [], '2025-02': [], '2025-03': [] })
+    expect(foldYTimeExcludedByMonth([{ start: '2025-01-01 08:00:00', end: '2025-01-01 17:00:00', reason: 'overlap' }], [])).toEqual({})
+  })
+
+  it('★ 勤怠の元: 月ごとの勤務日・その月の除外・元を持つ。警告は運行NO の形でも「入らなかった運行」に数えない', () => {
+    const entries = litigationAlcOpsEntries(preview({
+      rows: [row('2025-01-06'), row('2025-01-07'), row('2025-03-03')],
+      warnings: ['2501050000000000000001: KUDGIVT 取得失敗 (x)'],
+      excluded: [{ start: '2025-02-10 08:00:00', end: '2025-02-10 17:00:00', reason: 'no_non_working' }],
+    }), MONTHS)
+    expect(entries).toEqual([
+      ['2025-01', { ok: true, days: 2, dropped: [], source: 'kintai', excluded: [] }],
+      ['2025-02', { ok: true, days: 0, dropped: [], source: 'kintai', excluded: [{ start: '2025-02-10 08:00:00', reason: 'no_non_working' }] }],
+      ['2025-03', { ok: true, days: 1, dropped: [], source: 'kintai', excluded: [] }],
+    ])
+  })
+
+  it('★ 運行の元 (倒した結果): 今までどおり運行NO の警告から「入らなかった運行」を拾う', () => {
+    const entries = litigationAlcOpsEntries(preview({
+      source: 'alc',
+      source_reason: 'out_of_scope',
+      rows: [row('2025-01-06')],
+      warnings: ['2502050000000000000001: departure_at/return_at が不足、skip', '2025-01-06: 複数 segment 結合'],
+    }), MONTHS)
+    expect(entries).toEqual([
+      ['2025-01', { ok: true, days: 1, dropped: [], source: 'alc', excluded: [] }],
+      ['2025-02', { ok: true, days: 0, dropped: [{ unkoNo: '2502050000000000000001', reason: '出庫/帰庫が無い' }], source: 'alc', excluded: [] }],
+      ['2025-03', { ok: true, days: 0, dropped: [], source: 'alc', excluded: [] }],
+    ])
   })
 })
 
@@ -421,6 +556,27 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     expect(litigationRowNeedsAttention(at('2000', '2025-01'))).toBe(true)
   })
 
+  it('★ 運行の取り込みのボタンは運行の元の 0 件だけ: 勤怠の元の 0 日は異常ありでも出さない', () => {
+    const rows = buildLitigationErrorRows(input({
+      driverCds: ['9001'],
+      months: ['2025-01', '2025-02', '2025-03', '2025-04'],
+      chunks: [],
+      alcOps: new Map<string, LitigationAlcOpsEntry>([
+        ['9001|2025-01', { ok: true, days: 0, dropped: [], source: 'kintai', excluded: [] }],
+        ['9001|2025-02', { ok: true, days: 0, dropped: [], source: 'alc', excluded: [] }],
+        // 元の欄の無い旧い保存は運行の元
+        ['9001|2025-03', { ok: true, days: 0, dropped: [] }],
+        ['9001|2025-04', { ok: false, notFound: true, reason: '404' }],
+      ]),
+    }))
+    expect(rows.map(r => [r.month, r.cells.alcOps.state, r.canImport])).toEqual([
+      ['2025-01', 'ng', false],
+      ['2025-02', 'ng', true],
+      ['2025-03', 'ng', true],
+      ['2025-04', 'unknown', false],
+    ])
+  })
+
   it('区切りに入らない月 (案件の外) は出力タブの結果を拾わない', () => {
     const rows = buildLitigationErrorRows(input({ months: ['2025-03'], results: [result({ status: 'empty', rows: 0 }), null] }))
     expect(rows[0]!.cells.alcOps.state).toBe('pending')
@@ -506,6 +662,43 @@ describe('検知結果の保存 (切り出し・読み戻し・続きから)', (
     expect(litigationRowCheckedAt(r.checkedAt, '9101|2023-06')).toBe('2026-09-29T01:00:00Z')
     expect(litigationRowCheckedAt(r.checkedAt, '9101|2023-07')).toBe('2026-09-29T02:00:00Z')
     expect(litigationRowCheckedAt(r.checkedAt, '9101|2023-08')).toBeNull()
+  })
+
+  it('★ 元と除外の欄の無い旧い保存を捨てない (運行から読んだ結果として出る)。新しい欄つきの保存も戻る', () => {
+    const at = '2026-09-29T00:00:00Z'
+    const excluded = [{ start: '2025-01-08 08:00:00', reason: 'no_non_working' }]
+    const r = restoreLitigationChecks({
+      items: [
+        { kind: 'alcOps', key: '9001|2025-01', payload: { ok: true, days: 0, dropped: [] }, checkedAt: at },
+        { kind: 'alcOps', key: '9001|2025-02', payload: { ok: true, days: 18, dropped: [], source: 'kintai', excluded }, checkedAt: at },
+        { kind: 'alcOps', key: '9001|2025-03', payload: { ok: true, days: 3, dropped: [], source: 'alc', excluded: [] }, checkedAt: at },
+        // 片方の欄だけの保存も通す
+        { kind: 'alcOps', key: '9001|2025-04', payload: { ok: true, days: 5, dropped: [], source: 'kintai' }, checkedAt: at },
+      ],
+    })
+    const old = r.alcOps.get('9001|2025-01')!
+    expect(old).toStrictEqual({ ok: true, days: 0, dropped: [] })
+    expect(alcOpsCell(old, null)).toEqual({ state: 'ng', message: 'alc に運行が 0 件 (Y時間の勤務日 0 日)' })
+    expect(r.alcOps.get('9001|2025-02')).toStrictEqual({ ok: true, days: 18, dropped: [], source: 'kintai', excluded })
+    expect(r.alcOps.get('9001|2025-03')).toStrictEqual({ ok: true, days: 3, dropped: [], source: 'alc', excluded: [] })
+    expect(r.alcOps.get('9001|2025-04')).toStrictEqual({ ok: true, days: 5, dropped: [], source: 'kintai' })
+    expect(r.checkedAt.size).toBe(4)
+  })
+
+  it('★ 新しい欄が在って型が違う 1 件は捨てる (元を取り違えて出さない)', () => {
+    const at = '2026-09-29T00:00:00Z'
+    const base = { ok: true, days: 3, dropped: [] }
+    const r = restoreLitigationChecks({
+      items: [
+        { kind: 'alcOps', key: 'a', payload: { ...base, source: 'other' }, checkedAt: at },
+        { kind: 'alcOps', key: 'b', payload: { ...base, source: null }, checkedAt: at },
+        { kind: 'alcOps', key: 'c', payload: { ...base, source: 'kintai', excluded: 'x' }, checkedAt: at },
+        { kind: 'alcOps', key: 'd', payload: { ...base, source: 'kintai', excluded: [{ start: '2025-01-08 08:00:00' }] }, checkedAt: at },
+        { kind: 'alcOps', key: 'e', payload: { ...base, source: 'kintai', excluded: [null] }, checkedAt: at },
+        { kind: 'alcOps', key: 'f', payload: { ...base, source: 'kintai', excluded: [{ start: 1, reason: 'overlap' }] }, checkedAt: at },
+      ],
+    })
+    expect([r.alcOps.size, r.checkedAt.size]).toEqual([0, 0])
   })
 
   it('★ 形の崩れた 1 件は捨てる (その行は未実行に戻るだけ。時刻も付けない)', () => {

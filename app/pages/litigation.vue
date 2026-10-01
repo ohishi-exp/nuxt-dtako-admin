@@ -8,9 +8,11 @@
  * 同じファイルと結果を relay へ 1 つの版として保存し (#c1133-34)、開き直すと最新の版の結果を表示する。
  * 冊ごとの「月ごとの時間」の表 (#c1133-36) は、給与比較タブと同じ保存済みの wage report から作る
  * (「ZIP を作る」の結果にも、保存した版の表示にも依らない)。
- * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
- * Y時間の欠け / alc にあってオンプレのデジタコに無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
- * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
+ * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (Y時間の勤務日 0 日 /
+ * Y時間の欠け / alc にあってオンプレのデジタコに無い運行 / 最低賃金の不変条件) を並べる。
+ * Y時間 の行は出力タブの Excel と同じ元 (勤怠の勤務の記録。勤怠の記録が無い会社・勤怠の設定が無い環境だけ運行) で数え、
+ * 勤怠の元で行を作れなかった勤務は「Y時間の欠け」に出す (#c1133-47)。**運行の元で** alc に運行が無い月にだけ、
+ * theearth から取り込み直すボタンを出す (勤怠の元の 0 日は運行を取り込んでも直らない)。「印刷」は案件の概要・出力の結果・エラーの表を
  * 1 つの紙面にする。変更記録のタブは後続 PR (#c1133-6) が足す。
  *
  * ★ エラータブは wage-report を**読むだけ**。最低賃金チェックの自動保存
@@ -23,8 +25,8 @@
  */
 import JSZip from 'jszip'
 import type { Driver } from '~/types'
-import { getDrivers, getYTimePreview, getOperations, getDtakoOperationChanges, currentAccessToken, getViewerComps } from '~/utils/api'
-import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
+import { getDrivers, getYTimeRows, getOperations, getDtakoOperationChanges, currentAccessToken, getViewerComps } from '~/utils/api'
+import { caughtErrorStatus, describeCaughtError, describeResponseFailure, ResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
   buildLitigationHoursBooks,
@@ -57,8 +59,7 @@ import {
   buildLitigationErrorRows,
   classifyLitigationImport,
   countLitigationErrorCells,
-  foldYTimeDaysByMonth,
-  foldYTimeDroppedByMonth,
+  litigationAlcOpsEntries,
   litigationAlcOpsFailure,
   litigationChunkMonths,
   litigationChunkWarnings,
@@ -967,17 +968,16 @@ const shownErrorRows = computed(() => errorsOnlyAttention.value
 
 const ERRORS_RETRY = '「検知を実行」を押してやり直してください'
 
-/** 区切り 1 つぶんの Y時間 (JSON) を読み、月ごとの勤務日数に畳む。失敗は各月へ配る。 */
+/** 区切り 1 つぶんの Y時間 の行 (JSON。出力タブの Excel と同じ元) を読み、月ごとの素材に畳む。失敗は各月へ配る。 */
 async function loadAlcOps(epoch: number, driverCd: string, from: string, to: string, months: string[]) {
   let entries: [string, LitigationAlcOpsEntry][]
   try {
-    const res = await getYTimePreview(driverCd, from, to)
-    const days = foldYTimeDaysByMonth(res.rows, months)
-    const dropped = foldYTimeDroppedByMonth(res.warnings, months)
-    entries = months.map(m => [m, { ok: true, days: days[m]!, dropped: dropped[m]! }])
+    entries = litigationAlcOpsEntries(await getYTimeRows(driverCd, from, to), months)
   }
   catch (e) {
-    const entry = litigationAlcOpsFailure(caughtErrorStatus(e), describeCaughtError(e, ERRORS_RETRY))
+    // 「乗務員CD が alc に未登録」かは本文の data で分かる (404 だけでは言わない)
+    const body = e instanceof ResponseFailure ? e.data : null
+    const entry = litigationAlcOpsFailure(caughtErrorStatus(e), body, describeCaughtError(e, ERRORS_RETRY))
     entries = months.map(m => [m, entry])
   }
   if (epoch !== errorsEpoch) return
@@ -1065,7 +1065,7 @@ function buildErrorSteps(onlyMissing: boolean): ErrorCheckStep[] {
     ...outputChunks.value
       .filter(c => litigationChunkMonths(c).some(m => need(errAlcOps.value.get(key(c.driverCd, m)))))
       .map(c => ({
-        label: `alc の運行 ${c.driverCd} ${c.label}`,
+        label: `${LITIGATION_CHECK_LABELS.alcOps} ${c.driverCd} ${c.label}`,
         run: (epoch: number) => loadAlcOps(epoch, c.driverCd, c.from, c.to, litigationChunkMonths(c)),
       })),
     ...target.driverCds.flatMap(cd => months
@@ -1123,7 +1123,7 @@ async function runErrorSteps(steps: ErrorCheckStep[]) {
 
 const runErrorChecks = (onlyMissing: boolean) => runErrorSteps(buildErrorSteps(onlyMissing))
 
-// --- 取り込みボタン (alc に運行が 0 件の月): theearth から乗務員 × 期間で取り込み直す ---
+// --- 取り込みボタン (運行の元で alc に運行が 0 件の月だけ): theearth から乗務員 × 期間で取り込み直す ---
 /** 走行中の行 (キー `乗務員CD|YYYY-MM`)。**同時に 1 行だけ** (theearth のセッションロック) */
 const importingKey = ref<string | null>(null)
 /** 行ごとの取り込み結果 (期間 1 本 = 1 件) */
@@ -1148,7 +1148,7 @@ async function postImport(driverCd: string, range: { from: string, to: string })
 
 /**
  * 運行月とその翌月 (読取日) を **1 か月ずつ直列に** 取り込む (relay の期間上限 31 日、
- * theearth のセッションロック)。1 本でも取り込めたら、その行の alc の運行と「オンプレのデジタコに無い運行」を
+ * theearth のセッションロック)。1 本でも取り込めたら、その行の Y時間 の行と「オンプレのデジタコに無い運行」を
  * 読み直す。**取り込み直後は CSV 分割が終わるまで運行が見えないことがある**ので、0 件のまま
  * でも取り込みが失敗したとは限らない (画面の注記で伝える)。
  */
@@ -1503,7 +1503,7 @@ const salaryAttrsCandidates = computed(() => litigationAttrsCandidates({
   caseDriverCds: openCase.value?.driverCds ?? [],
 }))
 
-/** 属性を入れた後、wage-report **だけ**を案件の月ごとに直列で取り直す (alc の運行・オンプレ突き合わせはやり直さない)。
+/** 属性を入れた後、wage-report **だけ**を案件の月ごとに直列で取り直す (Y時間 の行・オンプレ突き合わせはやり直さない)。
  * 自動では走らせない (36 か月で 9〜38 分) */
 async function retakeWageReports() {
   const target = openCase.value
@@ -2104,11 +2104,13 @@ function fmtDateTime(iso: string): string {
         <!-- エラー: 乗務員 × 月ごとに 4 つの検知 (litigation-errors.ts) -->
         <div v-if="activeTab === 'errors'" data-testid="litigation-errors" class="space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
-            乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・alc にあるのにオンプレのデジタコに無い運行があるか・
+            乗務員 × 月ごとに、Y時間 の勤務日が 0 日か・Y時間 に入らなかった勤務や日があるか・alc にあるのにオンプレのデジタコに無い運行があるか・
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
+            「{{ LITIGATION_CHECK_LABELS.alcOps }}」は、出力タブの Excel と同じく勤怠の勤務の記録から作った行で数えます (勤怠の記録が無い会社・勤怠の設定が無い環境だけ、運行から作った行で数えます。どちらで数えたかはセルの文に出ます)。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
             「alc にあってオンプレのデジタコに無い運行」は、alc の運行とオンプレのデジタコ運行 (dtako_rows) を、運行を始めた月・運行NO の先頭 22 桁で突き合わせます (タイムカードの有無に関係なく照合できます)。
-            Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで、最低賃金チェックの保存はしません)。
+            「{{ LITIGATION_CHECK_LABELS.yTime }}」は「検知を実行」で読んだ同じ行から判定します — 勤怠の記録から作った月は、行を作れなかった勤務 (理由ごとの件数) を出します。運行から作った月は、出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行を出します。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。
+            「theearth から取り込む」は、運行から作った月で運行が 0 件のときだけ出ます (勤怠の記録から作った月の 0 日は、運行を取り込んでも変わりません)。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで、最低賃金チェックの保存はしません)。
             検知の結果は案件ごとに保存し、開き直すと前回の結果を出します (月の下の時刻がその行の材料を取った時刻)。「続きから」は、まだ取っていない・取れなかった分だけを回します。
           </p>
 

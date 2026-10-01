@@ -16,7 +16,9 @@ import {
   litigationResultFromFailure,
   litigationResultFromHeaders,
   litigationZipFilename,
+  parseYTimeRowsPreview,
   yTimeSourceFromHeaders,
+  yTimeSourceFromPreview,
   LITIGATION_EMPTY_ALC_MESSAGE,
   LITIGATION_EMPTY_KINTAI_MESSAGE,
   LITIGATION_HOURS_COLUMNS,
@@ -24,7 +26,7 @@ import {
   type LitigationOutputChunk,
   type LitigationOutputResult,
 } from '~/utils/litigation-output'
-import type { LitigationFetched } from '~/utils/litigation-errors'
+import { Y_TIME_SOURCES, Y_TIME_SOURCE_REASONS, type LitigationFetched } from '~/utils/litigation-errors'
 import { compareSalaryMonth } from '~/utils/salary-compare'
 import type { WageReportResponse, WageReportRow, WageRow } from '~/utils/restraint-wage-view'
 
@@ -259,6 +261,99 @@ describe('行の元 (Refs #1133 c1133-46)', () => {
       expect(texts(base({ status: 'error', rows: null }))).toEqual([])
       expect(texts(base({ status: 'not_found', rows: null }))).toEqual([])
     })
+  })
+})
+
+describe('JSON の応答 (`POST /api/y-time-rows`) の形の検査と、行の元 (Refs #1133 c1133-47。値はすべて架空)', () => {
+  const PREVIEW = {
+    source: 'kintai',
+    source_reason: null,
+    rows: [{ date: '2025-01-06', start_minutes_of_day: 480 }],
+    warnings: ['w1'],
+    excluded: [
+      { start: '2025-01-08 08:00:00', end: '2025-01-08 17:00:00', reason: 'no_non_working' },
+      { start: '2025-01-09T22:00:00', end: '2025-01-10T07:00:00', reason: 'overlap' },
+      { start: '2025-01-15 08:00:00', end: '2025-01-15 17:00:00', reason: 'no_non_working' },
+    ],
+    missing_months: ['2025-02'],
+  }
+
+  it('★ 形の合う応答は、検査した欄だけを返す (driver / period・知らない欄は持ち出さない)', () => {
+    expect(parseYTimeRowsPreview({ ...PREVIEW, driver: { cd: '9001', name: '架空 太郎' }, period: { from: 'a', to: 'b' }, extra: 1 }))
+      .toStrictEqual(PREVIEW)
+    const alc = { ...PREVIEW, source: 'alc', source_reason: 'not_configured', excluded: [], missing_months: [] }
+    expect(parseYTimeRowsPreview(alc)).toStrictEqual(alc)
+  })
+
+  it.each([
+    ['object でない', null],
+    ['配列', [PREVIEW]],
+    ['source が知らない語', { ...PREVIEW, source: 'other' }],
+    ['source が無い', { ...PREVIEW, source: undefined }],
+    ['source_reason が知らない語', { ...PREVIEW, source_reason: 'other' }],
+    ['source_reason が無い', { ...PREVIEW, source_reason: undefined }],
+    ['rows が配列でない', { ...PREVIEW, rows: {} }],
+    ['rows の要素が object でない', { ...PREVIEW, rows: ['2025-01-06'] }],
+    ['rows の date が文字列でない', { ...PREVIEW, rows: [{ date: 20250106 }] }],
+    ['warnings が文字列の配列でない', { ...PREVIEW, warnings: [1] }],
+    ['missing_months が無い', { ...PREVIEW, missing_months: undefined }],
+    ['excluded が無い', { ...PREVIEW, excluded: undefined }],
+    ['excluded の要素が object でない', { ...PREVIEW, excluded: [null] }],
+    ['excluded の start が無い', { ...PREVIEW, excluded: [{ end: 'e', reason: 'overlap' }] }],
+    ['excluded の end が無い', { ...PREVIEW, excluded: [{ start: 's', reason: 'overlap' }] }],
+    ['excluded の reason が無い', { ...PREVIEW, excluded: [{ start: 's', end: 'e' }] }],
+  ])('★ %s 応答は null (欠けた欄を 0 件として読まない)', (_name, raw) => {
+    expect(parseYTimeRowsPreview(raw)).toBeNull()
+  })
+
+  it('★ 語の一覧は 1 か所の定義で、型の語と一致する', () => {
+    expect(Y_TIME_SOURCES).toEqual(['kintai', 'alc'])
+    expect(Y_TIME_SOURCE_REASONS).toEqual(['out_of_scope', 'not_configured'])
+  })
+
+  it('★ JSON の応答から行の元の 5 欄を作る: 理由ごとの件数は全件・一覧は始業の日付 (区切りが空白でも T でも)', () => {
+    const info = yTimeSourceFromPreview(parseYTimeRowsPreview(PREVIEW)!)
+    expect(info).toStrictEqual({
+      source: 'kintai',
+      excludedReasons: { no_non_working: 2, overlap: 1 },
+      excluded: [
+        { date: '2025-01-08', reason: 'no_non_working' },
+        { date: '2025-01-09', reason: 'overlap' },
+        { date: '2025-01-15', reason: 'no_non_working' },
+      ],
+      missingMonths: ['2025-02'],
+    })
+  })
+
+  it('★ 同じ内容なら、JSON の応答からでも応答ヘッダからでも、画面に出る行は同じ (プレビューとダウンロードで食い違わない)', () => {
+    const fromPreview = litigationOutputSourceLines({ ...yTimeSourceFromPreview(parseYTimeRowsPreview(PREVIEW)!), status: 'ok' })
+    const fromHeaders = litigationOutputSourceLines({
+      ...yTimeSourceFromHeaders(headers({
+        'x-y-time-source': 'kintai',
+        'x-y-time-excluded-reasons': 'no_non_working=2,overlap=1',
+        'x-y-time-excluded': '2025-01-08:no_non_working,2025-01-09:overlap,2025-01-15:no_non_working',
+        'x-y-time-missing-months': '2025-02',
+      })),
+      status: 'ok',
+    })
+    expect(fromPreview).toEqual(fromHeaders)
+    expect(fromPreview.map(l => l.kind)).toEqual(['source', 'excluded', 'refold', 'missingMonths'])
+    expect(fromPreview[0]!.text).toBe('勤怠の記録から作成')
+    expect(fromPreview[1]!.text).toContain('行を作れなかった勤務 3 件 (まだ畳み直していない 2 件・別の勤務と時間が重なる 1 件)')
+  })
+
+  it('運行の元へ倒した応答は、倒した理由を持つ (除外と記録の無い月は空)', () => {
+    const info = yTimeSourceFromPreview(parseYTimeRowsPreview({ ...PREVIEW, source: 'alc', source_reason: 'out_of_scope', excluded: [], missing_months: [] })!)
+    expect(info).toStrictEqual({ source: 'alc', sourceReason: 'out_of_scope', excludedReasons: {}, excluded: [], missingMonths: [] })
+    expect(litigationOutputSourceLines({ ...info, status: 'ok' })).toEqual([{ kind: 'source', text: '運行から作成 (この会社は勤怠の記録が無い)' }])
+    expect(litigationEmptyMessage(info)).toBe(LITIGATION_EMPTY_ALC_MESSAGE)
+  })
+
+  it('★ 行が 0 件のとき: 除外が在れば「勤務が 0 件」と言わない (プレビューも出力タブと同じ文)', () => {
+    const info = yTimeSourceFromPreview(parseYTimeRowsPreview({ ...PREVIEW, rows: [] })!)
+    expect(litigationEmptyMessage(info)).toBe('行を作れた勤務が 0 件 (行を作れなかった勤務 3 件)')
+    expect(litigationEmptyMessage(yTimeSourceFromPreview(parseYTimeRowsPreview({ ...PREVIEW, rows: [], excluded: [] })!)))
+      .toBe(LITIGATION_EMPTY_KINTAI_MESSAGE)
   })
 })
 

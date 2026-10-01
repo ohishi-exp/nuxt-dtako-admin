@@ -57,9 +57,12 @@ import {
   litigationExcludedSummary,
   litigationResultFromKintai,
   sameLitigationDriverCd,
+  Y_TIME_SOURCES,
+  Y_TIME_SOURCE_REASONS,
 } from './litigation-errors'
 import type { LitigationFetched } from './litigation-errors'
-import type { YTimeSource, YTimeSourceReason } from '~/types'
+import { isAlcDriverNotFound } from './api-error'
+import type { YTimeExcludedShift, YTimeRow, YTimeRowsPreview, YTimeSource, YTimeSourceReason } from '~/types'
 
 /** 京都ソフト案件の Y時間 テンプレ (y-time-export.vue の既定と同じ R2 key) */
 export const LITIGATION_TEMPLATE_KEY = 'templates/kyoto-soft/base.xlsx'
@@ -189,9 +192,6 @@ function parseCount(raw: string | null): number | null {
   return Number(raw)
 }
 
-const SOURCES: readonly unknown[] = ['kintai', 'alc'] satisfies YTimeSource[]
-const SOURCE_REASONS: readonly unknown[] = ['out_of_scope', 'not_configured'] satisfies YTimeSourceReason[]
-
 /**
  * 応答ヘッダから Y時間 の行の元を読む (書く側は `server/utils/y-time-rows.ts` の `yTimeSourceHeaders`)。
  * 冊を引数に取らない — 訴訟準備の出力タブ以外 (Y時間 の単独のページ) も同じ読み方をするため。
@@ -199,10 +199,10 @@ const SOURCE_REASONS: readonly unknown[] = ['out_of_scope', 'not_configured'] sa
  */
 export function yTimeSourceFromHeaders(headers: HeaderReader): YTimeSourceInfo {
   const source = headers.get('x-y-time-source')
-  if (!SOURCES.includes(source)) return {}
+  if (!Y_TIME_SOURCES.includes(source)) return {}
   const info: YTimeSourceInfo = { source: source as YTimeSource, excludedReasons: {}, excluded: [], missingMonths: [] }
   const reason = headers.get('x-y-time-source-reason')
-  if (SOURCE_REASONS.includes(reason)) info.sourceReason = reason as YTimeSourceReason
+  if (Y_TIME_SOURCE_REASONS.includes(reason)) info.sourceReason = reason as YTimeSourceReason
   for (const part of (headers.get('x-y-time-excluded-reasons') ?? '').split(',')) {
     const at = part.indexOf('=')
     const n = parseCount(part.slice(at + 1))
@@ -214,6 +214,54 @@ export function yTimeSourceFromHeaders(headers: HeaderReader): YTimeSourceInfo {
   }
   info.missingMonths = (headers.get('x-y-time-missing-months') ?? '').split(',').filter(Boolean)
   return info
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(s => typeof s === 'string')
+
+/**
+ * `POST /api/y-time-rows` の応答の形を検査して返す (呼ぶのは `app/utils/api.ts` の `getYTimeRows`)。
+ * **欄が欠けている・型が違う応答は null** — 読めなかった応答を、行が 0 件・除外が 0 件の応答として
+ * 先へ進めない。行の中身は見ない (月に畳むのに使う `date` が文字列であることだけ)。
+ */
+export function parseYTimeRowsPreview(raw: unknown): YTimeRowsPreview | null {
+  if (!isRecord(raw)) return null
+  const { source, source_reason: sourceReason, rows, warnings, excluded, missing_months: missingMonths } = raw
+  if (!Y_TIME_SOURCES.includes(source)) return null
+  if (sourceReason !== null && !Y_TIME_SOURCE_REASONS.includes(sourceReason)) return null
+  if (!Array.isArray(rows) || !rows.every(r => isRecord(r) && typeof r.date === 'string')) return null
+  if (!isStringArray(warnings) || !isStringArray(missingMonths)) return null
+  if (!Array.isArray(excluded)
+    || !excluded.every(e => isRecord(e) && typeof e.start === 'string' && typeof e.end === 'string' && typeof e.reason === 'string')) return null
+  return {
+    source: source as YTimeSource,
+    source_reason: sourceReason as YTimeSourceReason | null,
+    rows: rows as YTimeRow[],
+    warnings,
+    excluded: excluded as YTimeExcludedShift[],
+    missing_months: missingMonths,
+  }
+}
+
+/**
+ * JSON の応答 ({@link parseYTimeRowsPreview}) から行の元の 5 欄を作る — 応答ヘッダから読む
+ * {@link yTimeSourceFromHeaders} と同じ形にして、{@link litigationOutputSourceLines} にそのまま渡せるようにする
+ * (Y時間 のページのプレビューが、ダウンロードと同じ行を出す)。本文は切り詰めが無いので、
+ * 行を作れなかった勤務は全件ぶん持つ。
+ */
+export function yTimeSourceFromPreview(preview: YTimeRowsPreview): YTimeSourceInfo {
+  const excludedReasons: Record<string, number> = {}
+  for (const e of preview.excluded) excludedReasons[e.reason] = (excludedReasons[e.reason] ?? 0) + 1
+  return {
+    source: preview.source,
+    ...(preview.source_reason ? { sourceReason: preview.source_reason } : {}),
+    excludedReasons,
+    excluded: preview.excluded.map(e => ({ date: e.start.slice(0, 10), reason: e.reason })),
+    missingMonths: preview.missing_months,
+  }
 }
 
 /**
@@ -244,7 +292,9 @@ const SOURCE_REASON_TEXT: Record<YTimeSourceReason, string> = {
  * 出力タブの表と紙面の両方がこれを使う。**行を作れなかった勤務を黙って落とさない** — 件数と理由を必ず言う。
  * 失敗・未登録の冊は何も作っていないので、元を言わない (空)。
  */
-export function litigationOutputSourceLines(result: LitigationOutputResult): LitigationOutputSourceLine[] {
+export function litigationOutputSourceLines(
+  result: YTimeSourceInfo & { status: LitigationOutputStatus },
+): LitigationOutputSourceLine[] {
   if (result.status === 'error' || result.status === 'not_found') return []
   const lines: LitigationOutputSourceLine[] = []
   if (litigationResultFromKintai(result)) lines.push({ kind: 'source', text: SOURCE_LINE_KINTAI })
@@ -275,7 +325,7 @@ export function litigationOutputSourceLines(result: LitigationOutputResult): Lit
  * 言う** (読めなかったことを 0 件と同じ見た目にしない)。
  */
 export function litigationResultFromHeaders(
-  chunk: LitigationOutputChunk,
+  chunk: Pick<LitigationOutputChunk, 'driverCd' | 'from' | 'to'>,
   headers: HeaderReader,
 ): LitigationOutputResult {
   const rows = parseCount(headers.get('x-y-time-rows'))
@@ -314,8 +364,7 @@ export function litigationResultFromFailure(
   body: unknown,
   reason: string,
 ): LitigationOutputResult {
-  const upstream = (body as { data?: { upstream?: unknown } } | null)?.data?.upstream
-  const notFound = httpStatus === 404 && upstream === 'alc'
+  const notFound = isAlcDriverNotFound(httpStatus, body)
   return {
     driverCd: chunk.driverCd,
     from: chunk.from,

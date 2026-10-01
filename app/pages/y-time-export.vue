@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import { useAuth } from '@ippoan/auth-client'
-import { getDrivers, getYTimePreview, currentAccessToken } from '~/utils/api'
-import { describeResponseFailure } from '~/utils/api-error'
-import type { Driver, YTimeExportResponse } from '~/types'
+import { getDrivers, getYTimeRows, currentAccessToken } from '~/utils/api'
+import { describeCaughtError, describeResponseFailure, isAlcDriverNotFound, ResponseFailure } from '~/utils/api-error'
+import {
+  LITIGATION_NOT_FOUND_MESSAGE,
+  litigationEmptyMessage,
+  litigationOutputSourceLines,
+  litigationResultFromHeaders,
+  yTimeSourceFromPreview,
+  type LitigationOutputSourceLine,
+  type YTimeSourceInfo,
+} from '~/utils/litigation-output'
+import type { Driver, YTimeRowsPreview } from '~/types'
 
 const drivers = ref<Driver[]>([])
 const selectedDriverCd = ref('')
@@ -47,9 +56,32 @@ function savePersistedVars() {
 // 任意の input 変更で書き戻し
 watch([selectedDriverCd, dateFrom, dateTo, templateKey], savePersistedVars)
 
-// 計算結果プレビュー
+// 計算結果プレビュー。行は Excel (ダウンロード) と同じ元から server が作る (`POST /api/y-time-rows`)。
 const previewing = ref(false)
-const previewData = ref<YTimeExportResponse | null>(null)
+const previewData = ref<YTimeRowsPreview | null>(null)
+/** プレビューを取ったときの入力。応答 (勤怠の元) は乗務員の名前も期間も持たないので、見出しと暦日の展開は
+ * これで出す — 取った後に入力欄を変えても、表の見出しが別の人・別の期間を指さないように押した時点で控える */
+const previewInput = ref<{ driverCd: string, from: string, to: string } | null>(null)
+
+/**
+ * 行の元の表示 (どの元で作ったか・行を作れなかった勤務・畳み直しの案内・勤務の記録の無い月)。
+ * プレビューとダウンロードのどちらの結果かを `label` (見出し) で言う。行を組むのは訴訟準備の出力タブと同じ関数
+ * (`litigationOutputSourceLines`)。行が 0 件のときは、何の 0 件かも同じ関数 (`litigationEmptyMessage`) で言う。
+ */
+const sourceNotice = ref<{ label: string, empty: string, lines: LitigationOutputSourceLine[] } | null>(null)
+function showSource(label: string, info: YTimeSourceInfo, rows: number | null) {
+  // 元を返さなかった応答は、元を言わない (運行の元に見せない)
+  sourceNotice.value = info.source
+    ? { label, empty: rows === 0 ? litigationEmptyMessage(info) : '', lines: litigationOutputSourceLines({ ...info, status: 'ok' }) }
+    : null
+}
+
+/** 見出しに出す乗務員。名前は画面の一覧から引く (一覧に無ければ CD だけ) */
+const previewDriverLabel = computed(() => {
+  const cd = previewInput.value?.driverCd ?? ''
+  const name = drivers.value.find(d => d.driver_cd === cd)?.driver_name
+  return name ? `${cd} : ${name}` : cd
+})
 
 // テンプレ R2 存在確認
 type TemplateStatus =
@@ -119,12 +151,12 @@ function dateToWeekday(d: Date): string {
  * 戻り値の date 順は from → to。
  */
 const previewRowsWithGaps = computed<Array<{ date: string; weekday: string; row: import('~/types').YTimeRow | null }>>(() => {
-  if (!previewData.value) return []
+  if (!previewData.value || !previewInput.value) return []
   const map = new Map<string, import('~/types').YTimeRow>()
   for (const r of previewData.value.rows) map.set(r.date, r)
 
-  const start = ymdToDate(previewData.value.period.from)
-  const end = ymdToDate(previewData.value.period.to)
+  const start = ymdToDate(previewInput.value.from)
+  const end = ymdToDate(previewInput.value.to)
   if (!start || !end) return []
 
   const out: Array<{ date: string; weekday: string; row: import('~/types').YTimeRow | null }> = []
@@ -152,8 +184,14 @@ function onTemplateFileChange(e: Event) {
 // 足す。理由は共通・やり直し方は画面ごとなので、`retry` にはこの画面に実在するボタンの
 // 表記 (`R2 確認` / `R2 に保存` / `ダウンロード`) を**原文ママ**で渡す。
 //
-// **`計算プレビュー` はここを通らない** — `getYTimePreview()` は `api.ts` の `request()`
-// 経由 (`@ippoan/auth-client` が素の `Error` に組んで投げる) で `Response` が残らない。
+// **`計算プレビュー` は `Response` を持たない** — `getYTimeRows()` (`api.ts`) が status と本文つきの
+// 失敗を投げるので、兄弟の `describeCaughtError` で同じ形の 1 文にする。
+
+/** 失敗の 1 文。「乗務員CD が alc に未登録」(404 かつ本文の印) だけは、やり直しの案内でなくそう言う
+ * (訴訟準備の出力タブと同じ判定・同じ文) */
+function failureText(status: number | null, body: unknown, described: string): string {
+  return isAlcDriverNotFound(status, body) ? LITIGATION_NOT_FOUND_MESSAGE : described
+}
 
 /** R2 上のテンプレ存在確認 */
 async function checkTemplate() {
@@ -271,17 +309,18 @@ async function previewYTime() {
   previewing.value = true
   error.value = ''
   previewData.value = null
+  sourceNotice.value = null
   lastWarnings.value = []
+  const input = { driverCd: selectedDriverCd.value, from: dateFrom.value, to: dateTo.value }
   try {
-    const data = await getYTimePreview(
-      selectedDriverCd.value,
-      dateFrom.value,
-      dateTo.value,
-    )
+    const data = await getYTimeRows(input.driverCd, input.from, input.to)
+    previewInput.value = input
     previewData.value = data
-    lastWarnings.value = data.warnings ?? []
+    lastWarnings.value = data.warnings
+    showSource('プレビューの行の元', yTimeSourceFromPreview(data), data.rows.length)
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : 'プレビュー取得に失敗しました'
+    const failed = e instanceof ResponseFailure ? e : null
+    error.value = `プレビュー取得失敗: ${failureText(failed?.statusCode ?? null, failed?.data, describeCaughtError(e, '「計算プレビュー」を押してください'))}`
   } finally {
     previewing.value = false
   }
@@ -295,6 +334,7 @@ async function downloadXlsx() {
 
   loading.value = true
   error.value = ''
+  sourceNotice.value = null
   lastWarnings.value = []
 
   try {
@@ -318,7 +358,19 @@ async function downloadXlsx() {
 
     // 同上。`xlsx 生成失敗 (502): ` と括弧の後ろが空になるのを止める (Refs #890)。
     // **どの操作が落ちたか**は残したいので、ラベルは前置きのまま保つ。
-    if (!res.ok) throw new Error(`xlsx 生成失敗: ${await describeResponseFailure(res, '「ダウンロード」を押してください')}`)
+    if (!res.ok) {
+      // 404 の出どころ (上流 = 乗務員CD 未登録 / R2 = テンプレ不在) は本文の data で分かる
+      const body = await res.clone().json().catch(() => null)
+      throw new Error(`xlsx 生成失敗: ${failureText(res.status, body, await describeResponseFailure(res, '「ダウンロード」を押してください'))}`)
+    }
+
+    // 行の元 (プレビューと同じ util が作るので、同じ人・同じ期間なら同じ元になる)。
+    // 応答ヘッダの読み方は訴訟準備の出力タブと同じ関数
+    const result = litigationResultFromHeaders(
+      { driverCd: selectedDriverCd.value, from: dateFrom.value, to: dateTo.value },
+      res.headers,
+    )
+    showSource('ダウンロードした Excel の行の元', result, result.rows)
 
     const warnings = res.headers.get('x-y-time-warnings')
     if (warnings) {
@@ -343,9 +395,11 @@ async function downloadXlsx() {
     <h2 class="text-2xl font-bold">Y時間 エクスポート</h2>
 
     <p class="text-sm text-gray-600 dark:text-gray-400">
-      京都ソフト案件 等の証拠書類用 Excel テンプレ (Y時間 シート) に、KUDGIVT
-      由来の日別 始業/終業/休憩 を自動追記してダウンロードします。テンプレは
-      Cloudflare R2 (<code>dtako-uploads</code>) に配置されたものを参照します。
+      京都ソフト案件 等の証拠書類用 Excel テンプレ (Y時間 シート) に、勤怠の勤務の記録
+      (賃金の計算と同じ元) から作った日別 始業/終業/休憩 を自動追記してダウンロードします。
+      勤怠の記録が無い会社・勤怠の設定が無い環境では、運行 (デジタコ) から作ります。
+      どちらで作ったかは、プレビューとダウンロードの結果に出ます (訴訟準備の出力と同じ行です)。
+      テンプレは Cloudflare R2 (<code>dtako-uploads</code>) に配置されたものを参照します。
     </p>
 
     <div class="bg-white dark:bg-gray-900 p-4 rounded-lg shadow space-y-3">
@@ -438,17 +492,35 @@ async function downloadXlsx() {
       </div>
     </div>
 
+    <!-- 行の元 (プレビュー / ダウンロードのどちらの結果かを言う) -->
+    <div
+      v-if="sourceNotice"
+      class="bg-white dark:bg-gray-900 p-3 rounded-lg shadow text-sm space-y-1"
+      data-testid="y-time-source"
+    >
+      <div class="font-semibold">{{ sourceNotice.label }}</div>
+      <div v-if="sourceNotice.empty" class="text-amber-700 dark:text-amber-400">{{ sourceNotice.empty }}</div>
+      <div
+        v-for="line in sourceNotice.lines"
+        :key="line.kind"
+        :class="line.kind === 'source' ? 'text-gray-700 dark:text-gray-300' : line.kind === 'refold' ? 'text-red-700 dark:text-red-400 font-medium' : 'text-amber-700 dark:text-amber-400'"
+        :data-line="line.kind"
+      >
+        {{ line.text }}
+      </div>
+    </div>
+
     <!-- 計算結果プレビュー -->
     <div
-      v-if="previewData"
+      v-if="previewData && previewInput"
       class="bg-white dark:bg-gray-900 p-4 rounded-lg shadow space-y-2 text-sm"
     >
       <div class="flex justify-between items-baseline">
         <h3 class="font-semibold">
           計算結果プレビュー
           <span class="text-gray-500 dark:text-gray-400 font-normal text-xs ml-2">
-            {{ previewData.driver.cd }} : {{ previewData.driver.name }} /
-            {{ previewData.period.from }} 〜 {{ previewData.period.to }} /
+            {{ previewDriverLabel }} /
+            {{ previewInput.from }} 〜 {{ previewInput.to }} /
             {{ previewData.rows.length }} 行 (勤務日)
             / {{ previewRowsWithGaps.length }} 暦日
           </span>

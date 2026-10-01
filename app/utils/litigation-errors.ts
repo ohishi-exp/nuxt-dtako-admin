@@ -6,8 +6,8 @@
  *
  * | 列 | 素材 | 口 |
  * | --- | --- | --- |
- * | `alcOps` alc の運行 | Y時間の勤務日 (JSON) を月に畳んだ日数 | `getYTimePreview` (区切り 1 つにつき 1 回) と、運行から作った出力タブの `empty` |
- * | `yTime` Y時間の欠け | 同じプレビューの警告 (Y時間に入らなかった運行) + ZIP を作った冊はテンプレに書けなかった日・行を作れなかった勤務 | `getYTimePreview` (alcOps と同じ応答) / `POST /api/y-time-export` (出力タブ) |
+ * | `alcOps` Y時間の勤務日 | Y時間の行 (JSON) を月に畳んだ日数 | `getYTimeRows` = `POST /api/y-time-rows` (区切り 1 つにつき 1 回) と、運行から作った出力タブの `empty` |
+ * | `yTime` Y時間の欠け | 同じ応答の、行を作れなかった勤務 (勤怠の元) か Y時間に入らなかった運行 (運行の元) + ZIP を作った冊はテンプレに書けなかった日・行を作れなかった勤務 | `getYTimeRows` (alcOps と同じ応答) / `POST /api/y-time-export` (出力タブ) |
  * | `unkoGaps` alc にあってオンプレのデジタコに無い運行 | alc の運行とオンプレ `dtako_rows` の運行を、運行を始めた月・先頭 22 桁で突き合わせる | `getOperations` (alc、読取日で 2 か月) / `GET /restraint-api/kintai/onprem-month-operations?month=&driver_cd=` |
  * | `invariants` 最低賃金の不変条件 (条件1〜3) | relay が付ける `invariants` | `GET /restraint-api/wage-report?source=gcp&month=` |
  *
@@ -23,13 +23,24 @@
  * `unknown` と `pending` を分けるのは、「調べたが分からなかった」と「まだ調べていない」で
  * 次の一手が違うため (前者は理由を読む、後者はボタンを押す)。
  *
+ * ## 行の元 (Refs #1133 c1133-47)
+ *
+ * 「検知を実行」が読む Y時間 の行は、出力タブの Excel と同じ元 — 勤怠の勤務の記録 (wage report と同じ元) で、
+ * 勤怠の記録が無い会社・勤怠の設定が無い環境だけ運行 (デジタコ)。**どちらの元かで、0 日の意味も直し方も違う**:
+ * 運行の元の 0 日は「alc に運行が無い」(運行の取り込みで直る) / 勤怠の元の 0 日は「勤怠の記録から行を
+ * 作れなかった」(運行を取り込んでも直らない)。だから**運行の取り込みのボタンは運行の元のときだけ**出す。
+ * 列の見出しは元を言わず、セルの文で言う。**列の名前を文に書くところは {@link LITIGATION_CHECK_LABELS} から組む**
+ * (見出しを変えたのに文が旧い列名を指す、を作らない)。
+ *
  * ★ 最低賃金チェックの**自動保存 (`POST /restraint-api/wage-snapshot`) はこのタブから呼ばない**。
  * wage-report を読むだけで、`restraint-wage.vue` の computed やタブは流用しない。
  */
+import { isAlcDriverNotFound } from './api-error'
 import type { LitigationOutputChunk, LitigationOutputResult } from './litigation-output'
 import type { WageInvariantCheck, WageReportResponse } from './restraint-wage-view'
 import { fmtShiftOverlap, invariantRowStatus, nextYm } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
+import type { YTimeExcludedShift, YTimeRowsPreview, YTimeSource, YTimeSourceReason } from '~/types'
 
 export type LitigationCheckKey = 'alcOps' | 'yTime' | 'unkoGaps' | 'invariants'
 export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending'
@@ -38,7 +49,7 @@ export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending'
 export const LITIGATION_CHECK_KEYS: readonly LitigationCheckKey[] = ['alcOps', 'yTime', 'unkoGaps', 'invariants']
 
 export const LITIGATION_CHECK_LABELS: Record<LitigationCheckKey, string> = {
-  alcOps: 'alc の運行',
+  alcOps: 'Y時間の勤務日',
   yTime: 'Y時間の欠け',
   unkoGaps: 'alc にあってオンプレのデジタコに無い運行',
   invariants: '最低賃金の不変条件',
@@ -61,34 +72,51 @@ export interface LitigationErrorRow {
   /** `YYYY-MM` */
   month: string
   cells: Record<LitigationCheckKey, LitigationCheckCell>
-  /** 取り込みボタンを出すか (= alc の運行が 0 件と判定できた月だけ。勤怠の元の出力の 0 件では出さない) */
+  /** 運行の取り込みのボタンを出すか (= **運行の元で** 0 件と判定できた月だけ。勤怠の元の 0 日は
+   * 運行を取り込んでも直らないので出さない) */
   canImport: boolean
 }
 
 /** 1 回の取得の結果。失敗は画面に出す 1 文で持つ */
 export type LitigationFetched<T> = { ok: true, value: T } | { ok: false, reason: string }
 
-/** Y時間 に入らなかった運行 (プレビューの警告から拾う)。`reason` は画面に出す短い理由。 */
+/** Y時間 に入らなかった運行 (運行の元の応答の警告から拾う)。`reason` は画面に出す短い理由。 */
 export interface LitigationYTimeDropped {
   unkoNo: string
   reason: string
 }
 
-/** 乗務員 × 月の「alc の運行」の素材。`ok` のときは同じプレビューから拾った
- * 「Y時間に入らなかった運行」(`dropped`) も持つ — Y時間の欠けを ZIP なしで判定するため。 */
+/** 行を作れなかった勤務 1 本 (その月に振り分けたもの)。`start` は始業の時刻 (上流が返した文字列のまま) */
+export interface LitigationExcludedShift {
+  start: string
+  reason: string
+}
+
+/**
+ * 乗務員 × 月の「Y時間の勤務日」の素材 (保存の `kind` は `alcOps` のまま — 名前は運行の元だけだった頃のもの)。
+ * `ok` のときは同じ応答から拾った Y時間の欠けの材料も持つ (ZIP なしで判定するため): 運行の元は
+ * 「Y時間に入らなかった運行」(`dropped`)、勤怠の元は「行を作れなかった勤務」(`excluded`)。
+ *
+ * **`source` と `excluded` は optional** — この 2 欄ができる前に保存した検知結果は持たず、
+ * 運行から読んだものとして扱う (その頃の検知は全部運行の元だった。{@link litigationResultFromKintai})。
+ */
 export type LitigationAlcOpsEntry =
-  | { ok: true, days: number, dropped: LitigationYTimeDropped[] }
+  | { ok: true, days: number, dropped: LitigationYTimeDropped[], source?: YTimeSource, excluded?: LitigationExcludedShift[] }
   | { ok: false, notFound: boolean, reason: string }
 
 // ---- 出力タブの結果の元 (Refs #1133 c1133-46) ----
 //
-// 出力タブの Y時間 の Excel は、勤怠の勤務の記録 (wage report と同じ元) から作る。勤怠の記録が無い会社・
-// 勤怠の設定が無い環境だけ、今までどおり運行 (デジタコ) から作る。**結果がどちらの元かを決めるのは
+// 出力タブの Y時間 の Excel も、エラータブの検知が読む行も、勤怠の勤務の記録 (wage report と同じ元) から作る。
+// 勤怠の記録が無い会社・勤怠の設定が無い環境だけ、運行 (デジタコ) から作る。**結果がどちらの元かを決めるのは
 // ここの 1 関数だけ** — 出力タブの文 (`litigation-output.ts`) もエラータブの判定も、これを通す。
 
+/** 行の元の語の一覧。**定義はここ 1 か所** (応答ヘッダ・JSON の応答・保存した版・保存した検知結果の検査が共用) */
+export const Y_TIME_SOURCES: readonly unknown[] = ['kintai', 'alc'] satisfies YTimeSource[]
+export const Y_TIME_SOURCE_REASONS: readonly unknown[] = ['out_of_scope', 'not_configured'] satisfies YTimeSourceReason[]
+
 /**
- * 出力タブの結果が、勤怠の勤務の記録から作ったものか。**`source` の無い結果 (この欄ができる前に
- * 保存した版) は運行から作ったものとして読む** — その頃の出力は全部運行の元だった。
+ * 出力タブの結果・検知の結果が、勤怠の勤務の記録から作ったものか。**`source` の無いもの (この欄ができる前に
+ * 保存した版・検知結果) は運行から作ったものとして読む** — その頃は全部運行の元だった。
  */
 export function litigationResultFromKintai(result: Pick<LitigationOutputResult, 'source'>): boolean {
   return result.source === 'kintai'
@@ -174,7 +202,7 @@ export function foldYTimeDaysByMonth(rows: readonly { date: string }[], months: 
 const Y_TIME_DROPPED_RE = /^(\d{22,23}): (departure_at\/return_at が不足|KUDGIVT 取得失敗)/
 
 /**
- * プレビューの警告から「Y時間に入らなかった運行」を拾い、**運行NO の先頭 4 桁 (YYMM)** で
+ * 運行の元の応答の警告から「Y時間に入らなかった運行」を拾い、**運行NO の先頭 4 桁 (YYMM)** で
  * 月に振り分ける (区切りの月だけ。区切りの外の運行は捨てる)。
  */
 export function foldYTimeDroppedByMonth(warnings: readonly string[], months: readonly string[]): Record<string, LitigationYTimeDropped[]> {
@@ -192,12 +220,48 @@ export function foldYTimeDroppedByMonth(warnings: readonly string[], months: rea
 }
 
 /**
- * `getYTimePreview` の失敗を区切りの各月へ配る。**404 は「乗務員CD が alc に未登録」**
- * (alc が乗務員を引けなかった答え) なので `notFound` を立てる — 数えられないだけで、
- * 0 件と同じ扱いにはしない。
+ * 行を作れなかった勤務を月に振り分ける (区切りの月ごと。`months` の月は 0 件でもキーを持つ)。
+ * **始業の日付の月**。それが区切りの月に無ければ**終業の日付の月** (前の月に始まって区切りの中で終わる勤務)。
+ * どちらも区切りの外なら**区切りの最初の月** — 区切りの外だからと黙って落とさない
+ * (落とすと、行を作れなかった勤務が在るのに「欠けなし」になる)。
  */
-export function litigationAlcOpsFailure(httpStatus: number | null, reason: string): LitigationAlcOpsEntry {
-  return { ok: false, notFound: httpStatus === 404, reason }
+export function foldYTimeExcludedByMonth(
+  excluded: readonly YTimeExcludedShift[],
+  months: readonly string[],
+): Record<string, LitigationExcludedShift[]> {
+  const out: Record<string, LitigationExcludedShift[]> = {}
+  for (const m of months) out[m] = []
+  for (const e of excluded) {
+    const month = [e.start.slice(0, 7), e.end.slice(0, 7)].find(m => m in out) ?? months[0]
+    if (month !== undefined) out[month]!.push({ start: e.start, reason: e.reason })
+  }
+  return out
+}
+
+/**
+ * `getYTimeRows` の応答 1 つ (区切り 1 つぶん) を、月ごとの素材にする。**行の規則も時間の計算もしない** —
+ * 行と、行を作れなかった勤務を、月に振り分けるだけ。
+ * 運行NO の形の警告を拾う検知 ({@link foldYTimeDroppedByMonth}) は**運行の元のときだけ**
+ * (勤怠の元の警告は運行NO を持たない。欠けは `excluded` で見る)。
+ */
+export function litigationAlcOpsEntries(
+  preview: YTimeRowsPreview,
+  months: readonly string[],
+): [string, LitigationAlcOpsEntry][] {
+  const days = foldYTimeDaysByMonth(preview.rows, months)
+  const dropped = foldYTimeDroppedByMonth(preview.source === 'alc' ? preview.warnings : [], months)
+  const excluded = foldYTimeExcludedByMonth(preview.excluded, months)
+  return months.map(m => [m, { ok: true, days: days[m]!, dropped: dropped[m]!, source: preview.source, excluded: excluded[m]! }])
+}
+
+/**
+ * `getYTimeRows` の失敗を区切りの各月へ配る。**「乗務員CD が alc に未登録」と言うのは、404 かつ本文の
+ * `data.upstream` が `'alc'` のときだけ** (運行の経路の上流が乗務員を引けなかった答え。判定は出力タブと
+ * 同じ `isAlcDriverNotFound`)。勤怠の経路の失敗は 404 でも `notFound` にしない — 数えられないだけで、
+ * 0 件と同じ扱いにはしない。`body` は失敗の本文 (応答なしは null)。
+ */
+export function litigationAlcOpsFailure(httpStatus: number | null, body: unknown, reason: string): LitigationAlcOpsEntry {
+  return { ok: false, notFound: isAlcDriverNotFound(httpStatus, body), reason }
 }
 
 // ---- 1 セルずつの判定 ----
@@ -205,6 +269,12 @@ export function litigationAlcOpsFailure(httpStatus: number | null, reason: strin
 export function alcOpsCell(entry: LitigationAlcOpsEntry | undefined, chunkResult: LitigationOutputResult | null): LitigationCheckCell {
   if (entry) {
     if (entry.ok) {
+      // 勤怠の元: 0 日は「運行が無い」ではない (運行を取り込んでも直らない) ので、文を言い分ける
+      if (litigationResultFromKintai(entry)) {
+        return entry.days === 0
+          ? { state: 'ng', message: '勤怠の記録から作れた勤務日が 0 日' }
+          : { state: 'ok', message: `勤務日 ${entry.days} 日 (勤怠の記録)` }
+      }
       return entry.days === 0
         ? { state: 'ng', message: 'alc に運行が 0 件 (Y時間の勤務日 0 日)' }
         : { state: 'ok', message: `勤務日 ${entry.days} 日` }
@@ -253,15 +323,31 @@ function yTimeCellFromOutput(month: string, result: LitigationOutputResult): Lit
   if (result.status !== 'empty') return { state: 'ok', message: '書けなかった日なし' }
   return litigationResultFromKintai(result)
     ? { state: 'ok', message: '書けなかった日なし (この冊は勤務 0 件)' }
-    : { state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「alc の運行」の列を見てください)' }
+    : { state: 'ok', message: `書けなかった日なし (この冊は運行 0 件 — 「${LITIGATION_CHECK_LABELS.alcOps}」の列を見てください)` }
 }
 
-/** 「検知を実行」のプレビュー (`alcOps` と同じ応答) から、Y時間に入らなかった運行があるかを出す。 */
+/**
+ * 「検知を実行」の行 (`alcOps` と同じ応答) から、Y時間の欠けを出す。
+ * 勤怠の元は**その月に振り分けた、行を作れなかった勤務が 1 件でも在れば異常あり** (黙って「欠けなし」に
+ * しない)。運行の元は、Y時間に入らなかった運行 (運行NO つきの警告)。
+ */
 function yTimeCellFromPreview(entry: LitigationAlcOpsEntry): LitigationCheckCell {
   if (!entry.ok) {
     return entry.notFound
       ? { state: 'ng', message: '乗務員CD が alc に未登録で Y時間を作れない' }
       : { state: 'unknown', message: entry.reason }
+  }
+  if (litigationResultFromKintai(entry)) {
+    const excludedReasons: Record<string, number> = {}
+    for (const e of entry.excluded ?? []) excludedReasons[e.reason] = (excludedReasons[e.reason] ?? 0) + 1
+    const excluded = litigationExcludedSummary({ excludedReasons })
+    if (excluded.total > 0) {
+      const refold = excluded.refold > 0 ? ` — ${LITIGATION_REFOLD_NOTICE}` : ''
+      return { state: 'ng', message: `行を作れなかった勤務 ${excluded.total} 件: ${excluded.reasonsText}${refold}` }
+    }
+    return entry.days === 0
+      ? { state: 'ok', message: `欠けなし (この月は勤務日 0 日 — 「${LITIGATION_CHECK_LABELS.alcOps}」の列を見てください)` }
+      : { state: 'ok', message: '欠けなし' }
   }
   if (entry.dropped.length > 0) {
     const shown = entry.dropped.slice(0, UNKO_NO_PREVIEW).map(d => `${d.unkoNo} (${d.reason})`).join(', ')
@@ -269,13 +355,13 @@ function yTimeCellFromPreview(entry: LitigationAlcOpsEntry): LitigationCheckCell
     return { state: 'ng', message: `Y時間に入らなかった運行 ${entry.dropped.length} 件: ${shown}${more}` }
   }
   return entry.days === 0
-    ? { state: 'ok', message: '欠けなし (この月は運行 0 件 — 「alc の運行」の列を見てください)' }
+    ? { state: 'ok', message: `欠けなし (この月は運行 0 件 — 「${LITIGATION_CHECK_LABELS.alcOps}」の列を見てください)` }
     : { state: 'ok', message: '欠けなし' }
 }
 
 /**
- * Y時間の欠け。**ZIP を作らなくても「検知を実行」で判定できる** — 同じプレビューから
- * 「Y時間に入らなかった運行」(出庫/帰庫不足・KUDGIVT 取得失敗) を拾う。ZIP を作った月は
+ * Y時間の欠け。**ZIP を作らなくても「検知を実行」で判定できる** — 同じ応答から、勤怠の元は
+ * 「行を作れなかった勤務」を、運行の元は「Y時間に入らなかった運行」(出庫/帰庫不足・KUDGIVT 取得失敗) を拾う。ZIP を作った月は
  * 「テンプレに行が無く書けなかった日」も加える (これだけは Excel を作らないと分からない。
  * ただし訴訟準備は冊ごとに期間を振り直し、1 冊は最大 12 か月 = テンプレの行数より十分少ない)。
  * どちらかが異常・判定できないならそれを出す (ZIP 側を先に見る)。
@@ -397,6 +483,16 @@ function chunkResultFor(input: LitigationErrorInput, driverCd: string, month: st
   return i < 0 ? null : input.results[i] ?? null
 }
 
+/**
+ * 運行の取り込みのボタンを出すか。**運行の元で異常あり (0 件) のときだけ** — 勤怠の元の 0 日は、
+ * 運行を取り込んでも直らない (直し方は勤怠の畳み直し・記録の側)。検知の前 (entry なし) の異常ありは、
+ * 運行から作った出力タブの結果からの早回りなので、運行の元。
+ */
+function litigationCanImport(entry: LitigationAlcOpsEntry | undefined, cell: LitigationCheckCell): boolean {
+  if (cell.state !== 'ng') return false
+  return !(entry?.ok && litigationResultFromKintai(entry))
+}
+
 /** 表の行を作る。並びは乗務員ごと・月の古い順 (出力タブと同じ)。 */
 export function buildLitigationErrorRows(input: LitigationErrorInput): LitigationErrorRow[] {
   const out: LitigationErrorRow[] = []
@@ -410,7 +506,7 @@ export function buildLitigationErrorRows(input: LitigationErrorInput): Litigatio
         unkoGaps: unkoGapsCell(input.unkoGaps.get(key)),
         invariants: invariantsCell(driverCd, input.wageReports.get(key)),
       }
-      out.push({ driverCd, month, cells, canImport: cells.alcOps.state === 'ng' })
+      out.push({ driverCd, month, cells, canImport: litigationCanImport(input.alcOps.get(key), cells.alcOps) })
     }
   }
   return out
@@ -558,11 +654,27 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+function isExcludedShift(v: unknown): v is LitigationExcludedShift {
+  return isRecord(v) && typeof v.start === 'string' && typeof v.reason === 'string'
+}
+
+/**
+ * **`source` と `excluded` は、在れば型を検査し、無ければそのまま通す** — この 2 欄ができる前の保存
+ * (`{ok, days, dropped}` だけ) を捨てない (運行から読んだ結果として出る)。在って型が違う 1 件は捨てる。
+ */
 function restoreAlcOps(p: Record<string, unknown>): LitigationAlcOpsEntry | null {
   if (p.ok === true) {
-    return typeof p.days === 'number' && Array.isArray(p.dropped)
-      ? { ok: true, days: p.days, dropped: p.dropped as LitigationYTimeDropped[] }
-      : null
+    if (typeof p.days !== 'number' || !Array.isArray(p.dropped)) return null
+    const entry: LitigationAlcOpsEntry = { ok: true, days: p.days, dropped: p.dropped as LitigationYTimeDropped[] }
+    if (p.source !== undefined) {
+      if (!Y_TIME_SOURCES.includes(p.source)) return null
+      entry.source = p.source as YTimeSource
+    }
+    if (p.excluded !== undefined) {
+      if (!Array.isArray(p.excluded) || !p.excluded.every(isExcludedShift)) return null
+      entry.excluded = p.excluded
+    }
+    return entry
   }
   return typeof p.reason === 'string' ? { ok: false, notFound: p.notFound === true, reason: p.reason } : null
 }

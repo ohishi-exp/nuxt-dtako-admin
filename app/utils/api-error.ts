@@ -194,6 +194,36 @@ export function pickBodyReason(body: unknown): string | null {
 }
 
 /**
+ * 非 2xx の応答を、**status と parse 済みの本文ごと**運ぶ失敗 (Refs #1133 c1133-47)。
+ *
+ * `app/utils/api.ts` の「理由を拾って `Error.message` にして投げる」口 (`pickBodyReason(body) ??
+ * `HTTP ${status}``) は本文を捨てるので、呼び手が本文の `data` を見て言い分けたいとき
+ * (下の {@link isAlcDriverNotFound}) に使えない。欄の名前を ofetch の `FetchError` に合わせてある
+ * (`statusCode` / `data`) ので、{@link caughtErrorStatus} も {@link describeCaughtError} も
+ * そのまま読める — status や理由の読み方をもう 1 つ書かない。
+ *
+ * `message` は本文の理由 ({@link pickBodyReason})。**理由が無いときの文に status を入れない** —
+ * `describeCaughtError` が status を前置するので、`HTTP 503` にすると画面が `503 HTTP 503` になる
+ * (status が 2 回出るだけで理由が無い、#900 と同じ型)。
+ */
+export class ResponseFailure extends Error {
+  constructor(readonly statusCode: number, readonly data: unknown) {
+    super(pickBodyReason(data) ?? '応答に理由が入っていません')
+    this.name = 'ResponseFailure'
+  }
+}
+
+/**
+ * 「乗務員CD が alc に未登録」の失敗か — **404 かつ本文の `data.upstream` が `'alc'`** のときだけ。
+ * `server/utils/y-time-rows.ts` が運行の経路の上流の失敗にだけ付ける印で、R2 にテンプレが無い 404 や、
+ * 勤怠の経路の失敗 (`data.source = 'kintai'`) には付かない。**404 だけで未登録と言わない。**
+ * 訴訟準備の出力タブとエラータブが同じこの判定を通る。`body` は Nitro のエラー本文 (応答なしは null)。
+ */
+export function isAlcDriverNotFound(httpStatus: number | null, body: unknown): boolean {
+  return httpStatus === 404 && (body as { data?: { upstream?: unknown } } | null)?.data?.upstream === 'alc'
+}
+
+/**
  * 非 2xx の `Response` から**人が読める 1 文**を作る (Refs #996)。
  *
  * `describeApiError` との違いは**入口と出口の両方**:
@@ -448,8 +478,8 @@ export function describeCaughtError(e: unknown, retry: string): string {
  * `statusCode` を**先に**見る — 上流が `statusCode` を載せるようになったら、
  * 文字列を読む側は自動的に使われなくなる (`AUTH_FETCH_ERROR_MESSAGE` の注記)。
  *
- * 訴訟準備のエラータブ (`litigation.vue`) も `getYTimePreview` の 404 (乗務員CD が
- * alc に未登録) を見分けるのに使う — status の読み方を画面側に複製しないため export する。
+ * 訴訟準備のエラータブ (`litigation.vue`) も `getYTimeRows` の失敗の status を読むのに使う
+ * — status の読み方を画面側に複製しないため export する。
  */
 export function caughtErrorStatus(e: unknown): number | null {
   const err = (e ?? {}) as { statusCode?: unknown, message?: unknown }

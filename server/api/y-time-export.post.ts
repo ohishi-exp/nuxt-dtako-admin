@@ -3,8 +3,8 @@
  *
  * 1. body から `{ driver_cd, from, to, template_key }` を受け取る
  * 2. Y時間 の行を取る (`server/utils/y-time-rows.ts` の `fetchYTimeRows`)。元は 2 つ:
- *    運行 (rust-alc-api `/api/dtako/y-time-export` を auth-worker `/alc-proxy` 経由で GET) と、
- *    勤怠の勤務の記録 (下の「行の元」)。**どちらの元か・倒し方・1 社固定の認可・失敗の形は
+ *    勤怠の勤務の記録 (下の「行の元」) と、運行 (rust-alc-api `/api/dtako/y-time-export` を
+ *    auth-worker `/alc-proxy` 経由で GET)。**どちらの元か・倒し方・1 社固定の認可・失敗の形は
  *    util が持つ** — ここには書かない
  * 3. R2 binding (`env.DTAKO_R2`) でテンプレ xlsx を fetch
  * 4. ExcelJS で Y時間 シートに書き込み
@@ -31,14 +31,18 @@
  * 書いている性質と同じ)。Nitro 側で確定させれば、上流が変わっても規約が残る。
  * ここが返す xlsx は**乗務員 1 人の日別 拘束/運転/休憩 の実データ**なので、
  * 「Access を通れる誰か」ではなく「ログインしている人」に限る。
- * 呼ぶのは Y時間 タブ (`/y-time-export`) の**ブラウザだけ**で、relay / cron /
- * service binding からの呼び出しは無い (`git grep` で確認)。
+ * 呼ぶのは Y時間 のページ (`/y-time-export`) と訴訟準備の出力タブ (`/litigation`) の
+ * **ブラウザだけ**で、relay / cron / service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ * 前置き (secret の解決 → `requireAuth` → role の確認) は `server/utils/scraper-relay.ts` の
+ * `authorizeScraperRelay` 1 本 (行を JSON で返す `y-time-rows.post.ts` と同じ)。ここに写しを持たない。
  *
  * **書き口 (`y-time-template.put.ts`) と読み口 (`y-time-template.get.ts`) が
  * 認証を要求するのに、テンプレを使って出力する側だけ素通し**、という食い違いも
  * ここで解消する。
  *
  *   401 — 未ログイン (`requireAuth`)
+ *   403 — role が admin / payroll でない
  *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定
  *
  * ## `period_rewrite` (訴訟準備の出力タブ、Refs #1133 c1133-2)
@@ -46,6 +50,7 @@
  * `true` のときだけ、テンプレの対象期間 (`要素!F3`/`I3`・Y時間 A 列・`月所!B6`) を
  * body の `from`/`to` に振り直す (`writeYTimeRows` の `period`)。無指定の呼び出し
  * (`/y-time-export` ページ) は今までどおりテンプレ自前の期間を使う。
+ * **意味はこれだけ** — 行の元はこの欄で変わらない (下の「行の元」)。
  *
  * ## 件数ヘッダ (`x-y-time-rows` / `-missing-count` / `-warnings-count`)
  *
@@ -56,11 +61,12 @@
  * (`x-y-time-source` と `-excluded-reasons` を合わせて画面が言い分ける。
  * 404 = 乗務員CD が alc に無い、とは別物)。
  *
- * ## 行の元 (`x-y-time-source` ほか、Refs #1133 c1133-46)
+ * ## 行の元 (`x-y-time-source` ほか、Refs #1133 c1133-46 / c1133-47)
  *
- * `period_rewrite: true` (訴訟準備の出力) のときだけ、勤怠の勤務の記録 (wage report と同じ元) から
- * 行を作る。`period_rewrite` の無い呼び出し (`/y-time-export` ページ) は運行の元のまま
- * (プレビューと一緒に切り替えるまで、同じページで Excel とプレビューの元を食い違わせない)。
+ * **どの呼び出しも**、勤怠の勤務の記録 (wage report と同じ元) から行を作る — 訴訟準備の出力も
+ * Y時間 のページも同じ。運行 (デジタコ) から作るのは、util が倒す 3 つの形のときだけ
+ * (勤怠の記録が無い会社・勤怠の設定が無い環境)。同じページのプレビュー (`POST /api/y-time-rows`) も
+ * 同じ util を通るので、Excel とプレビューで元が食い違わない。
  * どの元で作ったかと、行を作れなかった勤務・勤務の記録の無い月は応答ヘッダで返す
  * (`yTimeSourceHeaders`。値は ASCII の決まった語だけ)。
  *
@@ -78,11 +84,10 @@ import {
   createError,
   setResponseHeader,
 } from 'h3'
-import { requireAuth } from '@ippoan/auth-client/server'
-import { assertAllowedRole } from '../utils/require-role'
 import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
-import { cfEnv, resolveSecret } from '../utils/cf-env'
-import { fetchYTimeRows, yTimeSourceHeaders } from '../utils/y-time-rows'
+import { cfEnv } from '../utils/cf-env'
+import { authorizeScraperRelay } from '../utils/scraper-relay'
+import { fetchYTimeRows, yTimeRowsInputFromBody, yTimeSourceHeaders } from '../utils/y-time-rows'
 
 interface RequestBody {
   driver_cd: string
@@ -101,49 +106,30 @@ interface R2BucketMinimal {
 }
 interface CloudflareEnv {
   DTAKO_R2?: R2BucketMinimal
-  INTERNAL_SHARED_SECRET?: unknown
-  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 export default defineEventHandler(async (event) => {
-  // nitro-cloudflare-pages / cloudflare-module で `event.context.cloudflare.env` に bindings が入る
-  const env = cfEnv<CloudflareEnv>(event)
-  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
-  if (!sharedSecret) {
-    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
-  }
-  const authWorkerUrl
-    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
-      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
-      : 'https://auth.ippoan.org'
   // **body を読む前・上流を叩く前に認証する。**
-  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
-  assertAllowedRole(auth)
+  const auth = await authorizeScraperRelay(event)
 
   const body = await readBody<RequestBody>(event)
-  if (!body || !body.driver_cd || !body.from || !body.to || !body.template_key) {
-    throw createError({
-      statusCode: 400,
-      statusMessage: 'driver_cd / from / to / template_key are required',
-    })
-  }
-  if (!body.template_key.startsWith('templates/')) {
+  // body が object でない・3 欄のどれかが無いときはここで 400 (この先の `body` は object)
+  const input = yTimeRowsInputFromBody(body)
+  const templateKey = body.template_key
+  if (typeof templateKey !== 'string' || !templateKey.startsWith('templates/')) {
     throw createError({
       statusCode: 400,
       statusMessage: 'template_key must start with "templates/"',
     })
   }
+  const periodRewrite = body.period_rewrite === true
 
-  // 1. Y時間 の行。勤怠の元を試すのは訴訟準備の出力 (`period_rewrite: true`) だけ。
-  //    relay へ渡す tenant は認証結果の値 (利用者の body からは取らない)。
-  const data = await fetchYTimeRows(
-    event,
-    { driverCd: body.driver_cd, from: body.from, to: body.to },
-    { tryKintai: body.period_rewrite === true, tenantId: auth.tenant_id, sharedSecret },
-  )
+  // 1. Y時間 の行。relay へ渡す tenant は認証結果の値 (利用者の body からは取らない)。
+  const data = await fetchYTimeRows(event, input, auth)
 
   // 2. R2 binding でテンプレ取得
-  const r2 = env.DTAKO_R2
+  // nitro-cloudflare-pages / cloudflare-module で `event.context.cloudflare.env` に bindings が入る
+  const r2 = cfEnv<CloudflareEnv>(event).DTAKO_R2
   if (!r2) {
     throw createError({
       statusCode: 503,
@@ -151,19 +137,19 @@ export default defineEventHandler(async (event) => {
         'R2 binding (DTAKO_R2) not available. Deploy via wrangler or set up local R2 binding.',
     })
   }
-  const tplObj = await r2.get(body.template_key)
+  const tplObj = await r2.get(templateKey)
   if (!tplObj) {
     throw createError({
       statusCode: 404,
-      statusMessage: `template not found in R2: ${body.template_key}`,
+      statusMessage: `template not found in R2: ${templateKey}`,
     })
   }
   const tplBytes = await tplObj.arrayBuffer()
 
   // 3. xlsx 生成 — 期間内の旧データを書き込み前にクリアして、テンプレ汚染を除去する
   const result = await writeYTimeRows(tplBytes, data.rows, {
-    clearPeriod: { from: body.from, to: body.to },
-    ...(body.period_rewrite === true ? { period: { from: body.from, to: body.to } } : {}),
+    clearPeriod: { from: input.from, to: input.to },
+    ...(periodRewrite ? { period: { from: input.from, to: input.to } } : {}),
   })
 
   setResponseHeader(event, 'x-y-time-rows', String(data.rows.length))
@@ -197,7 +183,7 @@ export default defineEventHandler(async (event) => {
   setResponseHeader(
     event,
     'content-disposition',
-    `attachment; filename="${buildFilename(body.driver_cd, body.from, body.to)}"`,
+    `attachment; filename="${buildFilename(input.driverCd, input.from, input.to)}"`,
   )
   return result.bytes
 })

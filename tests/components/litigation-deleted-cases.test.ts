@@ -19,7 +19,7 @@ import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
 
 const { api } = vi.hoisted(() => ({
-  api: { getDrivers: vi.fn(), getYTimePreview: vi.fn() },
+  api: { getDrivers: vi.fn(), getYTimeRows: vi.fn() },
 }))
 
 vi.mock('~/utils/download-blob', () => ({ downloadBlob: vi.fn() }))
@@ -27,7 +27,7 @@ vi.mock('@ippoan/auth-client', () => ({ useAuth: () => ({ token: { value: 'jwt-t
 vi.mock('~/utils/api', async importOriginal => ({
   ...(await importOriginal<typeof import('~/utils/api')>()),
   getDrivers: api.getDrivers,
-  getYTimePreview: api.getYTimePreview,
+  getYTimeRows: api.getYTimeRows,
 }))
 
 const nuxtState = new Map<string, Ref<unknown>>()

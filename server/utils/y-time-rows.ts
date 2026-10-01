@@ -12,9 +12,11 @@
  * そのまま上流へ渡し、上流が返した `rows` をそのまま返す (並べ替えない・丸めない・足さない)。
  * wage report と同じ元から作るための口で、2 つ目の計算を置かない。
  *
- * ## 勤怠の元を試すかは呼び手が決める (`tryKintai`)
+ * ## どの呼び出しも、まず勤怠の元を試す (Refs #1133 c1133-47)
  *
- * 試さない呼び出しは今までの運行の経路そのまま (relay を呼ばず、`tenantId` も見ない)。
+ * 呼び手は 2 つの route — Excel を作る `POST /api/y-time-export` (訴訟準備の出力タブと Y時間 のページ) と、
+ * 行を JSON で返す `POST /api/y-time-rows` (訴訟準備のエラータブの検知と Y時間 のページのプレビュー)。
+ * 同じ人・同じ期間なら、どの画面も同じ元の行を見る。運行の元になるのは下の 3 つの形のときだけ。
  *
  * ## 運行の経路へ倒すのは 3 つの形だけ
  *
@@ -36,7 +38,7 @@
  *    違えば 500 で、勤務を返さず上流も呼ばない
  *
  * 認証結果に `tenant_id` が無いときは照合できないので、relay も上流も呼ばず 500
- * (運行の経路にも倒さない)。
+ * (運行の経路にも倒さない。照合できない状態を通さない)。
  *
  * ## 失敗の運び方
  *
@@ -45,9 +47,15 @@
  * どの status・本文の `error` / `reason` かを運ぶ。**relay の本文で運ぶのはその 2 欄だけ。**
  * `statusMessage` は ASCII の決まった語 (日本語は本番で落ちる)、画面に出す 1 文は `message`。
  *
- * 利用者に返す status は、**その人の話のときだけ**そのまま返す (上流の 401 / 403 = その人の
- * ログイン・権限)。relay の 4xx と上流のほかの 4xx は、利用者が送った内容の話ではないので 502 にする
- * (画面は status から「再ログイン」「送った内容を直す」等の次の一手を組むため)。
+ * 利用者に返す status は、**その人の話のときだけ**そのまま返す (画面は status から「再ログイン」
+ * 「送った内容を直す」等の次の一手を組むため):
+ *
+ * - 上流の 401 / 403 = その人のログイン・権限
+ * - **relay の 400** = その人が送った内容 (relay の 400 は乗務員CD・`from` / `to` の形と期間の検証でしか出ない。
+ *   例: 期間が relay の上限を超える)。relay の理由は `message` と `data.error` にそのまま載る
+ *
+ * relay のほかの 4xx (401 / 倒さない形の 403 / 404) と上流のほかの 4xx (400 を含む) は、利用者が送った内容の
+ * 話ではないので 502 にする。**期間の上限の規則はここに写さない** (relay が判定し、ここは status を運ぶだけ)。
  */
 import { createError } from 'h3'
 import type { H3Event } from 'h3'
@@ -68,6 +76,9 @@ const RELAY_OUT_OF_SCOPE = 'kintai_out_of_scope'
 /** relay の 503 の本文の `reason` (relay に勤怠の会社が設定されていない) */
 const RELAY_COMP_ID_UNSET = 'kintai_comp_id_unset'
 
+/** relay が入力の検証 (乗務員CD・期間) で返す status。利用者が直せる内容なので、そのまま利用者へ返す */
+const RELAY_BAD_INPUT = 400
+
 const RELAY_PATH = '/kintai-relay/y-time-shifts'
 /** 応答ヘッダ `x-y-time-excluded` に載せる上限 (全件の件数は `-excluded-reasons` が持つ) */
 export const Y_TIME_EXCLUDED_HEADER_LIMIT = 20
@@ -80,13 +91,27 @@ export interface YTimeRowsInput {
   to: string
 }
 
+/** `authorizeScraperRelay` の戻り値がそのまま渡せる形 */
 export interface YTimeRowsOptions {
-  /** 勤怠の元を試すか。false なら今までの運行の経路 */
-  tryKintai: boolean
-  /** `requireAuth` の結果の `tenant_id` (勤怠を試すときだけ見る) */
-  tenantId: string | undefined
+  /** `requireAuth` の結果の `tenant_id` */
+  tenantId?: string
   /** 呼び手が解決済みの共有 secret (relay の関門に渡す) */
   sharedSecret: string
+}
+
+/**
+ * route の body から `driver_cd` / `from` / `to` を読む (`POST /api/y-time-export` と
+ * `POST /api/y-time-rows` が共用。同じ検証を 2 つ持たない)。3 つとも空でない文字列でなければ 400。
+ * **日付の形と期間の長さはここで見ない** — relay と上流がそれぞれ見る (規則の写しを置かない)。
+ */
+export function yTimeRowsInputFromBody(body: unknown): YTimeRowsInput {
+  const b = isRecord(body) ? body : {}
+  const text = (v: unknown) => (typeof v === 'string' ? v : '')
+  const input = { driverCd: text(b.driver_cd), from: text(b.from), to: text(b.to) }
+  if (!input.driverCd || !input.from || !input.to) {
+    throw createError({ statusCode: 400, statusMessage: 'driver_cd / from / to are required' })
+  }
+  return input
 }
 
 export interface YTimeRowsResult {
@@ -125,7 +150,7 @@ function kintaiError(
   })
 }
 
-/** 運行の経路 (今までの GET)。非 2xx は今までと同じ形 (`data.upstream = 'alc'`) で投げる。 */
+/** 運行の経路 (GET)。非 2xx は `data.upstream = 'alc'` を付けて、上流の status のまま投げる。 */
 async function rowsFromAlc(event: H3Event, input: YTimeRowsInput, sourceReason: YTimeSourceReason | null): Promise<YTimeRowsResult> {
   // #434 step 3 (方式 B): rust-alc-api を直叩きせず auth-worker `/alc-proxy` に委譲する。
   // introspect / ACL / OIDC mint / identity 注入は auth-worker 側で行われる。
@@ -189,7 +214,7 @@ async function shiftsFromRelay(
     const error = typeof body.error === 'string' ? body.error : undefined
     const reason = typeof body.reason === 'string' ? body.reason : undefined
     throw kintaiError(
-      status !== undefined && status >= 500 ? status : 502,
+      status !== undefined && (status >= 500 || status === RELAY_BAD_INPUT) ? status : 502,
       'relay',
       `勤怠の勤務の記録を読めませんでした (relay ${status ?? '応答なし'}${error ? `: ${error}` : ''})`,
       { status, error, reason },
@@ -237,11 +262,10 @@ async function rowsFromShifts(event: H3Event, input: YTimeRowsInput, shifts: unk
 }
 
 /**
- * Y時間 の行と、その元を返す。呼び手 (route) は返った `rows` をそのまま Excel に書く。
- * 認証 (`requireAuth`) と role の確認は呼び手が済ませてから呼ぶ。
+ * Y時間 の行と、その元を返す。呼び手 (route) は返った `rows` をそのまま Excel に書くか、そのまま返す。
+ * 認証 (`requireAuth`) と role の確認は呼び手が済ませてから呼ぶ (`authorizeScraperRelay`)。
  */
 export async function fetchYTimeRows(event: H3Event, input: YTimeRowsInput, opts: YTimeRowsOptions): Promise<YTimeRowsResult> {
-  if (!opts.tryKintai) return rowsFromAlc(event, input, null)
   if (!opts.tenantId) {
     throw kintaiError(500, 'auth', 'ログイン中の会社を特定できないため、勤怠の勤務の記録を読みませんでした')
   }
@@ -267,7 +291,8 @@ function headerToken(s: string, fallback: string): string {
 /**
  * 行の元を応答ヘッダにする (本文が binary の route 用)。**値は ASCII の決まった語だけ**
  * (日本語をヘッダに入れると 500 になる)。読む側は `app/utils/litigation-output.ts` の
- * `yTimeSourceFromHeaders`。
+ * `yTimeSourceFromHeaders` (訴訟準備の出力タブと Y時間 のページのダウンロードが使う)。
+ * 本文が JSON の route (`POST /api/y-time-rows`) はヘッダを使わず、結果を本文で返す。
  *
  * - `x-y-time-source`: `kintai` | `alc`
  * - `x-y-time-source-reason`: 倒したときだけ
