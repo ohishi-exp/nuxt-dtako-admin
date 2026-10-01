@@ -109,6 +109,10 @@ export interface WageRow {
   /** `hourlyRate` を採った単価履歴の県 (最低賃金の一括設定で入れた単価だけ)。 */
   hourlyRatePrefecture?: string
   minutes: Record<WageCategoryKey, number>
+  /** 法内残業 (所定の労働時間を超え、1 日 8 時間までの労働) の月の和 (分)。区分 (`minutes`) の外の参考値で、
+   * 「法定時間内」と「週 40 時間超」の内数。**古い応答・保存物には無い** (Refs #1133)。無い・null は
+   * 値が分からない月で、0 分ではない (保存の検査の必須にも入れない)。 */
+  withinStatutoryOvertimeMinutes?: number | null
   amounts: Record<WageCategoryKey, number> | null
   totalAmount: number | null
   /** 支給見込 ÷ 基礎時間 (円/h)。**`totalAmount` は割増 (時間外・深夜・休日) を全部

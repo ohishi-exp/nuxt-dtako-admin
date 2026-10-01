@@ -441,9 +441,16 @@ export function buildLitigationZipSummary(input: LitigationZipSummaryInput): Lit
 // ---- 月ごとの時間 (wage report。出力タブの表と紙面) ----
 
 /** 表の時間の列。wage report の月の区分をそのまま出す (Excel の列名には寄せない) */
-export const LITIGATION_HOURS_COLUMNS = ['法定時間内', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間'] as const
+export const LITIGATION_HOURS_COLUMNS = ['法定時間内', 'うち法内残業', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間'] as const
 
 export const LITIGATION_HOURS_NOT_APPLIED = '不適用'
+/** 「うち法内残業」の値が分からない月 (wage report の行に欄が無い・null)。0:00 とは別 */
+export const LITIGATION_HOURS_UNKNOWN = '—'
+/** 「うち法内残業」の合計に、値の分からない月が混ざっているときに付ける (在る月だけの和を全体の和と読ませない) */
+export const LITIGATION_HOURS_PARTLY_UNKNOWN = '(一部の月は不明)'
+/** 出力タブの説明文に出す 1 文 (列「うち法内残業」の意味と、「—」の月の直し方) */
+export const LITIGATION_HOURS_WITHIN_STATUTORY_NOTE
+  = `「うち法内残業」は、所定の労働時間を超え、1 日 8 時間までの労働です (法定時間内と週 40 時間超の内数)。値が「${LITIGATION_HOURS_UNKNOWN}」の月は、給与比較タブの「拘束の材料を取り直す」を押すと出ます。`
 /** まだ取りに行っていない月 */
 export const LITIGATION_HOURS_PENDING = '未取得'
 /** 取りに行って取れなかった月 (後ろに理由を続ける) */
@@ -456,7 +463,7 @@ export const LITIGATION_HOURS_MISSING = '欠測'
 export interface LitigationHoursRow {
   /** 対象月 `YYYY-MM` (合計行は「合計 (N か月ぶん)」) */
   month: string
-  /** `LITIGATION_HOURS_COLUMNS` の順の `H:MM` (月 60h 超が不適用なら「不適用」)。値の無い月は空 */
+  /** `LITIGATION_HOURS_COLUMNS` の順の `H:MM` (月 60h 超が不適用なら「不適用」、法内残業が分からなければ「—」)。値の無い月は空 */
   cells: string[]
   /** 値の無い月の状態 (未取得 / 取得に失敗: 理由 / 拘束の記録なし / 欠測)。値の在る月は null */
   note: string | null
@@ -479,9 +486,15 @@ export interface LitigationHoursBook {
   checkedAtText: string | null
 }
 
-/** 1 か月ぶんの値 (分)。`over60` が null = 月 60h 超の割増が適用されない月 */
+/**
+ * 1 か月ぶんの値 (分)。`over60` が null = 月 60h 超の割増が適用されない月。
+ * `withinStatutoryOvertime` が null = 法内残業の値が分からない月 (旧い保存・欄を持たない経路・日別の欠測)
+ */
 interface HoursMinutes {
   statutory: number
+  withinStatutoryOvertime: number | null
+  /** 合計だけが true になりうる: 値の分からない月を除いて足した */
+  withinStatutoryOvertimePartial: boolean
   overtime: number
   over60: number | null
   nonLegalHoliday: number
@@ -498,6 +511,8 @@ const WAGE_CATEGORY_KEYS = [
 /**
  * wage report の 1 行を表の列にする。**`night` は `statutory` の内数**なので総労働時間に足さない
  * (深夜の列にだけ入れる)。区分が数でない行 (保存の検査は `wage.minutes` の形まで見ない) は null。
+ * **法内残業の欄はこの検査に入れない** — 欄の無い旧い保存の行を「読めない形」にしない (列だけ「—」)。
+ * 法内残業は「法定時間内」と週 40 時間超の内数なので、総労働時間にも足さない。
  */
 function hoursMinutes(wage: WageRow, month: string): HoursMinutes | null {
   const m: Partial<Record<WageCategoryKey, unknown>> | undefined = wage.minutes
@@ -505,8 +520,11 @@ function hoursMinutes(wage: WageRow, month: string): HoursMinutes | null {
   if (!m || !WAGE_CATEGORY_KEYS.every(k => isMinutes(m[k]))) return null
   if (!isMinutes(wage.overtimeMinutes) || !isMinutes(wage.nightOvertimeMinutes)) return null
   const v = wage.minutes
+  const within = wage.withinStatutoryOvertimeMinutes
   return {
     statutory: v.statutory,
+    withinStatutoryOvertime: isMinutes(within) ? within as number : null,
+    withinStatutoryOvertimePartial: false,
     overtime: monthlyOvertimeMinutes(wage),
     over60: monthlyOvertimeOver60hMinutes(wage, month),
     nonLegalHoliday: v.nonLegalHoliday + v.nonLegalHolidayNight,
@@ -517,9 +535,16 @@ function hoursMinutes(wage: WageRow, month: string): HoursMinutes | null {
   }
 }
 
+function withinStatutoryOvertimeCell(m: HoursMinutes): string {
+  if (m.withinStatutoryOvertime === null) return LITIGATION_HOURS_UNKNOWN
+  const text = fmtTimecardCompareMinutes(m.withinStatutoryOvertime)
+  return m.withinStatutoryOvertimePartial ? `${text} ${LITIGATION_HOURS_PARTLY_UNKNOWN}` : text
+}
+
 function hoursCells(m: HoursMinutes): string[] {
   return [
     fmtTimecardCompareMinutes(m.statutory),
+    withinStatutoryOvertimeCell(m),
     fmtTimecardCompareMinutes(m.overtime),
     m.over60 === null ? LITIGATION_HOURS_NOT_APPLIED : fmtTimecardCompareMinutes(m.over60),
     fmtTimecardCompareMinutes(m.nonLegalHoliday),
@@ -529,12 +554,19 @@ function hoursCells(m: HoursMinutes): string[] {
   ]
 }
 
-/** 値の在る月の合計。月 60h 超は適用される月の超過ぶんだけを足し、適用される月が無ければ null (不適用) */
+/**
+ * 値の在る月の合計。月 60h 超は適用される月の超過ぶんだけを足し、適用される月が無ければ null (不適用)。
+ * 法内残業は値の分かる月だけを足す — 分かる月が無ければ null (「—」)、分からない月が混ざれば
+ * 「(一部の月は不明)」を付ける (分かる月だけの和を、全部の月の和と読ませない)。
+ */
 function sumHours(months: readonly HoursMinutes[]): HoursMinutes {
   const sum = (pick: (m: HoursMinutes) => number) => months.reduce((acc, m) => acc + pick(m), 0)
   const applied = months.filter(m => m.over60 !== null)
+  const withinKnown = months.filter(m => m.withinStatutoryOvertime !== null)
   return {
     statutory: sum(m => m.statutory),
+    withinStatutoryOvertime: withinKnown.length === 0 ? null : withinKnown.reduce((acc, m) => acc + m.withinStatutoryOvertime!, 0),
+    withinStatutoryOvertimePartial: withinKnown.length < months.length,
     overtime: sum(m => m.overtime),
     over60: applied.length === 0 ? null : applied.reduce((acc, m) => acc + m.over60!, 0),
     nonLegalHoliday: sum(m => m.nonLegalHoliday),

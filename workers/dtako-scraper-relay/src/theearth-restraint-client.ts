@@ -750,6 +750,10 @@ export interface RestraintSummaryDay {
   overtimeNightMinutes: number | null;
   /** 休日区分 (タイムカード由来のみ。無ければ曜日から判定する)。 */
   holidayKind?: RestraintHolidayKind;
+  /** 法内残業 (所定の労働時間を超え、1 日 8 時間までの実働、分)。**GCP の経路
+   * (`overlayGcpDayTimes`) だけが入れる。** 無い = その経路は法内残業を持たない、
+   * null = 上流の値が読めなかった。どちらも欠測で、0 分ではない。 */
+  withinStatutoryOvertimeMinutes?: number | null;
 }
 
 export interface RestraintDriverSummary {

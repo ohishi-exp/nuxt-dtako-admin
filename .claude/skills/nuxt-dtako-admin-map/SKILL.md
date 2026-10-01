@@ -416,8 +416,18 @@ fail することが本番で発覚 → revert。
 (`buildLitigationHoursBooks` = `app/utils/litigation-output.ts`、部品 `LitigationMonthlyHoursTable.vue`)。
 
 - 行は**暦月** (締め日ではまとめ直さない — 保存した wage report は日別を持たない)。
-  列は 法定時間内 / 法外残業 / うち月60h超 / 法定外休日 / 法定休日 / 深夜 (内数) / 総労働時間。
-  **`night` は `statutory` の内数**なので総労働時間に足さない。「法内残業」は wage report に無いので出さない
+  列は 法定時間内 / うち法内残業 / 法外残業 / うち月60h超 / 法定外休日 / 法定休日 / 深夜 (内数) / 総労働時間。
+  **`night` は `statutory` の内数**なので総労働時間に足さない
+- **「うち法内残業」** (所定の労働時間を超え、1 日 8 時間までの労働。Refs #1133 c1133-41) は wage report の行の
+  `withinStatutoryOvertimeMinutes` (**区分 `minutes` の外の 1 欄**。「法定時間内」と週 40 時間超の内数で、
+  総労働時間にも金額にも検算にも入らない)。relay は GCP の経路 (`gcp-day-summaries.ts`) でだけ上流の
+  `within_statutory_overtime_minutes` を日別行に通し、`restraint-wage.ts` の `classifyMonthDetail`
+  (`classifyMonth` の本体。日の分類は区分と同じ 1 つ) が**平日として分類された日だけ**足す。
+  **欠測は 0 にしない** — 日別の欄が無い・数でない日は null、平日の日が 1 日でも欠測なら月の値は null。
+  画面は欄が無い・null の行 (旧い保存・オンプレ / タイムカード由来 / D1 の経路) を「—」、合計は値の分かる月だけを足して
+  分からない月が混ざれば「(一部の月は不明)」を付ける。**`hoursMinutes` の検査 (9 区分 + 残業 2 欄) にこの欄を足さない**
+  (足すと保存済みの月が全部「取得に失敗」になる)。`WAGE_LOGIC_VERSION` は上げていない (金額と 9 区分は不変)。
+  既に取ってある月は給与比較タブの「拘束の材料を取り直す」で値が入る
 - 法外残業と月 60h 超は `restraint-wage-view.ts` の `monthlyOvertimeMinutes` / `monthlyOvertimeOver60hMinutes`
   (給与比較の残業時間・`isMonthlyOvertimeOver60h` と同じ式)。**ここに 2 つ目の計算を置かない**
 - 月の状態は 4 つ: 未取得 / 取得に失敗 (理由つき) / 拘束の記録なし (取り直しても同じ) / 欠測。

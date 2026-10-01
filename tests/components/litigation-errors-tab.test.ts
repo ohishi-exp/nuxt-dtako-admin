@@ -1920,11 +1920,11 @@ describe('出力タブ: 月ごとの時間 (wage report、Refs #1133 c1133-36)',
     const w = await mountAndOpenOutput()
     expect(hours(w).find('[data-hours="heading"]').text()).toBe('甲野太郎 (1078) 2025-01〜2025-02')
     expect(monthRows(w)).toEqual([
-      ['2025-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
+      ['2025-01', '150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
       ['2025-02', '未取得'],
     ])
     expect(hours(w).find('[data-hours="total"]').findAll('td').map(td => td.text())).toEqual([
-      '合計 (1 か月ぶん)', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00',
+      '合計 (1 か月ぶん)', '150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00',
     ])
     expect(hours(w).find('[data-hours="checked-at"]').text()).toBe('最終取得 2026-09-28 10:00')
     expect(hours(w).find('[data-hours="needs-fetch"]').text()).toBe('エラータブ (または給与比較) で拘束の材料を取ると出ます')
@@ -1934,6 +1934,34 @@ describe('出力タブ: 月ごとの時間 (wage report、Refs #1133 c1133-36)',
     // 紙面にも同じ表が出る
     expect(printHours(w).findAll('[data-hours="month"]').map(tr => tr.findAll('td').map(td => td.text()))).toEqual(monthRows(w))
     expect(printHours(w).find('[data-hours="total"]').text()).toContain('合計 (1 か月ぶん)')
+    w.unmount()
+  })
+
+  it('★ うち法内残業: 欄の在る月は時間、欄の無い月 (旧い保存) は「—」、合計は「(一部の月は不明)」つき。紙面にも同じ列が出て、出力タブの説明が列の意味を言う', async () => {
+    storedItems = [
+      stored('2025-01', [wageRow({ wage: { ...HOURS_WAGE, withinStatutoryOvertimeMinutes: 630 } })]),
+      stored('2025-02', [wageRow()]),
+    ]
+    const w = await mountAndOpenOutput()
+    expect(hours(w).findAll('th').map(th => th.text())).toEqual([
+      '対象月', '法定時間内', 'うち法内残業', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間',
+    ])
+    expect(monthRows(w)).toEqual([
+      ['2025-01', '150:00', '10:30', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
+      ['2025-02', '150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
+    ])
+    expect(hours(w).find('[data-hours="total"]').findAll('td').map(td => td.text())).toEqual([
+      '合計 (2 か月ぶん)', '300:00', '10:30 (一部の月は不明)', '131:00', '11:00', '12:00', '17:00', '25:00', '460:00',
+    ])
+    // 欄の無い月は「取得に失敗」にも「取ると出ます」にもならない
+    expect(hours(w).find('[data-hours="needs-fetch"]').exists()).toBe(false)
+    expect(w.find('[data-testid="litigation-output-within-statutory-note"]').text()).toBe(
+      '「うち法内残業」は、所定の労働時間を超え、1 日 8 時間までの労働です (法定時間内と週 40 時間超の内数)。値が「—」の月は、給与比較タブの「拘束の材料を取り直す」を押すと出ます。',
+    )
+    // 紙面にも同じ列・同じ値
+    expect(printHours(w).findAll('th').map(th => th.text())).toEqual(hours(w).findAll('th').map(th => th.text()))
+    expect(printHours(w).findAll('[data-hours="month"]').map(tr => tr.findAll('td').map(td => td.text()))).toEqual(monthRows(w))
+    expect(printHours(w).find('[data-hours="total"]').findAll('td').map(td => td.text())[2]).toBe('10:30 (一部の月は不明)')
     w.unmount()
   })
 
@@ -1973,7 +2001,7 @@ describe('出力タブ: 月ごとの時間 (wage report、Refs #1133 c1133-36)',
     release()
     await settle()
     expect(hours(w).find('[data-hours="notice"]').exists()).toBe(false)
-    expect(monthRows(w)[0]).toEqual(['2025-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'])
+    expect(monthRows(w)[0]).toEqual(['2025-01', '150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'])
     w.unmount()
   })
 
@@ -2001,8 +2029,8 @@ describe('出力タブ: 月ごとの時間 (wage report、Refs #1133 c1133-36)',
     const [jan, feb] = monthRows(w)
     // 給与比較は `150h00m`、表は `150:00` — 表記だけが違う (残業・深夜・休日の根拠は内訳の先頭 = 残業の時間)
     const asColon = (s: string) => /(\d+)h(\d{2})m/.exec(s)!.slice(1).join(':')
-    expect(jan!.slice(1, 3)).toEqual([asColon(baseBasis), asColon(overtimeBasis)])
-    expect(jan!.slice(1, 3)).toEqual(['150:00', '65:30'])
+    expect([jan![1], jan![3]]).toEqual([asColon(baseBasis), asColon(overtimeBasis)])
+    expect([jan![1], jan![3]]).toEqual(['150:00', '65:30'])
     expect(feb![0]).toBe('2025-02')
     expect(feb![1]).toMatch(/^取得に失敗: .*504/)
     expect(hours(w).find('[data-hours="needs-fetch"]').exists()).toBe(true)
@@ -2032,7 +2060,7 @@ describe('出力タブ: 月ごとの時間 (wage report、Refs #1133 c1133-36)',
     expect(w.find('[data-testid="litigation-output-restore-notice"]').exists()).toBe(false)
     expect(w.find('[data-testid="litigation-output-table"]').text()).toContain('41 行')
     // 版の中の古い集計 (法外残業 103:59) は出ない。表は wage report の値
-    expect(monthRows(w)[0]).toEqual(['2025-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'])
+    expect(monthRows(w)[0]).toEqual(['2025-01', '150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'])
     expect(w.text()).not.toContain('103:59')
     expect(w.text()).not.toContain('集計できなかった')
     w.unmount()

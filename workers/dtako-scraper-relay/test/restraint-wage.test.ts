@@ -974,6 +974,98 @@ describe('computeWageRow', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 法内残業 (区分の外の参考値。Refs #1133)
+// ---------------------------------------------------------------------------
+
+describe('computeWageRow: 法内残業 (withinStatutoryOvertimeMinutes、2025-04: 1日=火, 6日=日)', () => {
+  const wageMaster: WageMaster = {
+    drivers: { 9901: { rates: [{ effectiveFrom: '2024-04-01', hourlyRate: 1200 }] } },
+  }
+  const rowOf = (days: RestraintSummaryDay[], prev: RestraintSummaryDay[] = [], missing = false) =>
+    computeWageRow(
+      summary({ workingMinutes: days.reduce((acc, d) => acc + (d.workingMinutes ?? 0), 0), days }),
+      2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG, prev, null, missing,
+    )
+  /** 平日 2 日 (法内 30 + 20) と、法定休日・法定外休日の出勤 (どちらも法内の値つき)。 */
+  const mixedDays = (within: boolean): RestraintSummaryDay[] => {
+    const w = (minutes: number) => (within ? { withinStatutoryOvertimeMinutes: minutes } : {})
+    return [
+      day(1, { workingMinutes: 540, overtimeMinutes: 60, ...w(30) }),
+      day(2, { workingMinutes: 470, nightMinutes: 40, ...w(20) }),
+      day(6, { workingMinutes: 480, nightMinutes: 90, ...w(25) }),
+      day(9, { workingMinutes: 300, holidayKind: 'non_legal', ...w(10) }),
+    ]
+  }
+
+  it('平日として分類された日だけを足す (法定休日・法定外休日の日の法内は足さない)', () => {
+    expect(rowOf(mixedDays(true)).withinStatutoryOvertimeMinutes).toBe(50)
+  })
+
+  it('前月ぶんの日は足さない (値が在っても、欠測でも、当月の値を変えない)', () => {
+    const days = [day(1, { workingMinutes: 480, withinStatutoryOvertimeMinutes: 30 })]
+    const prevWithValue = [day(31, { workingMinutes: 480, withinStatutoryOvertimeMinutes: 25 })]
+    const prevMissing = [day(31, { workingMinutes: 480 })]
+    expect(rowOf(days, prevWithValue).withinStatutoryOvertimeMinutes).toBe(30)
+    expect(rowOf(days, prevMissing).withinStatutoryOvertimeMinutes).toBe(30)
+  })
+
+  it('平日の日が 1 日でも欠測 (欄なし・null) なら月の値は null — 分かる日だけ足さない', () => {
+    const known = day(1, { workingMinutes: 480, withinStatutoryOvertimeMinutes: 30 })
+    expect(rowOf([known, day(2, { workingMinutes: 480 })]).withinStatutoryOvertimeMinutes).toBeNull()
+    expect(
+      rowOf([known, day(2, { workingMinutes: 480, withinStatutoryOvertimeMinutes: null })])
+        .withinStatutoryOvertimeMinutes,
+    ).toBeNull()
+    // 欠測の日が先でも同じ
+    expect(rowOf([day(1, { workingMinutes: 480 }), { ...known, day: 2 }]).withinStatutoryOvertimeMinutes).toBeNull()
+  })
+
+  it('休日として分類された日・実働 0 の日の欠測は、月の値を欠測にしない', () => {
+    const days = [
+      day(1, { workingMinutes: 480, withinStatutoryOvertimeMinutes: 30 }),
+      day(3),
+      day(6, { workingMinutes: 480 }),
+      day(9, { workingMinutes: 300, holidayKind: 'non_legal' }),
+    ]
+    expect(rowOf(days).withinStatutoryOvertimeMinutes).toBe(30)
+  })
+
+  it('平日の日が 0 日なら 0 (休日の出勤だけの月・日別行が無い月)', () => {
+    expect(rowOf([day(6, { workingMinutes: 480 })]).withinStatutoryOvertimeMinutes).toBe(0)
+    expect(rowOf([]).withinStatutoryOvertimeMinutes).toBe(0)
+  })
+
+  it('拘束時間が欠測の月 (missing) は null', () => {
+    expect(rowOf(mixedDays(true), [], true).withinStatutoryOvertimeMinutes).toBeNull()
+  })
+
+  it('9 区分・金額・検算は、日別行の法内の欄の有無で変わらない', () => {
+    const withField = rowOf(mixedDays(true))
+    const withoutField = rowOf(mixedDays(false))
+    expect(withField.minutes).toEqual(withoutField.minutes)
+    expect(withField.amounts).toEqual(withoutField.amounts)
+    expect(withField.totalAmount).toBe(withoutField.totalAmount)
+    const unaccounted = (days: RestraintSummaryDay[], row: typeof withField) =>
+      checkWageInvariants(
+        summary({ workingMinutes: 540 + 470 + 480 + 300, days }),
+        row.minutes,
+        DEFAULT_WAGE_CONFIG,
+      ).unaccounted
+    expect(unaccounted(mixedDays(true), withField)).toEqual({ diffMinutes: 0, kind: 'other' })
+    expect(unaccounted(mixedDays(false), withoutField)).toEqual({ diffMinutes: 0, kind: 'other' })
+    // 行の違いは新しい欄だけ
+    expect({ ...withField, withinStatutoryOvertimeMinutes: null }).toEqual(withoutField)
+    expect(withoutField.withinStatutoryOvertimeMinutes).toBeNull()
+  })
+
+  it('区分 (minutes) には欄を足さない — classifyMonth の戻り値は 9 区分のまま', () => {
+    const minutes = classifyMonth(mixedDays(true), 2025, 4, DEFAULT_WAGE_CONFIG)
+    expect(Object.keys(minutes).sort()).toEqual(Object.keys(emptyCategoryMinutes()).sort())
+    expect(minutes).toEqual(rowOf(mixedDays(true)).minutes)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 最低賃金ベース残業代 (月60h超 1.5 倍 + 深夜軸の独立加算)
 // ---------------------------------------------------------------------------
 

@@ -806,6 +806,8 @@ interface ClassifiedDay {
   overtime: number;
   night: number;
   overtimeNight: number;
+  /** 法内残業 (日別行の `withinStatutoryOvertimeMinutes`)。欄が無い・null は欠測 (null)。 */
+  withinStatutoryOvertime: number | null;
   isLegalHoliday: boolean;
   isNonLegalHoliday: boolean;
 }
@@ -833,6 +835,7 @@ function classifyDayRow(
     overtime: d.isRestDay ? 0 : d.overtimeMinutes ?? 0,
     night: d.isRestDay ? 0 : d.nightMinutes ?? 0,
     overtimeNight: d.isRestDay ? 0 : d.overtimeNightMinutes ?? 0,
+    withinStatutoryOvertime: d.withinStatutoryOvertimeMinutes ?? null,
     isLegalHoliday: kind === undefined ? dow === config.legalHolidayWeekday : kind === "legal",
     isNonLegalHoliday:
       kind === undefined
@@ -870,7 +873,28 @@ export function classifyMonth(
   config: WageConfig,
   prevMonthDays: RestraintSummaryDay[] = [],
 ): WageCategoryMinutes {
+  return classifyMonthDetail(days, year, month, config, prevMonthDays).minutes;
+}
+
+/**
+ * `classifyMonth` の本体。区分 (`minutes`) のほかに、区分の外の参考値を 1 つ返す。
+ *
+ * `withinStatutoryOvertimeMinutes` = **平日として分類された日**の法内残業の和 (分)。
+ * 区分のループの平日の枝で足すので、日の分類は区分と同じ 1 つ (休日として分類された日の
+ * 法内残業は足さない — その日の実働は休日の区分に入っている)。
+ * **「法定時間内」と「週 40 時間超」の内数** (平日の 1 日 8 時間以内の実働は、月の区分では
+ * `statutory` か `weekly40Excess` のどちらかに入る)。区分にも金額にも検算にも入らない。
+ * 平日の日が 1 日でも欠測 (日別行に欄が無い・null) なら null、平日の日が 0 日なら 0。
+ */
+function classifyMonthDetail(
+  days: RestraintSummaryDay[],
+  year: number,
+  month: number,
+  config: WageConfig,
+  prevMonthDays: RestraintSummaryDay[],
+): { minutes: WageCategoryMinutes; withinStatutoryOvertimeMinutes: number | null } {
   const out = emptyCategoryMinutes();
+  let withinStatutoryOvertime: number | null = 0;
   const prevYear = month === 1 ? year - 1 : year;
   const prevMonth = month === 1 ? 12 : month - 1;
 
@@ -894,6 +918,10 @@ export function classifyMonth(
       out.overtimeNight += c.overtimeNight;
       out.night += c.night;
       out.statutory += Math.max(0, c.working - c.overtime - c.overtimeNight);
+      withinStatutoryOvertime =
+        withinStatutoryOvertime === null || c.withinStatutoryOvertime === null
+          ? null
+          : withinStatutoryOvertime + c.withinStatutoryOvertime;
     }
   }
 
@@ -935,7 +963,7 @@ export function classifyMonth(
   // 控除する (週40超過は 1.25 フルで払う、案B Refs #282)。clamp は日次 max(0) との
   // 端数不整合への防御。
   out.statutory = Math.max(0, out.statutory - out.weekly40Excess);
-  return out;
+  return { minutes: out, withinStatutoryOvertimeMinutes: withinStatutoryOvertime };
 }
 
 // ---------------------------------------------------------------------------
@@ -957,6 +985,11 @@ export interface WageRow {
   /** `hourlyRate` を採った単価履歴の県 (最低賃金の一括設定で入れた単価だけが持つ)。無ければ付かない。 */
   hourlyRatePrefecture?: string;
   minutes: WageCategoryMinutes;
+  /** 法内残業 (所定の労働時間を超え、1 日 8 時間までの実働) の月の和 (分)。**区分 (`minutes`) の
+   * 外の参考値**で、「法定時間内」と「週 40 時間超」の内数。金額・検算には入らない。
+   * 平日として分類された日だけを足す (`classifyMonthDetail`)。日別の値を持つのは GCP の経路だけで、
+   * 平日の日が 1 日でも欠測なら null、拘束時間が欠測の月 (`missing`) も null (0 分ではない)。 */
+  withinStatutoryOvertimeMinutes: number | null;
   amounts: WageCategoryAmounts | null;
   totalAmount: number | null;
   /** 支給見込 ÷ hourlyBasis の時間 (円/h)。分母 0 や単価なしは null。
@@ -1202,7 +1235,13 @@ export function computeWageRow(
   const hourlyRate = rateEntry?.hourlyRate ?? null;
   // 60h 超の係数だけが月で変わる (2023-03 以前は 1.25)。金額を出す 2 か所はこれを使う
   const monthConfig = effectiveConfigForMonth(config, year, month);
-  const minutes = classifyMonth(summary.days, year, month, config, prevMonthDays);
+  const { minutes, withinStatutoryOvertimeMinutes } = classifyMonthDetail(
+    summary.days,
+    year,
+    month,
+    config,
+    prevMonthDays,
+  );
   const minWage = minWageForBranch(minWageMaster, summary.branchName, year, month, employeeBranch);
 
   const basisMinutes =
@@ -1265,6 +1304,7 @@ export function computeWageRow(
     ...(rateEntry ? { hourlyRateEffectiveFrom: rateEntry.effectiveFrom } : {}),
     ...(rateEntry?.prefecture ? { hourlyRatePrefecture: rateEntry.prefecture } : {}),
     minutes,
+    withinStatutoryOvertimeMinutes: missing ? null : withinStatutoryOvertimeMinutes,
     amounts,
     totalAmount,
     hourlyEquivalent,

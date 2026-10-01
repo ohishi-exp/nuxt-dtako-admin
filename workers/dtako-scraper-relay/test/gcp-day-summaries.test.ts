@@ -83,7 +83,43 @@ describe("parseGcpDaySummaries", () => {
       // 30 + 10 (法定休日深夜も足す)
       nightMinutes: 40,
       overtimeNightMinutes: 20,
+      withinStatutoryOvertimeMinutes: 0,
     } satisfies GcpDayPart);
+  });
+
+  it("法内残業 (within_statutory_overtime_minutes) を読む — 1 勤務はそのまま、同じ暦日の 2 勤務は足す", () => {
+    const out = parseGcpDaySummaries({
+      summaries: {
+        "1078|2026-06-01|2026-06-01 08:00:00": gcpValue({ within_statutory_overtime_minutes: 30 }),
+        "1078|2026-06-02|2026-06-02 02:00:00": gcpValue({ within_statutory_overtime_minutes: 30 }),
+        "1078|2026-06-02|2026-06-02 14:00:00": gcpValue({ within_statutory_overtime_minutes: 15 }),
+      },
+    });
+    expect(out.get("1078")!.get("2026-06-01")!.withinStatutoryOvertimeMinutes).toBe(30);
+    expect(out.get("1078")!.get("2026-06-02")!.withinStatutoryOvertimeMinutes).toBe(45);
+  });
+
+  it("法内残業の欄が無い・数でない勤務は 0 ではなく欠測 (null)。同じ暦日に 1 つでも在ればその日は欠測", () => {
+    const { within_statutory_overtime_minutes: _dropped, ...withoutField } = gcpValue();
+    const out = parseGcpDaySummaries({
+      summaries: {
+        "1078|2026-06-01|2026-06-01 08:00:00": withoutField,
+        "1078|2026-06-02|2026-06-02 08:00:00": gcpValue({ within_statutory_overtime_minutes: "30" }),
+        "1078|2026-06-03|2026-06-03 08:00:00": gcpValue({ within_statutory_overtime_minutes: Number.NaN }),
+        // 先の勤務が欠測・後の勤務が数
+        "1078|2026-06-04|2026-06-04 02:00:00": withoutField,
+        "1078|2026-06-04|2026-06-04 14:00:00": gcpValue({ within_statutory_overtime_minutes: 15 }),
+        // 先の勤務が数・後の勤務が欠測
+        "1078|2026-06-05|2026-06-05 02:00:00": gcpValue({ within_statutory_overtime_minutes: 15 }),
+        "1078|2026-06-05|2026-06-05 14:00:00": withoutField,
+      },
+    });
+    const byDate = out.get("1078")!;
+    for (const date of ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]) {
+      expect(byDate.get(date)!.withinStatutoryOvertimeMinutes, date).toBeNull();
+    }
+    // ほかの時間は今までどおり足される (欠測にするのは法内残業だけ)
+    expect(byDate.get("2026-06-04")!.workingMinutes).toBe(1200);
   });
 
   it("同じ暦日に複数の勤務があれば足し合わせる", () => {
@@ -170,10 +206,10 @@ describe("gcpPartsFor", () => {
 describe("overlayGcpDayTimes", () => {
   const parts = new Map<string, GcpDayPart>([
     // 2026-06-01 は月曜、2026-06-07 は日曜
-    ["2026-06-01", { restraintMinutes: 960, workingMinutes: 800, breakMinutes: 160, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20 }],
-    ["2026-06-07", { restraintMinutes: 300, workingMinutes: 240, breakMinutes: 60, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 }],
+    ["2026-06-01", { restraintMinutes: 960, workingMinutes: 800, breakMinutes: 160, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20, withinStatutoryOvertimeMinutes: 30 }],
+    ["2026-06-07", { restraintMinutes: 300, workingMinutes: 240, breakMinutes: 60, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0, withinStatutoryOvertimeMinutes: 15 }],
     // 対象月の外 (前月から跨いだ勤務) は無視される
-    ["2026-05-31", { restraintMinutes: 999, workingMinutes: 999, breakMinutes: 999, overtimeMinutes: 999, nightMinutes: 999, overtimeNightMinutes: 999 }],
+    ["2026-05-31", { restraintMinutes: 999, workingMinutes: 999, breakMinutes: 999, overtimeMinutes: 999, nightMinutes: 999, overtimeNightMinutes: 999, withinStatutoryOvertimeMinutes: 999 }],
   ]);
 
   it("既存の日は時間だけ差し替え、無い日は行を足す (日曜だけ法定休日)", () => {
@@ -185,10 +221,10 @@ describe("overlayGcpDayTimes", () => {
     expect(res.missing).toBe(false);
     expect(res.summary.days).toEqual([
       // 休日区分は元のまま (GCP は持たない)。勤務があるので isRestDay は false
-      { day: 1, isRestDay: false, holidayKind: "non_legal", restraintMinutes: 960, workingMinutes: 800, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20 },
+      { day: 1, isRestDay: false, holidayKind: "non_legal", restraintMinutes: 960, workingMinutes: 800, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20, withinStatutoryOvertimeMinutes: 30 },
       // GCP に勤務が無い日は 0 分。isRestDay は元の判定のまま
-      { day: 2, isRestDay: false, restraintMinutes: 0, workingMinutes: 0, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 },
-      { day: 7, isRestDay: false, holidayKind: "legal", restraintMinutes: 300, workingMinutes: 240, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 },
+      { day: 2, isRestDay: false, restraintMinutes: 0, workingMinutes: 0, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0, withinStatutoryOvertimeMinutes: 0 },
+      { day: 7, isRestDay: false, holidayKind: "legal", restraintMinutes: 300, workingMinutes: 240, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0, withinStatutoryOvertimeMinutes: 15 },
     ]);
   });
 
@@ -244,10 +280,10 @@ describe("overlayGcpDayTimes", () => {
     );
     expect(res.summary.days).toEqual([
       // 1 行目 (先勝ち) だけが GCP 値を受け取る
-      { day: 1, isRestDay: false, restraintMinutes: 960, workingMinutes: 800, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20 },
+      { day: 1, isRestDay: false, restraintMinutes: 960, workingMinutes: 800, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20, withinStatutoryOvertimeMinutes: 30 },
       // 2 行目 (同じ暦日) は「GCP に勤務が無い日」と同じ扱い: 0 分・isRestDay は元のまま
-      { day: 1, isRestDay: true, restraintMinutes: 0, workingMinutes: 0, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 },
-      { day: 7, isRestDay: false, holidayKind: "legal", restraintMinutes: 300, workingMinutes: 240, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 },
+      { day: 1, isRestDay: true, restraintMinutes: 0, workingMinutes: 0, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0, withinStatutoryOvertimeMinutes: 0 },
+      { day: 7, isRestDay: false, holidayKind: "legal", restraintMinutes: 300, workingMinutes: 240, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0, withinStatutoryOvertimeMinutes: 15 },
     ]);
     // 不変条件: 日別行の合計 = 月合計 (二重計上されていない)
     const dailySum = (pick: (d: (typeof res.summary.days)[number]) => number | null) =>
@@ -255,6 +291,18 @@ describe("overlayGcpDayTimes", () => {
     expect(dailySum((d) => d.workingMinutes)).toBe(res.summary.workingMinutes);
     expect(dailySum((d) => d.restraintMinutes)).toBe(res.summary.restraintMinutes);
     expect(dailySum((d) => d.overtimeMinutes)).toBe(res.summary.overtimeMinutes);
+  });
+
+  it("法内残業の欠測 (null) は、既存の行の写しにも新しく足す行にも null のまま載る (0 にしない)", () => {
+    const missingParts = new Map<string, GcpDayPart>([
+      ["2026-06-01", { ...parts.get("2026-06-01")!, withinStatutoryOvertimeMinutes: null }],
+      ["2026-06-02", { ...parts.get("2026-06-01")!, withinStatutoryOvertimeMinutes: null }],
+    ]);
+    const res = overlayGcpDayTimes(summary({ days: [day({ day: 1 })] }), missingParts, "2026-06");
+    expect(res.summary.days.map((d) => [d.day, d.withinStatutoryOvertimeMinutes])).toEqual([
+      [1, null],
+      [2, null],
+    ]);
   });
 
   it("GCP に行が無い乗務員は 0 分ではなく欠測にする (最低賃金割れの判定を回さない)", () => {

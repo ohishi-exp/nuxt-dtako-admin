@@ -22,6 +22,7 @@ import {
   LITIGATION_EMPTY_ALC_MESSAGE,
   LITIGATION_EMPTY_KINTAI_MESSAGE,
   LITIGATION_HOURS_COLUMNS,
+  LITIGATION_HOURS_WITHIN_STATUTORY_NOTE,
   LITIGATION_NOT_FOUND_MESSAGE,
   type LitigationOutputChunk,
   type LitigationOutputResult,
@@ -462,19 +463,72 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
     buildLitigationOutputChunks({ fromMonth, toMonth, driverCds: [driverCd] })
   const NONE = new Map<string, string>()
 
-  it('列は wage report の区分の並び (「法内残業」は出さない)', () => {
-    expect(LITIGATION_HOURS_COLUMNS).toEqual(['法定時間内', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間'])
+  it('列は wage report の区分の並び。「うち法内残業」は「法定時間内」のすぐ右 (内数)', () => {
+    expect(LITIGATION_HOURS_COLUMNS).toEqual(['法定時間内', 'うち法内残業', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間'])
+  })
+
+  // ---- うち法内残業 (wage report の行の withinStatutoryOvertimeMinutes。区分の外の 1 欄) ----
+  const within = (v: unknown) => wageRow('9101', { wage: { withinStatutoryOvertimeMinutes: v } })
+  const withinBook = (rows: Array<[string, WageReportRow]>) =>
+    buildLitigationHoursBooks(
+      chunksOf(rows[0]![0], rows[rows.length - 1]![0]),
+      new Map(rows.map(([month, row]) => [`9101|${month}`, got(month, [row])])),
+      NONE,
+    )[0]!
+
+  it('★ うち法内残業: 値の在る月は H:MM (0 分は 0:00)、合計は全部の月の和 (注記なし)', () => {
+    const book = withinBook([['2024-06', within(630)], ['2024-07', within(0)], ['2024-08', within(45)]])
+    expect(book.rows.map(r => r.cells[1])).toEqual(['10:30', '0:00', '0:45'])
+    expect(book.total!.cells[1]).toBe('11:15')
+  })
+
+  it.each<[string, WageReportRow]>([
+    ['欄が無い (旧い保存・欄を持たない経路)', wageRow('9101')],
+    ['null (日別の値が欠測)', within(null)],
+    ['数でない', within('30')],
+    ['NaN', within(Number.NaN)],
+  ])('★ うち法内残業の値が分からない月は「—」(0:00 にしない)。行は今までどおり読める (「取得に失敗」にしない): %s', (_name, row) => {
+    const book = withinBook([['2024-06', row]])
+    expect(book.rows[0]).toEqual({ month: '2024-06', cells: ['150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'], note: null })
+    expect(book).toMatchObject({ valueMonths: 1, needsFetch: false })
+    // 値の分かる月が 1 つも無い合計も「—」
+    expect(book.total!.cells[1]).toBe('—')
+  })
+
+  it('★ うち法内残業の合計: 値の分からない月が混ざれば、分かる月だけの和に「(一部の月は不明)」を付ける', () => {
+    const book = withinBook([['2024-06', within(630)], ['2024-07', wageRow('9101')], ['2024-08', within(45)]])
+    expect(book.rows.map(r => r.cells[1])).toEqual(['10:30', '—', '0:45'])
+    expect(book.total!.cells[1]).toBe('11:15 (一部の月は不明)')
+    // ほかの列の合計は 3 か月ぶんのまま
+    expect(book.total!.month).toBe('合計 (3 か月ぶん)')
+    expect(book.total!.cells[0]).toBe('450:00')
+  })
+
+  it('★ 法内残業は内数: 値が在っても「法定時間内」と「総労働時間」は変わらない', () => {
+    const withValue = withinBook([['2024-06', within(630)]])
+    const without = withinBook([['2024-06', wageRow('9101')]])
+    const dropWithin = (cells: string[]) => cells.filter((_, i) => i !== 1)
+    expect(dropWithin(withValue.rows[0]!.cells)).toEqual(dropWithin(without.rows[0]!.cells))
+    expect(withValue.rows[0]!.cells[7]).toBe('230:00')
+    expect(dropWithin(withValue.total!.cells)).toEqual(dropWithin(without.total!.cells))
+  })
+
+  it('説明の 1 文は、列の意味 (内数) と「—」の月の直し方を言う', () => {
+    expect(LITIGATION_HOURS_WITHIN_STATUTORY_NOTE).toBe(
+      '「うち法内残業」は、所定の労働時間を超え、1 日 8 時間までの労働です (法定時間内と週 40 時間超の内数)。'
+      + '値が「—」の月は、給与比較タブの「拘束の材料を取り直す」を押すと出ます。',
+    )
   })
 
   it('★ 区分 → 列: 法外残業 = 時間外 + 時間外深夜 + 週40超過、深夜は 4 区分の内数、総労働時間は night を除く 8 区分の和', () => {
     const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-06'), new Map([['9101|2024-06', got('2024-06', [wageRow('9101')])]]), NONE)
     expect(book!.rows).toEqual([{
       month: '2024-06',
-      // 150:00 / 3000+420+510 / 3930−3600 / 300+60 / 480+30 / 240+420+60+30 / 9000+3000+420+510+300+60+480+30
-      cells: ['150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
+      // 150:00 / 法内残業の欄なし / 3000+420+510 / 3930−3600 / 300+60 / 480+30 / 240+420+60+30 / 9000+3000+420+510+300+60+480+30
+      cells: ['150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
       note: null,
     }])
-    expect(book!.total).toEqual({ month: '合計 (1 か月ぶん)', cells: ['150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'], note: null })
+    expect(book!.total).toEqual({ month: '合計 (1 か月ぶん)', cells: ['150:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'], note: null })
     expect(book).toMatchObject({ driverCd: '9101', label: '2024-06〜2024-06', valueMonths: 1, needsFetch: false, checkedAtText: null })
   })
 
@@ -489,7 +543,7 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
     ).rows[0]!
     expect([compared.statutoryMinutes, compared.overtimeMinutes]).toEqual([9000, 3930])
     const hm = (min: number) => `${Math.floor(min / 60)}:${String(min % 60).padStart(2, '0')}`
-    expect(book!.rows[0]!.cells.slice(0, 2)).toEqual([hm(compared.statutoryMinutes), hm(compared.overtimeMinutes)])
+    expect([book!.rows[0]!.cells[0], book!.rows[0]!.cells[2]]).toEqual([hm(compared.statutoryMinutes), hm(compared.overtimeMinutes)])
   })
 
   it('★ 月 60h 超: 適用前の月 (〜2023-03) は「不適用」、適用後は超えたぶんだけ (超えていなければ 0:00)。合計は適用される月の超過ぶんだけ', () => {
@@ -499,13 +553,13 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
       ['9101|2023-04', got('2023-04', [wageRow('9101')])],
       ['9101|2023-05', got('2023-05', [under])],
     ]), NONE)
-    expect(books[0]!.rows.map(r => [r.month, r.cells[1], r.cells[2]])).toEqual([
+    expect(books[0]!.rows.map(r => [r.month, r.cells[2], r.cells[3]])).toEqual([
       ['2023-03', '65:30', '不適用'],
       ['2023-04', '65:30', '5:30'],
       ['2023-05', '50:00', '0:00'],
     ])
     // 法外残業 65:30 + 65:30 + 50:00 / 60h 超は 2023-04 の 5:30 だけ
-    expect(books[0]!.total!.cells.slice(1, 3)).toEqual(['181:00', '5:30'])
+    expect(books[0]!.total!.cells.slice(2, 4)).toEqual(['181:00', '5:30'])
   })
 
   it('適用される月が 1 つも無い冊の合計は「不適用」', () => {
@@ -513,7 +567,7 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
       ['9101|2023-02', got('2023-02', [wageRow('9101')])],
       ['9101|2023-03', got('2023-03', [wageRow('9101')])],
     ]), NONE)
-    expect(book!.total!.cells[2]).toBe('不適用')
+    expect(book!.total!.cells[3]).toBe('不適用')
     expect(book!.total!.month).toBe('合計 (2 か月ぶん)')
   })
 
@@ -527,15 +581,15 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
       ['9101|2024-11', got('2024-11', [wageRow('9101')])],
     ]), NONE)
     expect(book!.rows.map(r => [r.month, r.note, r.cells.length])).toEqual([
-      ['2024-06', null, 7],
+      ['2024-06', null, 8],
       ['2024-07', '未取得', 0],
       ['2024-08', '取得に失敗: 504 (架空の理由)', 0],
       ['2024-09', '拘束の記録なし', 0],
       ['2024-10', '欠測', 0],
-      ['2024-11', null, 7],
+      ['2024-11', null, 8],
     ])
     // 欠測の月 (区分は入っている) も 0 時間としても実値としても足さない: 2 か月ぶん = 230:00 × 2
-    expect(book!.total).toEqual({ month: '合計 (2 か月ぶん)', cells: ['300:00', '131:00', '11:00', '12:00', '17:00', '25:00', '460:00'], note: null })
+    expect(book!.total).toEqual({ month: '合計 (2 か月ぶん)', cells: ['300:00', '—', '131:00', '11:00', '12:00', '17:00', '25:00', '460:00'], note: null })
     expect(book).toMatchObject({ valueMonths: 2, needsFetch: true })
   })
 
@@ -563,7 +617,7 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
     ]), NONE)
     expect(book!.rows[0]).toEqual({ month: '2024-06', cells: [], note: '取得に失敗: 保存された区分が読めない形' })
     expect(book).toMatchObject({ valueMonths: 1, needsFetch: true })
-    expect(book!.total!.cells[6]).toBe('230:00')
+    expect(book!.total!.cells[7]).toBe('230:00')
   })
 
   it('★ 冊ごとに、その冊の月・その乗務員の wage report だけを引く (「ZIP を作る」の結果には依らず、全部の冊を出す)', () => {
@@ -579,7 +633,7 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
     expect(books[0]!.rows.map(r => r.note ?? r.cells[0])).toEqual([
       '未取得', '拘束の記録なし', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '150:00',
     ])
-    expect(books[1]!.rows).toEqual([{ month: '2025-01', cells: ['100:00', '65:30', '5:30', '6:00', '8:30', '12:30', '180:00'], note: null }])
+    expect(books[1]!.rows).toEqual([{ month: '2025-01', cells: ['100:00', '—', '65:30', '5:30', '6:00', '8:30', '12:30', '180:00'], note: null }])
     expect(buildLitigationHoursBooks([], new Map(), NONE)).toEqual([])
   })
 
@@ -589,7 +643,7 @@ describe('月ごとの時間の表 — 給与比較と同じ wage report の月�
       // 陽性対照: 別の乗務員の行は引かない
       ['9101|2024-07', got('2024-07', [wageRow('19101')])],
     ]), NONE)
-    expect(book!.rows.map(r => r.note ?? r.cells[6])).toEqual(['230:00', '拘束の記録なし'])
+    expect(book!.rows.map(r => r.note ?? r.cells[7])).toEqual(['230:00', '拘束の記録なし'])
     expect(book!.valueMonths).toBe(1)
   })
 

@@ -18,6 +18,7 @@
         "legalHolidayNight": 0,
         "weekly40Excess": 0
       },
+      "withinStatutoryOvertimeMinutes": null,
       "amounts": {
         "statutory": 221200,
         "overtime": 35000,
@@ -74,6 +75,7 @@
         "legalHolidayNight": 0,
         "weekly40Excess": 0
       },
+      "withinStatutoryOvertimeMinutes": null,
       "amounts": {
         "statutory": 144000,
         "overtime": 0,
@@ -130,6 +132,7 @@
         "legalHolidayNight": 0,
         "weekly40Excess": 0
       },
+      "withinStatutoryOvertimeMinutes": null,
       "amounts": {
         "statutory": 76800,
         "overtime": 129600,
@@ -185,6 +188,7 @@
         "legalHolidayNight": 0,
         "weekly40Excess": 0
       },
+      "withinStatutoryOvertimeMinutes": null,
       "amounts": null,
       "totalAmount": null,
       "hourlyEquivalent": null,
