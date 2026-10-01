@@ -74,9 +74,10 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     // 住宅手当 (minwage-only) は基本給計に混入しない (Refs #278)
     expect(row.csvBase).toBe(221200)
     expect(row.csvOvertime).toBe(39200 + 1750)
-    // sysBase = 基本単価(日額) × 稼働日数、sysOvertime = 残業単価(時給) × (時間外+時間外深夜)
+    // sysBase = 基本単価(日額) × 稼働日数、sysOvertime = 残業単価(時給) × 残業時間 (wage report の 時間外+時間外深夜+週40超)
     expect(row.sysBase).toBe(11060 * 20)
-    expect(row.sysOvertimeMinutes).toBe(1200 + 120)
+    expect(row.overtimeMinutes).toBe(1200 + 120)
+    expect(row.overtimeMinutes).toBe(goldenByCd['9901']!.overtimeMinutes + goldenByCd['9901']!.nightOvertimeMinutes)
     expect(row.sysOvertime).toBe(Math.round((1750 * (1200 + 120)) / 60))
     // 単価マスタの時給 1400 円由来の値 (golden の actualOvertimePay = 39200) は
     // sys 列に混ざらない — 明細単価 1750 円/h × 22h = 38500 になるはず
@@ -95,11 +96,11 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(row.diffTotal).toBeNull()
   })
 
-  it('残業(最低賃金) は golden の理論値 (通常+深夜) と同じ値・同じ時間軸', () => {
+  it('残業時間は golden (wage report) の 通常+深夜 そのまま。残業(最低賃金) も golden の理論値と同じ値', () => {
     for (const cd of ['9901', '9902', '9903', '9904']) {
       const row = byCd[cd]!
       const wage = goldenByCd[cd]!
-      expect(row.minWageOvertimeMinutes).toBe(wage.overtimeMinutes + wage.nightOvertimeMinutes)
+      expect(row.overtimeMinutes).toBe(wage.overtimeMinutes + wage.nightOvertimeMinutes)
       expect(row.minWageOvertimePay).toBe(
         wage.minWageOvertimePay === null || wage.minWageNightOvertimePay === null
           ? null
@@ -148,11 +149,11 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     ])
   })
 
-  it('基礎単価(実績) = 割増基礎算入計 ÷ (出勤日数 × 1 日の所定) — デジタコの法定内時間では割らない (9901)', () => {
+  it('基礎単価(実績) = 割増基礎算入計 ÷ (日数 × 1 日の所定) — デジタコの法定内時間では割らない (9901。日数は明細の出勤日数 20 日)', () => {
     const row = byCd['9901']!
     // 20 日 × 8h = 160h。法定内時間 (9480 分 = 158h) で割った 1400 円ではない
     expect(row.baseRateActual).toBe(221200 / 160) // 1382.5
-    expect(row.baseRateBasis).toMatchObject({ kind: 'days', workDays: 20, dailyMinutes: 480, hours: 160, scheduled: 'resolved' })
+    expect(row.baseRateBasis).toMatchObject({ kind: 'days', days: 20, daysSource: 'csv', capped: false, dailyMinutes: 480, hours: 160, scheduled: 'resolved' })
   })
 
   it('残業(基礎単価) 理論値 (37条): 9901 の理論値は所定で割った基礎単価から出る', () => {

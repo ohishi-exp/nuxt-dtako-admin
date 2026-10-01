@@ -13,7 +13,9 @@ import {
   compareSalaryMonth,
   csvOvertimeHoursOf,
   BASE_RATE_NONE_LABELS,
-  baseRateDenominatorText,
+  baseRateBasisNotes,
+  baseRateBasisText,
+  baseRateDaysOf,
   computeBaseRate,
   computeSysBase,
   mergeSalaryCsvRows,
@@ -380,6 +382,8 @@ function reportRow(
     workingMinutes?: number | null
     overtimeMinutes?: number | null
     overtimeNightMinutes?: number | null
+    /** 週 40 時間超 (分)。**wage 側 (`wage.overtimeMinutes`) にだけ乗る** — summary の時間外には入らない。 */
+    weekly40ExcessMinutes?: number
     breakMinutes?: number | null
     drivingMinutes?: number | null
     /** デジタコの法定内時間 (wage 側の素材。**37条の基礎単価の分母には使わない**)。 */
@@ -416,7 +420,7 @@ function reportRow(
     // (salary-compare-fixture.test.ts) が golden 経由で検証する。
     wage: {
       minutes: { statutory: over.statutoryMinutes ?? 0 },
-      overtimeMinutes: over.overtimeMinutes ?? 0,
+      overtimeMinutes: (over.overtimeMinutes ?? 0) + (over.weekly40ExcessMinutes ?? 0),
       nightOvertimeMinutes: over.overtimeNightMinutes ?? 0,
       minWageOvertimePay: null,
       minWageNightOvertimePay: null,
@@ -568,32 +572,32 @@ describe('computeOvertimePayAtRate (労基法37条、worker computeMinWageOverti
 
 describe('overtimeHoursComparison (タイムカード表示用、Refs #441)', () => {
   it('給与側は給与明細の残業時間そのもの (時間 → 分)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertimeHours: 10.5 })
+    const c = overtimeHoursComparison({ overtimeMinutes: 1200, csvOvertimeHours: 10.5 })
     expect(c.sysMinutes).toBe(1200)
     expect(c.paidMinutes).toBe(630)
     expect(c.diffMinutes).toBe(1200 - 630)
   })
 
   it('差は 実働 − 給与 (正 = 打刻の方が多い = 未払いの疑い)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 2000, csvOvertimeHours: 10 })
+    const c = overtimeHoursComparison({ overtimeMinutes: 2000, csvOvertimeHours: 10 })
     expect(c.paidMinutes).toBe(600)
     expect(c.diffMinutes).toBe(1400)
   })
 
   it('残業時間の欄が無ければ給与側は null (逆算はしない)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertimeHours: null })
+    const c = overtimeHoursComparison({ overtimeMinutes: 1200, csvOvertimeHours: null })
     expect(c.paidMinutes).toBeNull()
     expect(c.diffMinutes).toBeNull()
   })
 
   it('給与の残業時間が 0 なら 0 分 (全部が差に出る)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertimeHours: 0 })
+    const c = overtimeHoursComparison({ overtimeMinutes: 1200, csvOvertimeHours: 0 })
     expect(c.paidMinutes).toBe(0)
     expect(c.diffMinutes).toBe(1200)
   })
 
   it('分未満は四捨五入する', () => {
-    expect(overtimeHoursComparison({ sysOvertimeMinutes: 0, csvOvertimeHours: 1.234 }).paidMinutes).toBe(74)
+    expect(overtimeHoursComparison({ overtimeMinutes: 0, csvOvertimeHours: 1.234 }).paidMinutes).toBe(74)
   })
 })
 
@@ -703,7 +707,7 @@ describe('compareSalaryMonth', () => {
     expect(r.csvOvertime).toBe(30000)
     expect(r.csvTotal).toBe(110000)
     expect(r.sysWorkDays).toBe(22)
-    expect(r.sysOvertimeMinutes).toBe(92 * 60)
+    expect(r.overtimeMinutes).toBe(92 * 60)
     expect(r.sysBase).toBe(3679 * 22) // 80,938
     expect(r.sysOvertime).toBe(1430 * 92) // 131,560
     expect(r.sysTotal).toBe(80938 + 131560)
@@ -761,6 +765,24 @@ describe('compareSalaryMonth', () => {
     )
     expect(out.rows[0]!.sysOvertime).toBe(0)
     expect(out.rows[0]!.sysBase).toBe(36790)
+  })
+
+  it('★ 残業時間は wage report 由来の 1 本 (時間外 + 時間外深夜 + 週 40 時間超)。残業(計算)・総支給(計算)・37条が同じ時間を使う', () => {
+    // 明細: 日額 10,000 円・残業単価 1,500 円/h・出勤 20 日。summary の時間外 10h、週 40 時間超 6h は wage 側にだけ乗る
+    const r = compareSalaryMonth(
+      [csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 200000, 残業手当: 30000 }, reportedTotal: 230000, rates: { base: 10000, overtime: 1500 }, attendance: { 出勤日数: 20 } })],
+      [reportRow('99001', '架空 花子', { workDays: 20, overtimeMinutes: 10 * 60, weekly40ExcessMinutes: 6 * 60 })],
+      config,
+      '2023-04',
+    ).rows[0]!
+    expect(r.overtimeMinutes).toBe(16 * 60) // summary 由来 (10h) ではない
+    expect(r.sysOvertime).toBe(1500 * 16) // 24,000 (旧式は 1500 × 10 = 15,000)
+    expect(r.diffOvertime).toBe(30000 - 24000)
+    expect(r.sysTotal).toBe(200000 + 24000)
+    expect(r.diffTotal).toBe(230000 - 224000)
+    // 37条: 基礎単価 200,000 ÷ (20 日 × 8h) = 1,250。理論値 = 16h × 1,250 × 1.25
+    expect(r.baseRateOvertimePay).toBe(16 * 1250 * 1.25)
+    expect(overtimeHoursComparison({ ...r, csvOvertimeHours: 12 }).diffMinutes).toBe(16 * 60 - 12 * 60)
   })
 
   it('基本単価・残業単価が無い行は独自の按分計算をせず null にする (「単価なし」)', () => {
@@ -873,7 +895,7 @@ describe('compareSalaryMonth', () => {
       '2023-04',
     )
     const r = out.rows[0]!
-    expect(r.minWageOvertimeMinutes).toBe(90)
+    expect(r.overtimeMinutes).toBe(90)
     expect(r.minWageOvertimePay).toBeNull()
     expect(r.diffCsvVsMinWageOvertime).toBeNull()
   })
@@ -906,11 +928,116 @@ describe('compareSalaryMonth', () => {
     const base = (over: Parameters<typeof reportRow>[2]) =>
       compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', over)], config, '2023-04').rows[0]!
 
-    it('日給: 割増基礎 ÷ (出勤日数 × 1 日の所定)。所定を引けたらその分を使う', () => {
+    it('日給: 割増基礎 ÷ (日数 × 1 日の所定)。所定を引けたらその分を使う (明細に日数が無い行はデジタコの稼働日数)', () => {
       const r = base({ payKubun: 2, workDays: 20, dailyWorkMinutes: 450 })
       expect(r.baseRateActual).toBeCloseTo(80000 / 150, 6) // 20 日 × 7.5h
       expect(r.baseRateBasis).toEqual({
-        kind: 'days', hours: 150, workDays: 20, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null,
+        kind: 'days', hours: 150, days: 20, daysSource: 'sys', capped: false, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null,
+      })
+    })
+
+    describe('日給の分母の日数 = 明細の 出勤日数 + 有休日数、週 40 時間相当で頭打ち', () => {
+      // 架空値: 日額 10,000 円。割増基礎 200,000 円
+      const daily = (attendance: Record<string, number> | undefined, over: Parameters<typeof reportRow>[2] = {}) =>
+        compareSalaryMonth(
+          [csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 200000, 残業手当: 30000 }, attendance })],
+          [reportRow('99001', '架空 花子', { payKubun: 2, workDays: 18, ...over })],
+          config,
+          '2023-04',
+        ).rows[0]!
+
+      it('★ 明細の日数を使う (デジタコの稼働日数 18 日ではない): 出勤のみ / 出勤 + 有休 / 0.5 日 / 有休のみ', () => {
+        const onlyWork = daily({ 出勤日数: 20 })
+        expect(onlyWork.baseRateBasis).toMatchObject({ days: 20, daysSource: 'csv', hours: 160, capped: false })
+        expect(onlyWork.baseRateActual).toBe(1250) // 200,000 ÷ (20 日 × 8h)。稼働 18 日なら 1,388.9
+        expect(daily({ 出勤日数: 18, 有休日数: 2 }).baseRateBasis).toMatchObject({ days: 20, daysSource: 'csv', hours: 160 })
+        const half = daily({ 出勤日数: 19.5, 有休日数: 0.5, 公休日数: 9 }) // 公休は足さない
+        expect(half.baseRateBasis).toMatchObject({ days: 20, daysSource: 'csv', hours: 160 })
+        const halfDay = daily({ 出勤日数: 15.5 })
+        expect(halfDay.baseRateBasis).toMatchObject({ days: 15.5, hours: 124 })
+        expect(halfDay.baseRateActual).toBeCloseTo(200000 / 124, 6)
+        expect(daily({ 有休日数: 3 }).baseRateBasis).toMatchObject({ days: 3, daysSource: 'csv', hours: 24 })
+      })
+
+      it('明細に日数が無い行 (勤怠欄なし / 欄はあるが出勤・有休が無い) はデジタコの稼働日数に倒し、出どころを残す', () => {
+        for (const attendance of [undefined, {}, { 公休日数: 9, 残業時間: 10 }]) {
+          const r = daily(attendance)
+          expect(r.baseRateBasis).toMatchObject({ days: 18, daysSource: 'sys', hours: 144 })
+          expect(r.baseRateActual).toBeCloseTo(200000 / 144, 6)
+        }
+      })
+
+      it('明細の 出勤 + 有休 が 0 なら分母 0 (算出不可)。稼働日数には倒さない', () => {
+        const r = daily({ 出勤日数: 0 })
+        expect(r.baseRateActual).toBeNull()
+        expect(r.baseRateBasis).toMatchObject({ days: 0, daysSource: 'csv', none: 'no-denominator' })
+      })
+
+      it('複数会社を合算した行は (attendance が先頭会社ぶんしか無いので) デジタコの稼働日数に倒す', () => {
+        const row = (company: string, driverCd: string) => csvRow({
+          company, driverCd, cdKey: driverCd, driverName: '架空 花子', amounts: { 基本給: 100000 }, attendance: { 出勤日数: 10 },
+        })
+        const cdMap: SalaryCdMap = { entries: { '0100|99001|架空花子': '99001', '0200|99002|架空花子': '99001' } }
+        const out = compareSalaryMonth(
+          [row('0100', '99001'), row('0200', '99002')],
+          [reportRow('99001', '架空 花子', { payKubun: 2, workDays: 18 })],
+          config,
+          '2023-04',
+          cdMap,
+        )
+        const r = out.rows[0]!
+        expect(r.mergedFrom).toHaveLength(2)
+        expect(r.csvPremiumBase).toBe(200000)
+        expect(r.baseRateBasis).toMatchObject({ days: 18, daysSource: 'merged', hours: 144 }) // 先頭会社の 10 日ではない
+      })
+
+      it('★ 頭打ち: 日数 × 1 日の所定 が法定の月平均 (173.8h) を超える月は法定の月平均で割る。超えなければそのまま', () => {
+        const under = daily({ 出勤日数: 21 }) // 21 × 8h = 168h ≤ 173.8h
+        expect(under.baseRateBasis).toMatchObject({ days: 21, hours: 168, capped: false })
+        expect(under.baseRateActual).toBeCloseTo(200000 / 168, 6)
+        const over = daily({ 出勤日数: 22 }) // 22 × 8h = 176h > 173.8h
+        expect(over.baseRateBasis).toMatchObject({ days: 22, hours: STATUTORY_MONTHLY_AVG_HOURS, capped: true })
+        expect(over.baseRateActual).toBeCloseTo(200000 / STATUTORY_MONTHLY_AVG_HOURS, 6) // ≒ 1,150.7 (旧式 ÷176h は 1,136.4)
+        const many = daily({ 出勤日数: 26, 有休日数: 1 })
+        expect(many.baseRateActual).toBe(over.baseRateActual) // 頭打ち後は日数に依らない
+        // 所定 7h30m: 23 日 = 172.5h (頭打ちなし) / 24 日 = 180h (頭打ち)
+        expect(daily({ 出勤日数: 23 }, { dailyWorkMinutes: 450 }).baseRateBasis).toMatchObject({ hours: 172.5, capped: false })
+        expect(daily({ 出勤日数: 24 }, { dailyWorkMinutes: 450 }).baseRateBasis).toMatchObject({ hours: STATUTORY_MONTHLY_AVG_HOURS, capped: true })
+        // 頭打ちはデジタコの稼働日数に倒した行にも効く
+        expect(daily(undefined, { workDays: 25 }).baseRateBasis).toMatchObject({ days: 25, daysSource: 'sys', hours: STATUTORY_MONTHLY_AVG_HOURS, capped: true })
+      })
+
+      it('境界: 日数 × 所定 が法定の月平均ちょうどなら頭打ちにしない (超えたときだけ)', () => {
+        const exact = computeBaseRate(2, 200000, { value: STATUTORY_MONTHLY_AVG_HOURS / 8, source: 'csv' }, 480, null)
+        expect(exact.basis.capped).toBe(false)
+        expect(exact.basis.hours).toBe(STATUTORY_MONTHLY_AVG_HOURS)
+        expect(computeBaseRate(2, 200000, { value: STATUTORY_MONTHLY_AVG_HOURS / 8 + 0.01, source: 'csv' }, 480, null).basis.capped).toBe(true)
+      })
+
+      it('時給・月給は明細の日数にも頭打ちにも依らない (式は不変)', () => {
+        const hourly = (attendance?: Record<string, number>) => compareSalaryMonth(
+          [csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', amounts: { 基本給: 200000 }, rates: { base: 1200, overtime: null }, attendance })],
+          [reportRow('99001', '架空 花子', { payKubun: 3, workDays: 18 })],
+          config,
+          '2023-04',
+        ).rows[0]!
+        for (const attendance of [undefined, { 出勤日数: 26 }]) {
+          expect(hourly(attendance).baseRateActual).toBe(1200)
+          expect(hourly(attendance).baseRateBasis).toEqual({
+            kind: 'hours', hours: null, days: null, daysSource: null, capped: false, dailyMinutes: null, scheduled: null, hourlyRate: 1200, none: null,
+          })
+          const monthly = daily(attendance, { payKubun: 1 })
+          expect(monthly.baseRateActual).toBeCloseTo(200000 / STATUTORY_MONTHLY_AVG_HOURS, 6)
+          expect(monthly.baseRateBasis).toEqual({
+            kind: 'monthly', hours: STATUTORY_MONTHLY_AVG_HOURS, days: null, daysSource: null, capped: false, dailyMinutes: null, scheduled: null, hourlyRate: null, none: null,
+          })
+        }
+      })
+
+      it('baseRateDaysOf: 明細の日数 / 明細なし / 合算行', () => {
+        expect(baseRateDaysOf(csvRow({ attendance: { 出勤日数: 19, 有休日数: 1 } }), false, 18)).toEqual({ value: 20, source: 'csv' })
+        expect(baseRateDaysOf(csvRow(), false, 18)).toEqual({ value: 18, source: 'sys' })
+        expect(baseRateDaysOf(csvRow({ attendance: { 出勤日数: 19 } }), true, 18)).toEqual({ value: 18, source: 'merged' })
       })
     })
 
@@ -954,7 +1081,7 @@ describe('compareSalaryMonth', () => {
     })
 
     it('時給でも割増基礎が 0 の月は null (割増基礎 0 は区分に依らず算出不可。区分設定の見直しの合図)', () => {
-      const { value, basis } = computeBaseRate(3, 0, 20, 480, 1200)
+      const { value, basis } = computeBaseRate(3, 0, { value: 20, source: 'sys' }, 480, 1200)
       expect(value).toBeNull()
       expect(basis).toMatchObject({ kind: 'hours', hourlyRate: 1200, none: 'no-premium-base' })
     })
@@ -975,7 +1102,7 @@ describe('compareSalaryMonth', () => {
       }
     })
 
-    it('出勤日数 0 (分母 0) と 割増基礎 0 は null (算出不可)。理由は別', () => {
+    it('日数 0 (分母 0) と 割増基礎 0 は null (算出不可)。理由は別', () => {
       const noDays = base({ payKubun: 2, workDays: 0, overtimeMinutes: 20 * 60 })
       expect(noDays.baseRateActual).toBeNull()
       expect(noDays.baseRateOvertimePay).toBeNull()
@@ -1012,23 +1139,47 @@ describe('compareSalaryMonth', () => {
       expect(sorted.map(r => r.driverCd)).toEqual(['1', '2'])
     })
 
-    it('拘束×賃金の表のセルに出す分母の短い表記 (日給 / 時給 / 月給・その他 / 区分不明は空)、出せない理由の文言', () => {
-      expect(baseRateDenominatorText(computeBaseRate(2, 80000, 20, 450, null).basis)).toBe('÷ (20日 × 7h30m)')
-      expect(baseRateDenominatorText(computeBaseRate(3, 80000, 20, 450, 1200).basis)).toBe('明細の時給')
-      expect(baseRateDenominatorText(computeBaseRate(1, 80000, 20, 450, null).basis)).toBe('÷ 法定の月平均 173.8h')
-      expect(baseRateDenominatorText(computeBaseRate(null, 80000, 20, 450, null).basis)).toBe('')
+    it('★ 基礎単価の根拠の文字列は 1 口 (訴訟準備と拘束×賃金が同じ関数): 頭打ちなし / あり / デジタコ稼働 / 時給 / 月給 / 出せない行は空', () => {
+      const text = (payKubun: number | null, days: Parameters<typeof computeBaseRate>[2], hourlyRate: number | null = null, premium = 200000) =>
+        baseRateBasisText({ csvPremiumBase: premium, baseRateBasis: computeBaseRate(payKubun, premium, days, 480, hourlyRate).basis })
+      expect(text(2, { value: 20, source: 'csv' })).toBe('割増基礎 200,000 円 ÷ (明細 20 日 × 8h00m)')
+      expect(text(2, { value: 19.5, source: 'csv' })).toBe('割増基礎 200,000 円 ÷ (明細 19.5 日 × 8h00m)')
+      expect(text(2, { value: 24, source: 'csv' })).toBe('割増基礎 200,000 円 ÷ 173.8h (明細 24 日 × 8h00m は週 40 時間相当を超えるため法定の月平均)')
+      expect(text(2, { value: 20, source: 'sys' })).toBe('割増基礎 200,000 円 ÷ (デジタコ稼働 20 日 × 8h00m)')
+      expect(text(2, { value: 24, source: 'merged' })).toBe('割増基礎 200,000 円 ÷ 173.8h (デジタコ稼働 24 日 × 8h00m は週 40 時間相当を超えるため法定の月平均)')
+      expect(text(3, { value: 20, source: 'csv' }, 1200)).toBe('明細の時給 1,200 円/h')
+      expect(text(1, { value: 20, source: 'csv' })).toBe('割増基礎 200,000 円 ÷ 法定の月平均 173.8h')
+      // 出せない行 (区分不明 / 時給の単価なし / 割増基礎 0 / 日数 0) は空 — 理由は BASE_RATE_NONE_LABELS が出す
+      expect(text(null, { value: 20, source: 'csv' })).toBe('')
+      expect(text(3, { value: 20, source: 'csv' }, null)).toBe('')
+      expect(text(2, { value: 20, source: 'csv' }, null, 0)).toBe('')
+      expect(text(2, { value: 0, source: 'csv' })).toBe('')
       expect(BASE_RATE_NONE_LABELS).toEqual({
         'unknown-kind': '給与区分が不明',
         'no-hourly-rate': '明細に時給の単価が無い',
         'no-premium-base': '割増の基礎に入る支給が 0',
-        'no-denominator': '出勤日数が 0',
+        'no-denominator': '分母の日数が 0 (明細の出勤 + 有休。無ければデジタコ稼働)',
       })
+    })
+
+    it('根拠の注記: 日数をデジタコ稼働に倒した理由 (明細に無い / 合算行) と、所定を引けなかった理由 (未設定 / 読めなかった)。無ければ空', () => {
+      const notes = (source: 'csv' | 'sys' | 'merged', daily: number | null | undefined, payKubun = 2) =>
+        baseRateBasisNotes(computeBaseRate(payKubun, 200000, { value: 20, source }, daily, null).basis)
+      expect(notes('csv', 480)).toEqual([])
+      expect(notes('sys', 480)).toEqual(['明細に出勤日数が無いためデジタコの稼働日数で計算'])
+      expect(notes('merged', 480)).toEqual(['複数会社の給与を合算した行のためデジタコの稼働日数で計算'])
+      expect(notes('csv', null)).toEqual(['所定未設定のため法定 8 時間で計算'])
+      expect(notes('sys', undefined)).toEqual([
+        '明細に出勤日数が無いためデジタコの稼働日数で計算',
+        '所定を読めなかったため法定 8 時間で計算 (古い保存物なら拘束の材料を取り直す)',
+      ])
+      expect(notes('sys', undefined, 1)).toEqual([]) // 月給は日数も所定も使わない
     })
 
     it('区分→種別の対応は 1 か所 (payKubunKind) — 基本給(計算) と基礎単価が同じ種別になる', () => {
       expect([1, 2, 3, 4, 0, null].map(payKubunKind)).toEqual(['monthly', 'days', 'hours', 'monthly', 'unknown', 'unknown'])
       expect(computeSysBase(100, 2, 1, 1).kind).toBe('days')
-      expect(computeBaseRate(2, 80000, 20, 480, null).basis.kind).toBe('days')
+      expect(computeBaseRate(2, 80000, { value: 20, source: 'sys' }, 480, null).basis.kind).toBe('days')
     })
   })
 

@@ -38,23 +38,23 @@ describe('SalaryAmountCell', () => {
 describe('SalaryOver37Cell', () => {
   const over37 = {
     rate: 1333.3, minutes: 600, theory: 16667, paid: 30000, diff: -1, shortfall: true,
-    rateBasis: '割増基礎 200,000 円 ÷ (20 日 × 7h30m)', scheduledNote: null as string | null, belowMinWage: false, minWageRate: 1000 as number | null,
+    rateBasis: '割増基礎 200,000 円 ÷ (明細 20 日 × 7h30m)', rateNotes: [] as string[], belowMinWage: false, minWageRate: 1000 as number | null,
   }
 
   it('基礎単価の次に根拠を積み、5 段。差が負のときだけ太字', () => {
     const w = mount(SalaryOver37Cell, { props: { over37, noneReason: '' } })
     expect(lines(w)).toEqual(['rate', 'rate-basis', 'minutes', 'theory', 'paid', 'diff37'])
-    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ (20 日 × 7h30m)')
+    expect(w.find('[data-salary-line="rate-basis"]').text()).toBe('= 割増基礎 200,000 円 ÷ (明細 20 日 × 7h30m)')
     expect(w.find('[data-salary-line="diff37"]').classes()).toContain('font-bold')
     const ok = mount(SalaryOver37Cell, { props: { over37: { ...over37, diff: 5, shortfall: false }, noneReason: '', compact: true } })
     expect(ok.find('[data-salary-line="diff37"]').classes()).not.toContain('font-bold')
   })
 
-  it('所定を引けなかった注記は、あるときだけ根拠の下に出る', () => {
-    const note = '所定未設定のため法定 8 時間で計算'
-    const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, scheduledNote: note }, noneReason: '' } })
-    expect(lines(w)).toEqual(['rate', 'rate-basis', 'scheduled-note', 'minutes', 'theory', 'paid', 'diff37'])
-    expect(w.find('[data-salary-line="scheduled-note"]').text()).toBe(note)
+  it('根拠の注記 (日数をデジタコ稼働に倒した / 所定を引けなかった) は、あるぶんだけ根拠の下に 1 行ずつ出る', () => {
+    const notes = ['明細に出勤日数が無いためデジタコの稼働日数で計算', '所定未設定のため法定 8 時間で計算']
+    const w = mount(SalaryOver37Cell, { props: { over37: { ...over37, rateNotes: notes }, noneReason: '' } })
+    expect(lines(w)).toEqual(['rate', 'rate-basis', 'rate-note', 'rate-note', 'minutes', 'theory', 'paid', 'diff37'])
+    expect(w.findAll('[data-salary-line="rate-note"]').map(n => n.text())).toEqual(notes)
   })
 
   it('★ 37条の基礎単価が最低賃金を下回る月: 基礎単価が赤太字で、最低賃金の額つきのエラー行が出る (画面も紙面も)', () => {

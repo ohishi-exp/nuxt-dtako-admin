@@ -643,7 +643,7 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
 `@media print` A4横) ②最低賃金チェック (換算時給 vs 県別最低賃金)
 ③単価マスタ (適用開始日つき履歴、一括変更、CSV 1行=1履歴 upsert)
 ④給与比較 (給与明細 CSV をブラウザ内のみで解析し wage-report と突合 —
-**基礎単価(実績) = 割増基礎算入計÷所定労働時間 (労基則19条。日給 = ÷(出勤日数×1日の所定、relay の `daily_work_minutes`、引けなければ法定8h) / 時給 = 明細の時給そのもの / 月給・その他 = ÷法定の月平均173.8h / 区分不明は出さない。`computeBaseRate`、Refs #1133) と 残業(基礎単価) 理論値の
+**基礎単価(実績) = 割増基礎算入計÷所定労働時間 (労基則19条。日給 = ÷min(日数×1日の所定、法定の月平均173.8h)。日数 = 明細の 出勤日数+有休日数 (`baseRateDaysOf`。明細に無い行・複数会社の合算行はデジタコ稼働日数)、所定 = relay の `daily_work_minutes`、引けなければ法定8h / 時給 = 明細の時給そのもの / 月給・その他 = ÷法定の月平均173.8h / 区分不明は出さない。`computeBaseRate`、Refs #1133) と 残業(基礎単価) 理論値の
 労基法37条主判定 + 残業(最低賃金) の絶対下限併記**、Refs #278)
 ⑤支給項目区分 (**割増基礎 (37条) × 最低賃金 (4条3項) の 2 軸 5 区分**:
 base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存値は
