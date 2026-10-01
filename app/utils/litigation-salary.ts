@@ -242,7 +242,7 @@ export interface LitigationSalaryAmountCell {
   csv: number
   sys: number | null
   diff: number | null
-  /** 「計算」の根拠 (`3,249 円 × 28 日` など)。総支給は null (基本給と残業の和なので根拠を持たない) */
+  /** 「計算」の根拠 (`10,000 円 × 20 日` など)。総支給は null (基本給と残業の和なので根拠を持たない) */
   basis: string | null
 }
 

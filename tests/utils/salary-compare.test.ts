@@ -463,12 +463,12 @@ describe('compareSalaryMonth — 給与区分 (Refs #429)', () => {
   })
 
   it('★ 根拠が行に写る: 日給 = 日額と日数 / 残業単価 / 単価なし (計算結果は変えない)', () => {
-    const csv = csvRow({ driverCd: '1239', cdKey: '1239', driverName: '架空 花子', rates: { base: 3249, overtime: 1040 } })
-    const [row] = compareSalaryMonth([csv], [reportRow('1239', '架空 花子', { workDays: 28, payKubun: 2 })], config, '2023-04').rows
-    expect(row!.sysBaseBasis).toEqual({ kind: 'days', rate: 3249, quantity: 28 })
-    expect(row!.sysOvertimeRate).toBe(1040)
-    const none = csvRow({ driverCd: '1239', cdKey: '1239', driverName: '架空 花子', rates: { base: null, overtime: null } })
-    const [r2] = compareSalaryMonth([none], [reportRow('1239', '架空 花子', { payKubun: 2 })], config, '2023-04').rows
+    const csv = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', rates: { base: 10000, overtime: 1500 } })
+    const [row] = compareSalaryMonth([csv], [reportRow('99001', '架空 花子', { workDays: 20, payKubun: 2 })], config, '2023-04').rows
+    expect(row!.sysBaseBasis).toEqual({ kind: 'days', rate: 10000, quantity: 20 })
+    expect(row!.sysOvertimeRate).toBe(1500)
+    const none = csvRow({ driverCd: '99001', cdKey: '99001', driverName: '架空 花子', rates: { base: null, overtime: null } })
+    const [r2] = compareSalaryMonth([none], [reportRow('99001', '架空 花子', { payKubun: 2 })], config, '2023-04').rows
     expect(r2!.sysBaseBasis).toEqual({ kind: 'norate', rate: null, quantity: null })
     expect(r2!.sysOvertimeRate).toBeNull()
   })
