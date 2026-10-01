@@ -37,6 +37,7 @@ import {
   litigationOutputSourceLines,
   litigationResultFromHeaders,
   litigationZipFilename,
+  LITIGATION_HOURS_WITHIN_STATUTORY_NOTE,
   LITIGATION_TEMPLATE_KEY,
   type LitigationOutputChunk,
   type LitigationOutputResult,
@@ -1934,6 +1935,7 @@ function fmtDateTime(iso: string): string {
             Excel の行は勤怠の勤務の記録から作ります (勤怠の記録が無い会社は運行から)。どちらで作ったかは冊ごとに下の表に出ます。
             ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
             下の「月ごとの時間」は、給与比較と同じ wage report の月ごとの時間 (暦月) です。ZIP を作る前から出ます。
+            <span data-testid="litigation-output-within-statutory-note">{{ LITIGATION_HOURS_WITHIN_STATUTORY_NOTE }}</span>
             ダウンロードのあと、同じファイルと結果を版として保存します (出力するたびに 1 版)。元のデータが後から変わっても、その時点で出力した Excel を下の「保存した版」からダウンロードできます。案件を開き直すと、最新の版の結果を表示します。
           </p>
 

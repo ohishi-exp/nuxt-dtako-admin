@@ -8,11 +8,11 @@ const table: LitigationHoursBook = {
   driverCd: '9001',
   label: '2030-01〜2030-12',
   rows: [
-    { month: '2030-01', cells: ['150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'], note: null },
+    { month: '2030-01', cells: ['150:00', '0:30', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'], note: null },
     { month: '2030-02', cells: [], note: '未取得' },
-    { month: '2030-03', cells: ['100:00', '10:00', '0:00', '0:00', '0:00', '0:30', '110:00'], note: null },
+    { month: '2030-03', cells: ['100:00', '—', '10:00', '0:00', '0:00', '0:00', '0:30', '110:00'], note: null },
   ],
-  total: { month: '合計 (2 か月ぶん)', cells: ['250:00', '75:30', '5:30', '6:00', '8:30', '13:00', '340:00'], note: null },
+  total: { month: '合計 (2 か月ぶん)', cells: ['250:00', '0:30 (一部の月は不明)', '75:30', '5:30', '6:00', '8:30', '13:00', '340:00'], note: null },
   valueMonths: 2,
   needsFetch: true,
   checkedAtText: '2030-04-01 09:30',
@@ -39,17 +39,17 @@ describe('LitigationMonthlyHoursTable', () => {
     expect(book.find('[data-hours="heading"]').text()).toBe('架空 太郎 (9001) 2030-01〜2030-12')
     expect(book.find('[data-hours="checked-at"]').text()).toBe('最終取得 2030-04-01 09:30')
     expect(book.findAll('th').map(th => th.text())).toEqual([
-      '対象月', '法定時間内', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間',
+      '対象月', '法定時間内', 'うち法内残業', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間',
     ])
     const months = book.findAll('[data-hours="month"]').map(tr => tr.findAll('td').map(td => td.text()))
     expect(months).toEqual([
-      ['2030-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
+      ['2030-01', '150:00', '0:30', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
       ['2030-02', '未取得'],
-      ['2030-03', '100:00', '10:00', '0:00', '0:00', '0:00', '0:30', '110:00'],
+      ['2030-03', '100:00', '—', '10:00', '0:00', '0:00', '0:00', '0:30', '110:00'],
     ])
-    expect(book.find('[data-hours="month-note"]').attributes('colspan')).toBe('7')
+    expect(book.find('[data-hours="month-note"]').attributes('colspan')).toBe('8')
     expect(book.find('[data-hours="total"]').findAll('td').map(td => td.text())).toEqual([
-      '合計 (2 か月ぶん)', '250:00', '75:30', '5:30', '6:00', '8:30', '13:00', '340:00',
+      '合計 (2 か月ぶん)', '250:00', '0:30 (一部の月は不明)', '75:30', '5:30', '6:00', '8:30', '13:00', '340:00',
     ])
   })
 
