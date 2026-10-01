@@ -470,7 +470,7 @@ describe('salaryRowCells: 基本給の内訳・計算の根拠 (Refs #1133)', ()
   })
 
   it('★ 法定時間内の分が変われば根拠の時間も変わる (計算に使った時間 = wage report の法定時間内)', () => {
-    expect(cells({ statutoryMinutes: 9820 }).amounts[0]!.basis).toBe('最低賃金 1,000 円/h × 法定時間内 163h40m')
+    expect(cells({ statutoryMinutes: 9600 }).amounts[0]!.basis).toBe('最低賃金 1,000 円/h × 法定時間内 160h00m')
   })
 
   it('単価マスタと最低賃金が違う月は「単価マスタ」と書く (最低賃金と呼ばない)。最低賃金が引けない月も同じ', () => {
