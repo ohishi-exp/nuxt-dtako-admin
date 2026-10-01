@@ -356,8 +356,8 @@ function baseMinWageLine(c: SalaryComparisonRow): LitigationSalaryMinWageLine {
   if (cmp.calcBase === null || rate === null) {
     return { text: '最低賃金との比較なし (単価マスタに単価が無い)', diff: null, shortfall: false }
   }
-  // 掛けた単価は単価マスタ。最低賃金と一致する月 (この会社の運用) だけ「最低賃金」と呼び、違う月は単価マスタと書く
-  const name = rate === c.rateBasis.minWageRate ? '最低賃金' : '単価マスタ'
+  // 掛けた単価は単価マスタ。最低賃金と一致する月 (右端の列と同じ `rateBasisStatus` が ok) だけ「最低賃金」と呼び、違う月は単価マスタと書く
+  const name = rateBasisStatus(c.rateBasis).status === 'ok' ? '最低賃金' : '単価マスタ'
   return {
     text: `${name} ${yen(rate)} 円/h × ${WAGE_LABEL.statutory} ${fmtMinutes(c.hours.minutes.statutory)} = ${yen(cmp.calcBase)}`,
     diff: cmp.diffBase,
