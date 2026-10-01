@@ -16,6 +16,7 @@ import {
   normalizeWorkSchedulePutBody,
   resolveWorkScheduleAt,
   scopeByDriverCdAt,
+  workScheduleMinutesResolver,
   WorkScheduleError,
   type HolidayWorkD1Row,
   type NightShiftD1Row,
@@ -461,6 +462,34 @@ describe('scopeByDriverCdAt', () => {
       resolveAt,
     )
     expect(map.get('18')).toEqual({ branchCode: null, jobName: null })
+  })
+})
+
+describe('workScheduleMinutesResolver (乗務員 × 月の 1 日の所定)', () => {
+  const scopes = new Map([['99001', { branchCode: 10, jobName: '乗務員' }]])
+
+  it('拠点つきの所定が全社既定より優先される (スコープは乗務員の所属で引く)', () => {
+    const resolve = workScheduleMinutesResolver(
+      [sched('2026-01-01', 480), sched('2026-01-01', 450, 10)],
+      scopes,
+      '2026-06',
+    )
+    expect(resolve('99001')).toBe(450)
+  })
+
+  it('社員マスタにスコープが無い乗務員は全社既定だけを見る', () => {
+    const resolve = workScheduleMinutesResolver(
+      [sched('2026-01-01', 480), sched('2026-01-01', 450, 10)],
+      scopes,
+      '2026-06',
+    )
+    expect(resolve('99002')).toBe(480)
+  })
+
+  it('該当する所定が無ければ null (所定マスタは読めたが未設定)', () => {
+    expect(workScheduleMinutesResolver([], scopes, '2026-06')('99001')).toBeNull()
+    // 適用開始日が月末より後の行は効かない
+    expect(workScheduleMinutesResolver([sched('2026-07-01', 480)], scopes, '2026-06')('99001')).toBeNull()
   })
 })
 

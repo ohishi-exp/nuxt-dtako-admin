@@ -12,6 +12,9 @@ import {
   compareCompanyLabel,
   compareSalaryMonth,
   csvOvertimeHoursOf,
+  BASE_RATE_NONE_LABELS,
+  baseRateDenominatorText,
+  computeBaseRate,
   computeSysBase,
   mergeSalaryCsvRows,
   computeOvertimePayAtRate,
@@ -29,6 +32,8 @@ import {
   type SalaryCdMap,
   type SalaryCsvRow,
   type SalaryItemConfig,
+  payKubunKind,
+  STATUTORY_MONTHLY_AVG_HOURS,
 } from '../../app/utils/salary-compare'
 
 // ---------------------------------------------------------------------------
@@ -377,7 +382,11 @@ function reportRow(
     overtimeNightMinutes?: number | null
     breakMinutes?: number | null
     drivingMinutes?: number | null
+    /** デジタコの法定内時間 (wage 側の素材。**37条の基礎単価の分母には使わない**)。 */
     statutoryMinutes?: number
+    /** 1 日の所定 (分、wage-report の `daily_work_minutes`)。**既定は 480**。`null` = 所定マスタを読めたが
+     * 該当なし / `'absent'` = キーが無い (読めなかった・古い保存物)。 */
+    dailyWorkMinutes?: number | null | 'absent'
     /** 給与区分 (Refs #429)。**既定は日給 (2)** — 従来の `単価 × 稼働日数` を
      * 前提にしている既存ケースの意図をそのまま保つため。 */
     payKubun?: number | null
@@ -401,6 +410,7 @@ function reportRow(
       punchErrorDays: over.punchErrorDays,
     },
     pay_kubun: over.payKubun === undefined ? 2 : over.payKubun,
+    ...(over.dailyWorkMinutes === 'absent' ? {} : { daily_work_minutes: over.dailyWorkMinutes === undefined ? 480 : over.dailyWorkMinutes }),
     // 残業(最低賃金) 列の素材 (wage-report の wage 側)。単体テストでは最低賃金
     // 未設定 (null)・法定内 0 分を既定とし、実データ相当の値は共有 fixture テスト
     // (salary-compare-fixture.test.ts) が golden 経由で検証する。
@@ -868,24 +878,23 @@ describe('compareSalaryMonth', () => {
     expect(r.diffCsvVsMinWageOvertime).toBeNull()
   })
 
-  it('基礎単価(実績) と 残業(基礎単価) は最低賃金設定と独立に明細+法定内時間から出る (Refs #278)', () => {
+  it('基礎単価(実績) と 残業(基礎単価) は最低賃金設定と独立に 明細 ÷ 所定労働時間 から出る (Refs #278 / #1133)', () => {
     const out = compareSalaryMonth(
       [csvRow()], // 基本給 80000 (base) + 残業手当 30000 (overtime)
-      [reportRow('1239', '城田 秀幸', { statutoryMinutes: 160 * 60, overtimeMinutes: 20 * 60 })],
+      [reportRow('1239', '城田 秀幸', { workDays: 20, overtimeMinutes: 20 * 60 })], // 日給・所定 8h → 分母 160h
       config,
       '2023-04',
     )
     const r = out.rows[0]!
-    expect(r.statutoryMinutes).toBe(160 * 60)
-    expect(r.baseRateActual).toBe(500) // 80000 ÷ 160h
+    expect(r.baseRateActual).toBe(500) // 80000 ÷ (20 日 × 8h)
     expect(r.baseRateOvertimePay).toBe(12500) // 20h × 500 × 1.25
     expect(r.diffCsvVsBaseRateOvertime).toBe(30000 - 12500)
   })
 
   it('残業(基礎単価) の理論値は勤務月で 60h 超の係数が変わる (2023-03 は 1.25、2023-04 は 1.5)', () => {
     const run = (month: string) => compareSalaryMonth(
-      [csvRow()], // 基本給 80000 → 基礎単価 500 (÷ 160h)
-      [reportRow('1239', '城田 秀幸', { statutoryMinutes: 160 * 60, overtimeMinutes: 100 * 60 })],
+      [csvRow()], // 基本給 80000 → 基礎単価 500 (÷ 20 日 × 8h)
+      [reportRow('1239', '城田 秀幸', { workDays: 20, overtimeMinutes: 100 * 60 })],
       config,
       month,
     ).rows[0]!
@@ -893,17 +902,134 @@ describe('compareSalaryMonth', () => {
     expect(run('2023-04').baseRateOvertimePay).toBe(60 * 500 * 1.25 + 40 * 500 * 1.5) // 67,500
   })
 
-  it('法定内時間が 0 (v1 アーカイブ等) の行は 基礎単価(実績) 系が null (算出不可)', () => {
-    const out = compareSalaryMonth(
-      [csvRow()],
-      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 20 * 60 })],
-      config,
-      '2023-04',
-    )
-    const r = out.rows[0]!
-    expect(r.baseRateActual).toBeNull()
-    expect(r.baseRateOvertimePay).toBeNull()
-    expect(r.diffCsvVsBaseRateOvertime).toBeNull()
+  describe('37条の基礎単価の分母 = 所定労働時間 (給与区分ごとの式、Refs #1133)', () => {
+    const base = (over: Parameters<typeof reportRow>[2]) =>
+      compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', over)], config, '2023-04').rows[0]!
+
+    it('日給: 割増基礎 ÷ (出勤日数 × 1 日の所定)。所定を引けたらその分を使う', () => {
+      const r = base({ payKubun: 2, workDays: 20, dailyWorkMinutes: 450 })
+      expect(r.baseRateActual).toBeCloseTo(80000 / 150, 6) // 20 日 × 7.5h
+      expect(r.baseRateBasis).toEqual({
+        kind: 'days', hours: 150, workDays: 20, dailyMinutes: 450, scheduled: 'resolved', hourlyRate: null, none: null,
+      })
+    })
+
+    it('日給: 所定マスタは読めたが該当なし (null) は法定 8 時間で計算し「未設定」と区別して残す', () => {
+      const r = base({ payKubun: 2, workDays: 20, dailyWorkMinutes: null })
+      expect(r.baseRateActual).toBe(500)
+      expect(r.baseRateBasis).toMatchObject({ kind: 'days', dailyMinutes: 480, scheduled: 'unset' })
+    })
+
+    it('日給: キーが無い (読めなかった・古い保存物) も法定 8 時間で計算し「読めなかった」と残す', () => {
+      const r = base({ payKubun: 2, workDays: 20, dailyWorkMinutes: 'absent' })
+      expect(r.baseRateActual).toBe(500)
+      expect(r.baseRateBasis).toMatchObject({ kind: 'days', dailyMinutes: 480, scheduled: 'unread' })
+    })
+
+    it('★ 実際に働いた時間 (デジタコの法定内時間) では割らない — 長く働いても基礎単価は動かない', () => {
+      // 旧式 (÷ 法定内時間) なら 80000 ÷ 300h = 266.7 円/h になる月
+      const r = base({ payKubun: 2, workDays: 20, statutoryMinutes: 300 * 60 })
+      expect(r.baseRateActual).toBe(500)
+    })
+
+    it('月給・その他: 割増基礎 ÷ 法定の月平均 (40 × 365 ÷ 7 ÷ 12 時間)。明細に基本単価が無くても出る', () => {
+      expect(STATUTORY_MONTHLY_AVG_HOURS).toBeCloseTo(173.8095, 4)
+      for (const payKubun of [1, 4]) {
+        const r = base({ payKubun, workDays: 20 }) // csvRow の rates.base は null (単価なし)
+        expect(r.baseRateActual).toBeCloseTo(80000 / STATUTORY_MONTHLY_AVG_HOURS, 6)
+        expect(r.baseRateBasis).toMatchObject({ kind: 'monthly', hours: STATUTORY_MONTHLY_AVG_HOURS, scheduled: null })
+      }
+    })
+
+    it('時給: 明細の時給の単価そのもの (割り算しない・手当は入らない)', () => {
+      const out = compareSalaryMonth(
+        [csvRow({ rates: { base: 1200, overtime: null } })],
+        [reportRow('1239', '城田 秀幸', { payKubun: 3, workDays: 20, statutoryMinutes: 160 * 60 })],
+        config,
+        '2023-04',
+      )
+      const r = out.rows[0]!
+      expect(r.baseRateActual).toBe(1200)
+      expect(r.baseRateBasis).toMatchObject({ kind: 'hours', hourlyRate: 1200, hours: null, none: null })
+    })
+
+    it('時給でも割増基礎が 0 の月は null (割増基礎 0 は区分に依らず算出不可。区分設定の見直しの合図)', () => {
+      const { value, basis } = computeBaseRate(3, 0, 20, 480, 1200)
+      expect(value).toBeNull()
+      expect(basis).toMatchObject({ kind: 'hours', hourlyRate: 1200, none: 'no-premium-base' })
+    })
+
+    it('時給で明細に単価が無い月は基礎単価なし (理由: 明細に時給の単価が無い)', () => {
+      const r = base({ payKubun: 3, workDays: 20 })
+      expect(r.baseRateActual).toBeNull()
+      expect(r.baseRateOvertimePay).toBeNull()
+      expect(r.baseRateBasis.none).toBe('no-hourly-rate')
+    })
+
+    it('給与区分が不明 (null / 未知の値) は基礎単価を出さない', () => {
+      for (const payKubun of [null, 0, 9]) {
+        const r = base({ payKubun, workDays: 20 })
+        expect(r.baseRateActual).toBeNull()
+        expect(r.diffCsvVsBaseRateOvertime).toBeNull()
+        expect(r.baseRateBasis.none).toBe('unknown-kind')
+      }
+    })
+
+    it('出勤日数 0 (分母 0) と 割増基礎 0 は null (算出不可)。理由は別', () => {
+      const noDays = base({ payKubun: 2, workDays: 0, overtimeMinutes: 20 * 60 })
+      expect(noDays.baseRateActual).toBeNull()
+      expect(noDays.baseRateOvertimePay).toBeNull()
+      expect(noDays.baseRateBasis.none).toBe('no-denominator')
+      const noPremium = compareSalaryMonth(
+        [csvRow({ amounts: { 残業手当: 30000 } })],
+        [reportRow('1239', '城田 秀幸', { payKubun: 2, workDays: 20 })],
+        config,
+        '2023-04',
+      ).rows[0]!
+      expect(noPremium.baseRateActual).toBeNull()
+      expect(noPremium.baseRateBasis.none).toBe('no-premium-base')
+    })
+
+    it('給与区分が不明な行は 37条の差が null → 拘束×賃金の「不足のみ」から消え、「下回りが大きい順」では末尾に行く', () => {
+      // restraint-wage.vue の salaryComparisonRows と同じ判定 (差が負だけ残す / null は後ろへ) を行データに当てる
+      const out = compareSalaryMonth(
+        [csvRow({ cdKey: '1', driverCd: '1', driverName: '甲 一郎', amounts: { 基本給: 80000, 残業手当: 1000 } }), csvRow({ cdKey: '2', driverCd: '2', driverName: '乙 二郎', amounts: { 基本給: 80000, 残業手当: 1000 } })],
+        [
+          reportRow('1', '甲 一郎', { payKubun: 2, workDays: 20, overtimeMinutes: 20 * 60 }),
+          reportRow('2', '乙 二郎', { payKubun: null, workDays: 20, overtimeMinutes: 20 * 60 }),
+        ],
+        config,
+        '2023-04',
+      )
+      const [known, unknown] = [out.rows.find(r => r.driverCd === '1')!, out.rows.find(r => r.driverCd === '2')!]
+      expect(known.diffCsvVsBaseRateOvertime).toBe(1000 - 12500) // 支払が理論値を下回る = 不足
+      expect(unknown.diffCsvVsBaseRateOvertime).toBeNull()
+      const onlyShortfall = out.rows.filter(r => (r.diffCsvVsBaseRateOvertime ?? 0) < 0)
+      expect(onlyShortfall.map(r => r.driverCd)).toEqual(['1'])
+      const sorted = [...out.rows].sort((a, b) =>
+        (a.diffCsvVsBaseRateOvertime === null ? 1 : 0) - (b.diffCsvVsBaseRateOvertime === null ? 1 : 0)
+        || (a.diffCsvVsBaseRateOvertime ?? 0) - (b.diffCsvVsBaseRateOvertime ?? 0))
+      expect(sorted.map(r => r.driverCd)).toEqual(['1', '2'])
+    })
+
+    it('拘束×賃金の表のセルに出す分母の短い表記 (日給 / 時給 / 月給・その他 / 区分不明は空)、出せない理由の文言', () => {
+      expect(baseRateDenominatorText(computeBaseRate(2, 80000, 20, 450, null).basis)).toBe('÷ (20日 × 7h30m)')
+      expect(baseRateDenominatorText(computeBaseRate(3, 80000, 20, 450, 1200).basis)).toBe('明細の時給')
+      expect(baseRateDenominatorText(computeBaseRate(1, 80000, 20, 450, null).basis)).toBe('÷ 法定の月平均 173.8h')
+      expect(baseRateDenominatorText(computeBaseRate(null, 80000, 20, 450, null).basis)).toBe('')
+      expect(BASE_RATE_NONE_LABELS).toEqual({
+        'unknown-kind': '給与区分が不明',
+        'no-hourly-rate': '明細に時給の単価が無い',
+        'no-premium-base': '割増の基礎に入る支給が 0',
+        'no-denominator': '出勤日数が 0',
+      })
+    })
+
+    it('区分→種別の対応は 1 か所 (payKubunKind) — 基本給(計算) と基礎単価が同じ種別になる', () => {
+      expect([1, 2, 3, 4, 0, null].map(payKubunKind)).toEqual(['monthly', 'days', 'hours', 'monthly', 'unknown', 'unknown'])
+      expect(computeSysBase(100, 2, 1, 1).kind).toBe('days')
+      expect(computeBaseRate(2, 80000, 20, 480, null).basis.kind).toBe('days')
+    })
   })
 
   it('CSV 側の重複乗務員は後勝ち + 警告する', () => {

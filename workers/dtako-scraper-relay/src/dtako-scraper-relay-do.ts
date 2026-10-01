@@ -309,7 +309,7 @@ import {
   scopeByDriverCdAt,
   buildHolidayWorkIndex,
   buildNightShiftIndex,
-  resolveWorkScheduleAt,
+  workScheduleMinutesResolver,
 } from "./work-schedule";
 import {
   buildLitigationCaseDeleteStatement,
@@ -5102,6 +5102,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 引けなくなるだけで、拘束時間集計そのものは落とさない (この経路は #409 で
    * 後から足した補助情報であって、月次集計の必須依存ではない)。給与区分
    * (Refs #429) も同じ — 引けなければ給与比較が基本給(計算)を出さないだけ。
+   *
+   * 所定 (`dailyWorkMinutesFor`、37条の基礎単価の分母) は**読めたかを 3 状態で返す**:
+   * 関数 = 所定マスタを読めた (引けなければ null) / `null` = 読めなかった
+   * (D1 binding 無し・読み失敗)。**work_schedules の読み失敗は個別に catch** し、
+   * branches / pay_kubun を巻き添えにしない。
    */
   private async branchByDriverCd(
     compId: string,
@@ -5112,12 +5117,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     payKubun: Map<string, number>;
     /** 同じ社員マスタから別の月の所属を引く (期間の一括設定で月ごとに所属を引き直す用) */
     branchAt: (driverCd: string, ym: string) => string | undefined;
+    /** 乗務員CD → 1 日の所定 (分)。所定マスタを読めなかったときは null (関数ごと無い) */
+    dailyWorkMinutesFor: ((driverCd: string) => number | null) | null;
   }> {
     const none = () => undefined;
     const db = this.env.DTAKO_DB;
-    if (!db) return { branches: new Map(), names: new Map(), payKubun: new Map(), branchAt: none };
+    if (!db) {
+      return { branches: new Map(), names: new Map(), payKubun: new Map(), branchAt: none, dailyWorkMinutesFor: null };
+    }
     try {
-      const [employeeResult, attrResult] = await Promise.all([
+      const [employeeResult, attrResult, schedules] = await Promise.all([
         db
           .prepare(`SELECT company, payroll_cd, name, driver_cd, hire_date, retire_date FROM employees WHERE comp_id = ?`)
           .bind(compId)
@@ -5128,6 +5137,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           )
           .bind(compId)
           .all<EmployeeAttrD1Row>(),
+        db
+          .prepare(
+            `SELECT effective_from, branch_code, job_name, daily_work_minutes FROM work_schedules WHERE comp_id = ?`,
+          )
+          .bind(compId)
+          .all<WorkScheduleD1Row>()
+          .then(
+            (r) => buildWorkScheduleResponse(r.results ?? []),
+            (err) => {
+              console.error(JSON.stringify({ branch_by_driver_cd: "work-schedules-error", error: describeUnknownError(err) }));
+              return null;
+            },
+          ),
       ]);
       const { employees } = buildEmployeeMasterResponse(
         employeeResult.results ?? [],
@@ -5144,10 +5166,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         if (!m) byMonth.set(at, (m = branchByDriverCdAt(employees, at, resolveAttrsAt)));
         return m.get(driverCd);
       };
-      return { branches, names, payKubun: payKubunByDriverCdAt(employees, ym, resolveAttrsAt), branchAt };
+      return {
+        branches,
+        names,
+        payKubun: payKubunByDriverCdAt(employees, ym, resolveAttrsAt),
+        branchAt,
+        dailyWorkMinutesFor: schedules
+          ? workScheduleMinutesResolver(schedules, scopeByDriverCdAt(employees, ym, resolveAttrsAt), ym)
+          : null,
+      };
     } catch (err) {
       console.error(JSON.stringify({ branch_by_driver_cd: "error", error: describeUnknownError(err) }));
-      return { branches: new Map(), names: new Map(), payKubun: new Map(), branchAt: none };
+      return { branches: new Map(), names: new Map(), payKubun: new Map(), branchAt: none, dailyWorkMinutesFor: null };
     }
   }
 
@@ -5752,12 +5782,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const scopeOf = (driverCd: string) => scopes.get(driverCd) ?? { branchCode: null, jobName: null };
     const { summaries, warnings } = summarizeTimecardMonth(rows, {
       yearMonth: ym,
-      dailyWorkMinutesFor: (driverCd) => {
-        const scope = scopeOf(driverCd);
-        return (
-          resolveWorkScheduleAt(schedules, ym, scope.branchCode, scope.jobName)?.dailyWorkMinutes ?? null
-        );
-      },
+      dailyWorkMinutesFor: workScheduleMinutesResolver(schedules, scopes, ym),
       approvedHolidayWork: approved,
       // 職種は社員マスタの `employee_attrs.job_name` (対象月末時点)。未取り込みの社員は
       // null → 非事務職として扱われ、自主出勤の隔離も打刻エラーの判定も掛からない
@@ -8657,12 +8682,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const scopeOf = (driverCd: string) => scopes.get(driverCd) ?? { branchCode: null, jobName: null };
       const { summaries } = summarizeTimecardMonth(rows, {
         yearMonth: month,
-        dailyWorkMinutesFor: (driverCd) => {
-          const scope = scopeOf(driverCd);
-          return (
-            resolveWorkScheduleAt(schedules, month, scope.branchCode, scope.jobName)?.dailyWorkMinutes ?? null
-          );
-        },
+        dailyWorkMinutesFor: workScheduleMinutesResolver(schedules, scopes, month),
         approvedHolidayWork: approved,
         isClerical: (driverCd) => isClericalJob(scopeOf(driverCd).jobName),
         isNightShift: (driverCd) => nightShift.has(driverCd),
@@ -9600,6 +9620,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * ## `?source=gcp` — 拘束時間ソースの切り替え (最低賃金チェック用)
    *
    * 省略時 (`current`) は**上の経路そのまま** = 従来の応答と 1 バイトも変わらない。
+   * (例外: 行の `daily_work_minutes` を足した回だけ本文が 1 欄増え、全閲覧者の弱 ETag が
+   * 1 回無効になった — 37条の基礎単価の分母、Refs #1133。)
    * `gcp` を渡した時だけ、合流後のサマリの**時間を GCP `kintai.day_summaries` 由来に
    * 差し替えて**から `computeWageRow` を回す (`gcp-day-summaries.ts`)。休暇・休日区分・
    * 運転/荷役などデジタコ側にしか無い項目は元のまま残る。
@@ -9738,7 +9760,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
     // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
-    const { branches: employeeBranches, payKubun, names: employeeNames } = await timer.measure("branches", () =>
+    const {
+      branches: employeeBranches,
+      payKubun,
+      names: employeeNames,
+      dailyWorkMinutesFor,
+    } = await timer.measure("branches", () =>
       this.branchByDriverCd(record.compId, ym),
     );
 
@@ -9789,6 +9816,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         /** 給与区分 (1=月給 / 2=日給 / 3=時給 / 4=その他)。社員マスタに無ければ null。
          * 給与比較が「基本給(計算)」の単価の掛け方を決めるのに使う (Refs #429)。 */
         pay_kubun: payKubun.get(entry.data.driverCd) ?? null,
+        /** 1 日の所定 (分、所定マスタ = work_schedules)。37条の基礎単価 (日給の分母) に使う
+         * (Refs #1133)。3 状態: 数値 = 引けた / `null` = 所定マスタを読めたが該当なし /
+         * **キーを出さない** = 読めなかった (D1 binding 無し・読み失敗)。
+         * **既定経路の本文もこの 1 欄ぶん増える** (全閲覧者の弱 ETag が 1 回無効になる。
+         * 欄を足した理由はここ — 以後は 1 バイトも変えない)。 */
+        ...(dailyWorkMinutesFor ? { daily_work_minutes: dailyWorkMinutesFor(entry.data.driverCd) } : {}),
         fetched_at: entry.fetchedAt,
         last_verified_at: entry.lastVerifiedAt,
         /** `source=gcp` で GCP 側にこの乗務員 × この月の行が無かった (= 欠測)。

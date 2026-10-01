@@ -32,6 +32,7 @@ const reportRows: WageReportRow[] = summaries.map(s => ({
   fetched_at: null,
   last_verified_at: null,
   pay_kubun: 2,
+  daily_work_minutes: 480,
   wage: golden.find(g => g.driverCd === s.driverCd)!.wage as unknown as WageReportRow['wage'],
 }))
 
@@ -147,19 +148,19 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     ])
   })
 
-  it('基礎単価(実績) = 割増基礎算入計 ÷ 法定内時間 — 単価マスタとの検算 (9901: 1400 円)', () => {
+  it('基礎単価(実績) = 割増基礎算入計 ÷ (出勤日数 × 1 日の所定) — デジタコの法定内時間では割らない (9901)', () => {
     const row = byCd['9901']!
-    expect(row.statutoryMinutes).toBe(9480) // 158h
-    expect(row.baseRateActual).toBe(221200 / 158) // = 1400、単価マスタの時給と一致
-    expect(row.baseRateActual).toBe(goldenByCd['9901']!.hourlyRate)
+    // 20 日 × 8h = 160h。法定内時間 (9480 分 = 158h) で割った 1400 円ではない
+    expect(row.baseRateActual).toBe(221200 / 160) // 1382.5
+    expect(row.baseRateBasis).toMatchObject({ kind: 'days', workDays: 20, dailyMinutes: 480, hours: 160, scheduled: 'resolved' })
   })
 
-  it('残業(基礎単価) 理論値 (37条): 9901 は支払残業手当がちょうど理論値どおり', () => {
+  it('残業(基礎単価) 理論値 (37条): 9901 の理論値は所定で割った基礎単価から出る', () => {
     const row = byCd['9901']!
-    // 22h×1400×1.25 + 深夜 2h×1400×0.25 = 38500 + 700 = 39200 (= 残業手当)
-    expect(row.baseRateOvertimePay).toBe(39200)
-    // csvOvertime には通常深夜の 深夜手当 1750 も入るため差は +1750 (適法)
-    expect(row.diffCsvVsBaseRateOvertime).toBe(40950 - 39200)
+    // 22h×1382.5×1.25 + 深夜 2h×1382.5×0.25 = 38018.75 + 691.25 = 38710
+    expect(row.baseRateOvertimePay).toBe(38710)
+    // csvOvertime = 残業手当 39200 + 通常深夜の 深夜手当 1750 = 40950 → 理論値を上回る (適法)
+    expect(row.diffCsvVsBaseRateOvertime).toBe(40950 - 38710)
   })
 
   it('9902: 基礎単価(実績) 900 円 — 通勤手当を除外した最低賃金算入分で割れが見える', () => {
@@ -170,14 +171,14 @@ describe('compareSalaryMonth (共有 fixture)', () => {
     expect(row.csvTotal).toBe(149000)
   })
 
-  it('9903 (月60h超): 支払残業代が基礎単価ベースの37条理論値を下回る (主判定が負)', () => {
+  it('9903 (月60h超): 基礎単価は所定で割るので 480 円。60h を境に 1.25 → 1.5 になる理論値を支払が上回る', () => {
     const row = byCd['9903']!
-    expect(row.baseRateActual).toBe(76800 / 80) // = 960 = 単価マスタと一致
-    // 60h×960×1.25 + 40h×960×1.5 = 72000 + 57600 = 129600
-    expect(row.baseRateOvertimePay).toBe(129600)
-    expect(row.diffCsvVsBaseRateOvertime).toBe(120000 - 129600)
-    expect(row.diffCsvVsBaseRateOvertime!).toBeLessThan(0)
-    // 絶対下限 (最低賃金 956 円ベース 129060) も割れている
+    // 割増基礎 76800 ÷ (20 日 × 8h)。旧式 (÷ 法定内 80h) の 960 円ではない
+    expect(row.baseRateActual).toBe(76800 / 160) // = 480
+    // 60h×480×1.25 + 40h×480×1.5 = 36000 + 28800 = 64800
+    expect(row.baseRateOvertimePay).toBe(64800)
+    expect(row.diffCsvVsBaseRateOvertime).toBe(120000 - 64800)
+    // 絶対下限 (最低賃金 956 円ベース 129060) は割れている (こちらは基礎単価に依らない)
     expect(row.diffCsvVsMinWageOvertime!).toBeLessThan(0)
   })
 
