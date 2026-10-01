@@ -77,6 +77,10 @@ function stubDollarFetch() {
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
     if (url === '/restraint-api/litigation-cases/deleted') throw Object.assign(new Error('403'), { statusCode: 403 }) // 削除した案件の節は出さない既定
+    // 出力の版 (#c1133-34): 版は 1 つも無い。版の作成は成功させる
+    if (url === '/restraint-api/litigation-outputs') {
+      return opts.method === 'POST' ? { versionId: 'ver-new', createdAt: '2026-09-30T03:00:00.000Z' } : { versions: [] }
+    }
     if (url === '/restraint-api/kintai/change-log') {
       const result = kintaiHandler(url, q)
       if (result instanceof Error) throw result
@@ -86,8 +90,20 @@ function stubDollarFetch() {
   }))
 }
 
+/** 版へ上げたファイル (保存用の名前 → 中身) */
+let uploaded: Record<string, string> = {}
+
+/** Excel (`/api/y-time-export`) は 500。出力の版のファイルの PUT (バイト列) だけ受ける。 */
 function stubFetch() {
-  globalThis.fetch = (async () => new Response('{}', { status: 500 })) as typeof fetch
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input)
+    if (url.startsWith('/restraint-api/litigation-outputs/file?') && init?.method === 'PUT') {
+      const name = new URL(url, 'http://x').searchParams.get('name')!
+      uploaded[name] = new TextDecoder('utf-8', { ignoreBOM: true }).decode(init.body as ArrayBuffer)
+      return Response.json({ name, size: 1, sha256: '0'.repeat(64) })
+    }
+    return new Response('{}', { status: 500 })
+  }) as typeof fetch
 }
 
 async function settle() {
@@ -118,6 +134,7 @@ async function openChangesTabAndRun(): Promise<VueWrapper> {
 beforeEach(() => {
   vi.clearAllMocks()
   calls = []
+  uploaded = {}
   saved.length = 0
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -208,6 +225,8 @@ describe('変更記録タブ: ZIP への統合', () => {
     expect(csv).toContain('休憩 0 → 178 分')
     expect(csv).toContain('始業 08:00 → 07:30')
     expect(csv).toContain('打刻の変更記録は 2026-09-25 から')
+    // 版へ上げた CSV は ZIP に入れたものと同じ (BOM も含めて)
+    expect(uploaded).toEqual({ 'changes.csv': csv })
     w.unmount()
   })
 

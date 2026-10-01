@@ -13,7 +13,7 @@ export async function downloadBlobResponse(res: Response, fallbackFilename: stri
 }
 
 /**
- * 手元で組んだ Blob (JSZip で束ねた ZIP 等) をそのままの名前で保存させる
+ * 手元で組んだ Blob (JSZip で束ねた ZIP 等) をそのままの名前でダウンロードさせる
  * (訴訟準備の出力タブ、Refs #1133 c1133-2)。
  */
 export function downloadBlob(blob: Blob, filename: string): void {

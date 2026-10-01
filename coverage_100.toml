@@ -1314,6 +1314,13 @@ branches = true
 path = "app/utils/litigation-output.ts"
 branches = true
 
+# 訴訟準備の出力の版 (Refs #1133 c1133-34) の pure ロジック — relay に保存する結果の組み立てと読み戻し
+# (形が 1 か所でも違えば全体を読めない扱い)・今の案件の区切りとの照合・版の一覧の読み取りと 1 行の整形。
+# .vue 側は登録しない。
+[[files]]
+path = "app/utils/litigation-output-version.ts"
+branches = true
+
 # 訴訟準備の出力タブに出す「Y金額 (時間の行)」(Refs #1133 c1133-31) の pure ロジック —
 # テンプレの Y時間 / Y金額 シートの式を列ごとに写したもの (賃金月度ごとの 法内残業 / 法外残業 /
 # 月60h超 / 休日労働 / 深夜労働 / 総労働時間)、`要素` シートの設定の読み分け、応答ヘッダの形。
