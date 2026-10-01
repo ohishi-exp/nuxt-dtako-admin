@@ -116,6 +116,8 @@ let payrollPeak = 0
 let payrollStarts: { key: string, inflight: number }[] = []
 /** `会社|勤務月` の payroll を 500 にする */
 let payrollFailKey: string | null = null
+/** `GET /restraint-api/litigation-outputs` が返す保存済みの版 (新しい順。results は `version_id` つきの GET だけが返す) */
+let storedVersions: { versionId: string, createdAt: string, createdBy: string | null, files: { name: string, label: string, size: number }[], results: unknown }[] = []
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -141,6 +143,12 @@ function stubDollarFetch() {
     if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [{ ...CASE, toMonth: caseToMonth, updatedAt: caseUpdatedAt }] }
     if (url === '/restraint-api/litigation-cases/deleted') throw Object.assign(new Error('403'), { statusCode: 403 }) // 削除した案件の節は出さない既定
+    // 出力の版 (#c1133-34): 既定は「版が 1 つも無い」。版の作成は成功させる
+    if (url === '/restraint-api/litigation-outputs') {
+      if (opts.method === 'POST') return { versionId: 'ver-new', createdAt: '2026-09-30T03:00:00.000Z' }
+      if (q.version_id) return { version: storedVersions.find(v => v.versionId === q.version_id) ?? null }
+      return { versions: storedVersions.map(({ results: _results, ...v }) => v) }
+    }
     if (url === '/restraint-api/kintai/onprem-month-operations') {
       if (q.month === '2025-01') throw Object.assign(new Error('reading-dates が 502'), { statusCode: 502 })
       return { month: q.month, driver_cd: q.driver_cd, ope_nos: febOnpremOpeNos, truncated: false }
@@ -220,12 +228,20 @@ function stubDollarFetch() {
   }))
 }
 
-/** 生 `fetch` (取り込みボタンが使う) を差し替える。 */
+/** 生 `fetch` (取り込みボタン・出力が使う) を差し替える。
+ * 出力の版のファイル (`…/litigation-outputs/file`) は body がバイト列 (JSON ではない) なので handler へ渡さず、
+ * ここで成功 (`{name, size, sha256}`) を返す。 */
 function stubFetch(handler: (url: string, body: unknown) => Response | Promise<Response>) {
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input)
+    if (url.startsWith('/restraint-api/litigation-outputs/file?')) {
+      const bytes = init?.body as ArrayBuffer
+      calls.push({ via: 'fetch', method: init?.method ?? 'GET', url, body: bytes })
+      return Response.json({ name: new URL(url, 'http://x').searchParams.get('name'), size: bytes.byteLength, sha256: '0'.repeat(64) })
+    }
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
-    calls.push({ via: 'fetch', method: init?.method ?? 'GET', url: String(input), body })
-    return handler(String(input), body)
+    calls.push({ via: 'fetch', method: init?.method ?? 'GET', url, body })
+    return handler(url, body)
   }) as typeof fetch
 }
 
@@ -280,6 +296,7 @@ beforeEach(() => {
     per_page: 200,
   })
   storedItems = []
+  storedVersions = []
   payrollForbidden = false
   payrollOvertimePay = 30000
   payrollAttendance = { 出勤日数: 19, 有休日数: 1 }
@@ -479,12 +496,16 @@ describe('出力タブの ZIP に エラー一覧.csv が入らない', () => {
     expect(saved).toHaveLength(1)
     const zip = await JSZip.loadAsync(await saved[0]!.blob.arrayBuffer())
     expect(Object.keys(zip.files).sort()).toEqual(['1078_2025-01-2025-02.xlsx', '変更記録.csv'])
+    // 版の保存が走ったうえで ZIP の中身が同じ: 版を 1 つ作り、ZIP と同じ 2 ファイルを保存用の名前で上げている
+    expect(calls.filter(c => c.url.startsWith('/restraint-api/litigation-outputs') && c.method === 'POST')).toHaveLength(1)
+    expect(calls.filter(c => c.method === 'PUT' && c.url.startsWith('/restraint-api/litigation-outputs/file?')).map(c => new URL(c.url, 'http://x').searchParams.get('name')))
+      .toEqual(['1078_2025-01-2025-02.xlsx', 'changes.csv'])
     // エラータブを開いていないので wage-report も wage-snapshot も呼ばない
     expect(calls.filter(c => c.url.includes('/restraint-api/wage-'))).toHaveLength(0)
     w.unmount()
   })
 
-  it('Excel が 0 冊でも 変更記録.csv だけの ZIP を保存し、成功の見た目にしない', async () => {
+  it('Excel が 0 冊でも 変更記録.csv だけの ZIP をダウンロードし、成功の見た目にしない', async () => {
     stubFetch(() => new Response('', { status: 200, headers: { 'x-y-time-rows': '0' } }))
     const w = mount(Page, {
       global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
@@ -497,7 +518,12 @@ describe('出力タブの ZIP に エラー一覧.csv が入らない', () => {
     expect(Object.keys(zip.files)).toEqual(['変更記録.csv'])
     const alerts = w.findAllComponents({ name: 'UAlert' })
     expect(alerts.map(a => a.props('color'))).toEqual(['error'])
-    expect(alerts[0]!.text()).toContain('変更記録.csv だけを入れて保存しました')
+    expect(alerts[0]!.text()).toContain('変更記録.csv だけを入れてダウンロードしました')
+    // 版は ZIP と同じ扱い (変更記録の CSV だけの版を作る)。保存できたので警告は出ない — 上の色の一致は保存が走ったうえでのもの
+    expect(calls.filter(c => c.method === 'PUT' && c.url.startsWith('/restraint-api/litigation-outputs/file?')).map(c => new URL(c.url, 'http://x').searchParams.get('label')))
+      .toEqual(['変更記録.csv'])
+    expect(w.find('[data-testid="litigation-output-save-warning"]').exists()).toBe(false)
+    expect(w.find('[data-testid="litigation-output-save-message"]').text()).toContain('の版として保存しました (ファイル 1 個)')
     w.unmount()
   })
 })
@@ -594,6 +620,9 @@ describe('出力タブ: ZIP に入るものの概要', () => {
     expect(summary.find('[data-zip-file="1078_2025-01-2025-02.xlsx"]').text()).toContain('まだ')
     expect(summary.find('[data-zip-file="エラー一覧.csv"]').exists()).toBe(false)
     expect(summary.find('[data-zip-file="変更記録.csv"]').text()).toContain('空の表')
+    // 「まだ」は、版の一覧を読んだうえで (版が 1 つも無いので) 何も戻さなかった結果
+    expect(calls.filter(c => c.url === '/restraint-api/litigation-outputs?case_id=c1')).toHaveLength(1)
+    expect(w.find('[data-testid="litigation-output-versions"]').text()).toContain('保存した版はまだありません')
     w.unmount()
   })
 })

@@ -753,6 +753,21 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
     (body = バイト列。1 通信 1 ファイル、20MB・1 版 300 個まで。sha256 を刻む) / `GET …/litigation-outputs?case_id=` (新しい順 50、results なし)
     / `GET …/litigation-outputs?case_id=&version_id=` (results つき) / `GET …/litigation-outputs/file?case_id=&version_id=&name=`。
     どれも「案件が cases に在る」が前提 (削除済みの案件の版は復活するまで 404)
+  - **画面の出力の版 (`/litigation` の出力タブ、#c1133-34)**: pure は `app/utils/litigation-output-version.ts` (100% gate)。
+    **言葉**: 手元への ZIP は「ダウンロード」、relay への版は「保存」。「ZIP を作る」= ZIP をダウンロード → `POST …/litigation-outputs`
+    (results = `{v:1, chunks, results, changes}`、500,000 文字を超えたら版を作らない) → xlsx 各冊と変更記録の CSV (保存用の名前 `changes.csv`、
+    `label` = ZIP 内の名前) を **1 つずつ直列に** `PUT …/file` (生の `fetch`)。進捗「保存 N / M」。**保存の失敗でダウンロードの成功の表示を取り消さない**
+    (別の警告に「{label} — {理由}」)。版の作成の 404 は案件の一覧を読み直して `pageError` に出す。
+    **押した時点で握る**: 案件・会社・変更記録の CSV と `{finished, rows}`。**出力専用の世代 `outputEpoch`** (案件の切替で進む。エラータブの
+    `errorsEpoch` は検知の実行でも進むので使い回さない) — 走っている実行は切替先の画面へ書かないが、握った案件へは最後まで保存する。
+    **案件を開くと** 版の一覧を読み、最新の版の結果を戻す。戻すのは `chunks` の写しが今の区切りと完全に一致するときだけ
+    (違えば「案件の期間・乗務員を変えたため…」、形が読めなければ別の文)。**戻した結果は `restoredOutput` に持ち `outputResults` には入れない** —
+    `outputResults` はエラータブ (`errorRows`・`chunkWarnings`) が読むので、出力タブの表示 (`shownOutputResults` → 区切りの表・`zipSummary`・
+    `kingakuBooks`・紙面) だけが戻した結果を読む。一覧より先に「ZIP を作る」を押したら読み戻しを捨てる。
+    版の一覧は「この版の ZIP をダウンロード」(ファイルを 1 つずつ取って組む。1 つでも取れなければ作らない。ZIP の組み立ては `zipOutputFiles` を共用)
+    と「この版の結果を表示」。**一覧の GET が 403 のときはエラーにせず 1 行** (「出力の保存と履歴は admin / payroll のみ使えます」)。
+    テストは `tests/components/litigation-output-versions.test.ts` (直列は応答を手で止める stub で測る)。mount する他のテストの stub は
+    一覧 GET = 空・POST = 成功・ファイルの PUT = 成功を返す
   - 表: `litigation_deleted_cases` / `litigation_output_versions` (版。`r2_prefix` を持つ) / `litigation_output_files` (1 ファイル 1 行)
   - R2 のキー: `{RESTRAINT_R2_PREFIX}/{comp}/litigation/{case_id}/{version_id}/{保存用の名前}`。**`/csv/` を含まず `v-` で始まる要素を
     持たない**ことを `buildLitigationOutputR2Key` が確かめる (役割の制限が無い `archive/csv` の口と 7 日 prune に当たらない)。

@@ -5,7 +5,8 @@
  * 「何月から何月まで・どの乗務員の勤務を記録するか」を選び、案件として保存して
  * 開き直せる土台。案件を「開く」と詳細にタブが出る。「出力」タブ (#c1133-2) は
  * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめ、作った冊ごとに
- * Y金額 シートの時間の行 (賃金月度ごとの合計、#c1133-31) を表にする。
+ * Y金額 シートの時間の行 (賃金月度ごとの合計、#c1133-31) を表にする。ZIP をダウンロードしたあと、
+ * 同じファイルと結果を relay へ 1 つの版として保存し (#c1133-34)、開き直すと最新の版の結果を表示する。
  * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
  * Y時間の欠け / alc にあってオンプレのデジタコに無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
  * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
@@ -37,6 +38,19 @@ import {
   type LitigationOutputResult,
   type LitigationOutputStatus,
 } from '~/utils/litigation-output'
+import {
+  buildLitigationOutputSnapshot,
+  LITIGATION_OUTPUT_CHANGES_STORAGE_NAME,
+  LITIGATION_OUTPUT_RESULTS_MAX_CHARS,
+  litigationOutputSnapshotChars,
+  litigationOutputVersionRow,
+  litigationSnapshotMatchesChunks,
+  parseLitigationOutputSnapshot,
+  parseLitigationOutputVersions,
+  type LitigationOutputChanges,
+  type LitigationOutputSnapshot,
+  type LitigationOutputVersion,
+} from '~/utils/litigation-output-version'
 import {
   buildLitigationErrorRows,
   classifyLitigationImport,
@@ -163,11 +177,11 @@ function changeViewer() {
   openCaseId.value = null
 }
 
-/** restraint-wage.vue の authHeaders と同じ組み立て。 */
-function authHeaders(): Record<string, string> {
+/** restraint-wage.vue の authHeaders と同じ組み立て。`comp` は、押した時点の会社を握って最後まで使う処理 (出力の版の保存) が渡す。 */
+function authHeaders(comp = viewerComp.value): Record<string, string> {
   const token = currentAccessToken()
   return {
-    'X-Theearth-Comp-Id': viewerComp.value,
+    'X-Theearth-Comp-Id': comp,
     'X-Theearth-User-B64': b64urlUtf8('viewer'),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
@@ -423,8 +437,9 @@ const outputChunks = computed<LitigationOutputChunk[]>(() =>
   openCase.value ? buildLitigationOutputChunks(openCase.value) : [])
 
 /**
- * 区切りごとの結果。**後続のエラータブ (#c1133-5) がこの状態を読む** ので、
- * ページの状態として持つ (保存はしない)。添字は `outputChunks` と揃える。
+ * このページで「ZIP を作る」を実行した結果 (区切りごと)。添字は `outputChunks` と揃える。
+ * **エラータブがこの状態を読む** (Y時間に書けなかった日・冊単位の警告) ので、保存した版から
+ * 戻した結果はここへ入れない — `restoredOutput` に分け、出力タブの表示だけがそちらを読む。
  */
 const outputResults = ref<(LitigationOutputResult | null)[]>([])
 const outputRunning = ref(false)
@@ -432,34 +447,112 @@ const outputCurrent = ref(-1)
 const outputFinished = ref(false)
 const outputZipMessage = ref('')
 const outputZipError = ref('')
+/** 「ZIP を作る」を押した時点の変更記録の状態 (= ZIP に入れた CSV の要点)。実行前は null */
+const outputRunChanges = ref<LitigationOutputChanges | null>(null)
 
-// 別の案件を開いた・案件を編集して期間/乗務員が変わったら、前の結果は捨てる
+// 版 (relay への保存)。手元への ZIP は「ダウンロード」、relay への版は「保存」と呼び分ける
+/** 版の保存の進捗 (ファイルを 1 つずつ上げる) */
+const outputSaveProgress = ref<{ done: number, total: number } | null>(null)
+const outputSaveMessage = ref('')
+/** 版として保存できなかった理由。**ダウンロードの成功の表示とは別に出す** (保存の失敗でダウンロードを失敗に見せない) */
+const outputSaveWarning = ref<{ title: string, items: string[] } | null>(null)
+const outputVersions = ref<LitigationOutputVersion[]>([])
+/** 一覧のうち形が読めなかった版の数 (黙って落とさない) */
+const outputVersionsUnreadable = ref(0)
+const outputVersionsLoading = ref(false)
+/** 版の一覧が 403 (admin / payroll 以外)。エラーにせず 1 行だけ出す — front は役割を知らない */
+const outputVersionsForbidden = ref(false)
+const outputVersionsError = ref('')
+/** 保存した版から戻した結果。出力タブの表示 (区切りの表・Y金額・ZIP に入るもの・紙面) だけが読む */
+const restoredOutput = ref<{ versionId: string, createdAt: string, results: (LitigationOutputResult | null)[], changes: LitigationOutputChanges } | null>(null)
+/** 版の結果を表示しなかった理由 */
+const outputRestoreNotice = ref('')
+const versionBusy = ref<{ versionId: string, action: 'zip' | 'show' } | null>(null)
+const versionZipProgress = ref<{ done: number, total: number } | null>(null)
+const versionActionError = ref('')
+
+/**
+ * 別の案件を開いたら進む世代。走っている「ZIP を作る」・版の保存・一覧の読み込み・版の ZIP は、
+ * 世代が変わっていたら画面へ書かない (別の案件の表へ結果を書かない)。
+ * エラータブの `errorsEpoch` は検知の実行でも進むので使い回さない。
+ */
+let outputEpoch = 0
+/** 版の一覧の読み込みの通し番号。後から始めた読み込みが在れば、遅れて届いた古い一覧で上書きしない */
+let outputVersionsSeq = 0
+
+// 別の案件を開いた・案件を編集して期間/乗務員が変わったら、前の表示は捨てて、その案件の版を読む
 watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
-  if (outputRunning.value) return
+  outputEpoch++
   outputResults.value = []
+  outputRunning.value = false
   outputCurrent.value = -1
   outputFinished.value = false
   outputZipMessage.value = ''
   outputZipError.value = ''
+  outputRunChanges.value = null
+  outputSaveProgress.value = null
+  outputSaveMessage.value = ''
+  outputSaveWarning.value = null
+  outputVersions.value = []
+  outputVersionsUnreadable.value = 0
+  outputVersionsLoading.value = false
+  outputVersionsForbidden.value = false
+  outputVersionsError.value = ''
+  restoredOutput.value = null
+  outputRestoreNotice.value = ''
+  versionBusy.value = null
+  versionZipProgress.value = null
+  versionActionError.value = ''
+  if (openCase.value) loadOutputVersions(outputEpoch, openCase.value.caseId, true)
 })
 
-const outputDoneCount = computed(() => outputResults.value.filter(r => r !== null).length)
-const outputCounts = computed(() =>
-  countLitigationResults(outputResults.value.filter((r): r is LitigationOutputResult => r !== null)))
+/** 出力タブに出す結果: 版から戻した結果を表示中ならそれ、そうでなければこのページで実行した結果 */
+const shownOutputResults = computed(() => restoredOutput.value ? restoredOutput.value.results : outputResults.value)
+const restoredOutputText = computed(() => restoredOutput.value
+  ? `${fmtJstDateTime(restoredOutput.value.createdAt)} に出力して保存した結果を表示しています`
+  : '')
 
-/** ZIP に入るファイルの一覧と中身の要点 (出力タブに出す)。作る前は Excel を「まだ」、作った後は結果で出す */
+const outputDoneCount = computed(() => shownOutputResults.value.filter(r => r !== null).length)
+const outputCounts = computed(() =>
+  countLitigationResults(shownOutputResults.value.filter((r): r is LitigationOutputResult => r !== null)))
+
+/** ZIP に入るファイルの一覧と中身の要点 (出力タブに出す)。作る前は Excel を「まだ」、作った後は結果で出す。
+ * 変更記録は、作った後 (と版の表示中) は ZIP に入れた時点の要点、作る前は今の変更記録タブの状態 */
 const zipSummary = computed(() => {
   return buildLitigationZipSummary({
     chunks: outputChunks.value,
-    results: outputResults.value,
-    changesCsv: { filename: LITIGATION_CHANGES_CSV_FILENAME, finished: changesFinished.value, rows: changesRows.value.length },
+    results: shownOutputResults.value,
+    changesCsv: {
+      filename: LITIGATION_CHANGES_CSV_FILENAME,
+      ...(restoredOutput.value?.changes ?? outputRunChanges.value ?? { finished: changesFinished.value, rows: changesRows.value.length }),
+    },
   })
 })
 
 /** Excel を作れた冊ごとの「Y金額 (時間の行)」(「ZIP を作る」の結果として出る。画面と紙面で共用) */
-const kingakuBooks = computed(() => buildLitigationKingakuBooks(outputChunks.value, outputResults.value))
+const kingakuBooks = computed(() => buildLitigationKingakuBooks(outputChunks.value, shownOutputResults.value))
+/** 出力タブの紙面に出す冊単位の警告 (エラータブの `chunkWarnings` は、このページで実行した結果だけを読む) */
+const outputChunkWarnings = computed(() => litigationChunkWarnings(outputChunks.value, shownOutputResults.value))
+
+const outputVersionRows = computed(() => outputVersions.value.map(v => ({ v, row: litigationOutputVersionRow(v) })))
 
 const OUTPUT_RETRY = '「ZIP を作る」を押してやり直してください'
+const VERSIONS_RETRY = '「履歴を読み直す」を押してやり直してください'
+const VERSION_SHOW_RETRY = '「この版の結果を表示」を押してやり直してください'
+const VERSION_ZIP_RETRY = '「この版の ZIP をダウンロード」を押してやり直してください'
+/** 案件が削除されていたとき (404)。押し直しても直らないので、やり直しの文にしない (保存の 404 と同じ案内) */
+const CASE_GONE_HINT = '一覧に戻ってください。admin / payroll は「削除した案件」から復活できます'
+const VERSION_ZIP_HINT = '版の一覧から ZIP はダウンロードできます'
+
+/** ZIP に入れる 1 ファイル。`label` が ZIP 内の名前 (日本語可)、`name` は版に保存するときの名前 */
+interface OutputFile { name: string, label: string, bytes: ArrayBuffer }
+
+/** ZIP を組む (「ZIP を作る」と「この版の ZIP をダウンロード」で共用)。 */
+function zipOutputFiles(files: readonly OutputFile[]): Promise<Blob> {
+  const zip = new JSZip()
+  for (const f of files) zip.file(f.label, f.bytes)
+  return zip.generateAsync({ type: 'blob' })
+}
 
 /** 区切り 1 つぶんを作る。失敗は結果に畳んで返す (途中の失敗で全体を止めない)。 */
 async function runOutputChunk(chunk: LitigationOutputChunk): Promise<{ result: LitigationOutputResult, bytes?: ArrayBuffer }> {
@@ -495,46 +588,275 @@ async function runOutputChunk(chunk: LitigationOutputChunk): Promise<{ result: L
   }
 }
 
+/** 「ZIP を作る」1 回ぶんが、押した時点で握るもの。案件を切り替えても、握った案件へ最後まで保存する */
+interface OutputRun { caseId: string, comp: string, live: () => boolean }
+
 async function buildOutputZip() {
   const target = openCase.value
   const chunks = outputChunks.value
   if (!target || chunks.length === 0 || outputRunning.value) return
+  const epoch = outputEpoch
+  const run: OutputRun = { caseId: target.caseId, comp: viewerComp.value, live: () => epoch === outputEpoch }
+  // 変更記録は押した時点で握る (実行の最後に読むと、途中で案件を切り替えたときに別の案件の表になる)
+  const changes: LitigationOutputChanges = { finished: changesFinished.value, rows: changesRows.value.length }
+  const changesCsv = new TextEncoder().encode(changesCsvText()).buffer as ArrayBuffer
   outputRunning.value = true
   outputFinished.value = false
   outputZipMessage.value = ''
   outputZipError.value = ''
+  outputSaveProgress.value = null
+  outputSaveMessage.value = ''
+  outputSaveWarning.value = null
+  outputRunChanges.value = changes
+  // 新しい実行の結果を出す (版から戻した表示はやめる)
+  restoredOutput.value = null
+  outputRestoreNotice.value = ''
   outputResults.value = chunks.map(() => null)
-  const files: { filename: string, bytes: ArrayBuffer }[] = []
+  const results: (LitigationOutputResult | null)[] = chunks.map(() => null)
+  const files: OutputFile[] = []
+  let downloaded = false
   try {
     // 上流 (alc) は乗務員 1 名・期間 1 本しか受けないので、区切りごとに 1 回ずつ直列に呼ぶ
     for (const [i, chunk] of chunks.entries()) {
-      outputCurrent.value = i
+      if (run.live()) outputCurrent.value = i
       const { result, bytes } = await runOutputChunk(chunk)
-      outputResults.value[i] = result
-      if (bytes) files.push({ filename: chunk.filename, bytes })
+      results[i] = result
+      if (run.live()) outputResults.value[i] = result
+      if (bytes) files.push({ name: chunk.filename, label: chunk.filename, bytes })
     }
-    outputCurrent.value = -1
-    const zip = new JSZip()
-    for (const f of files) zip.file(f.filename, f.bytes)
+    const excelCount = files.length
     // 変更記録 (変更記録タブで「検知を実行」していなければ、その旨を備考に書いた空表になる)
-    zip.file(LITIGATION_CHANGES_CSV_FILENAME, changesCsvText())
-    const blob = await zip.generateAsync({ type: 'blob' })
+    files.push({ name: LITIGATION_OUTPUT_CHANGES_STORAGE_NAME, label: LITIGATION_CHANGES_CSV_FILENAME, bytes: changesCsv })
+    const blob = await zipOutputFiles(files)
     const zipName = litigationZipFilename(target.name, new Date())
     downloadBlob(blob, zipName)
-    if (files.length === 0) {
-      // Excel が無くても CSV は成果物なので保存はする。ただし成功の見た目にしない
-      outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${LITIGATION_CHANGES_CSV_FILENAME} だけを入れて保存しました`
-      return
+    downloaded = true
+    if (run.live()) {
+      if (excelCount === 0) {
+        // Excel が無くても CSV は成果物なのでダウンロードはする。ただし成功の見た目にしない
+        outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${LITIGATION_CHANGES_CSV_FILENAME} だけを入れてダウンロードしました`
+      }
+      else {
+        outputZipMessage.value = `${zipName} をダウンロードしました (Excel ${excelCount} / ${chunks.length} 冊 + ${LITIGATION_CHANGES_CSV_FILENAME})`
+      }
     }
-    outputZipMessage.value = `${zipName} を保存しました (Excel ${files.length} / ${chunks.length} 冊 + ${LITIGATION_CHANGES_CSV_FILENAME})`
   }
   catch (e) {
-    outputZipError.value = `ZIP を組めませんでした: ${describeCaughtError(e, OUTPUT_RETRY)}`
+    if (run.live()) outputZipError.value = `ZIP を組めませんでした: ${describeCaughtError(e, OUTPUT_RETRY)}`
   }
-  finally {
-    outputRunning.value = false
+  if (run.live()) {
     outputCurrent.value = -1
     outputFinished.value = true
+  }
+  // ダウンロードできたら、同じファイルと結果を版として保存する (保存の失敗でダウンロードの成功を取り消さない)
+  if (downloaded) await saveOutputVersion(run, buildLitigationOutputSnapshot(chunks, results, changes), files)
+  if (run.live()) outputRunning.value = false
+}
+
+/**
+ * 版を作り (`POST`)、ファイルを 1 つずつ直列で上げる (`PUT`)。**例外を投げない** — 失敗は
+ * 警告として出力タブに出す。途中でやめると半端な版が残るので、案件を切り替えても最後まで上げる。
+ */
+async function saveOutputVersion(run: OutputRun, snapshot: LitigationOutputSnapshot, files: readonly OutputFile[]) {
+  const chars = litigationOutputSnapshotChars(snapshot)
+  if (chars > LITIGATION_OUTPUT_RESULTS_MAX_CHARS) {
+    if (run.live()) {
+      outputSaveWarning.value = {
+        title: `結果が大きすぎるため、版として保存しませんでした (${chars.toLocaleString()} 文字、上限 ${LITIGATION_OUTPUT_RESULTS_MAX_CHARS.toLocaleString()} 文字)。ZIP のダウンロードは済んでいます`,
+        items: [],
+      }
+    }
+    return
+  }
+  let versionId: string
+  let createdAt: string
+  try {
+    const res = await $fetch<{ versionId?: unknown, createdAt?: unknown }>('/restraint-api/litigation-outputs', {
+      method: 'POST',
+      headers: authHeaders(run.comp),
+      body: { caseId: run.caseId, results: snapshot },
+    })
+    if (typeof res?.versionId !== 'string' || typeof res.createdAt !== 'string') throw new Error('版を作った応答の形が想定外')
+    versionId = res.versionId
+    createdAt = res.createdAt
+  }
+  catch (e) {
+    if (!run.live()) return
+    // 途中で案件が削除された (404) は押し直しても直らない。読み直すと案件の詳細が閉じるので、文は一覧の上に出す
+    const gone = caughtErrorStatus(e) === 404
+    const message = `版として保存できませんでした (ZIP のダウンロードは済んでいます): ${describeCaughtError(e, gone ? CASE_GONE_HINT : OUTPUT_RETRY)}`
+    if (gone) {
+      await loadCases()
+      pageError.value = message
+    }
+    else {
+      outputSaveWarning.value = { title: message, items: [] }
+    }
+    return
+  }
+  const failed: string[] = []
+  if (run.live()) outputSaveProgress.value = { done: 0, total: files.length }
+  // 1 通信 1 ファイル。直列に上げる (同じ版へ同時に書かない)
+  for (const [i, f] of files.entries()) {
+    try {
+      const query = new URLSearchParams({ case_id: run.caseId, version_id: versionId, name: f.name, label: f.label })
+      // ofetch は応答が JSON でないとエラーの本文を隠すことがあるので、バイト列の口は生の fetch で理由を読む
+      const res = await fetch(`/restraint-api/litigation-outputs/file?${query}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream', ...authHeaders(run.comp) },
+        body: f.bytes,
+      })
+      if (!res.ok) failed.push(`${f.label} — ${await describeResponseFailure(res, OUTPUT_RETRY)}`)
+    }
+    catch (e) {
+      failed.push(`${f.label} — ${describeCaughtError(e, OUTPUT_RETRY)}`)
+    }
+    if (run.live()) outputSaveProgress.value = { done: i + 1, total: files.length }
+  }
+  if (!run.live()) {
+    // 表示は切替先のもの。同じ案件を開き直していれば、一覧だけ読み直す
+    if (openCase.value?.caseId === run.caseId && viewerComp.value === run.comp) await loadOutputVersions(outputEpoch, run.caseId, false)
+    return
+  }
+  outputSaveProgress.value = null
+  if (failed.length > 0) {
+    outputSaveWarning.value = {
+      title: `版として保存できなかったファイルが ${failed.length} / ${files.length} 個あります (ZIP のダウンロードは済んでいます)`,
+      items: failed,
+    }
+  }
+  else {
+    outputSaveMessage.value = `${fmtJstDateTime(createdAt)} の版として保存しました (ファイル ${files.length} 個)`
+  }
+  await loadOutputVersions(outputEpoch, run.caseId, false)
+}
+
+/**
+ * 版の一覧を読む。`restoreLatest` (案件を開いたとき) は、最新の版の結果も表示へ戻す。
+ * 403 (admin / payroll 以外) はエラーにしない。
+ */
+async function loadOutputVersions(epoch: number, caseId: string, restoreLatest: boolean) {
+  const seq = ++outputVersionsSeq
+  const current = () => epoch === outputEpoch && seq === outputVersionsSeq
+  outputVersionsLoading.value = true
+  try {
+    const res = await $fetch<unknown>('/restraint-api/litigation-outputs', {
+      headers: authHeaders(),
+      query: { case_id: caseId },
+    })
+    if (epoch !== outputEpoch) return
+    const parsed = parseLitigationOutputVersions(res)
+    if (current()) {
+      outputVersions.value = parsed?.versions ?? []
+      outputVersionsUnreadable.value = parsed?.unreadable ?? 0
+      outputVersionsForbidden.value = false
+      outputVersionsError.value = parsed ? '' : '版の一覧を読めませんでした: 応答の形が想定外'
+    }
+    const latest = parsed?.versions[0]
+    if (restoreLatest && latest) await showVersionResults(epoch, caseId, latest, true)
+  }
+  catch (e) {
+    if (!current()) return
+    if (caughtErrorStatus(e) === 403) outputVersionsForbidden.value = true
+    else outputVersionsError.value = `版の一覧を読めませんでした: ${describeCaughtError(e, VERSIONS_RETRY)}`
+  }
+  finally {
+    if (current()) outputVersionsLoading.value = false
+  }
+}
+
+function reloadOutputVersions() {
+  if (openCase.value) loadOutputVersions(outputEpoch, openCase.value.caseId, false)
+}
+
+/**
+ * 版 1 件の結果を読み、出力タブの表示へ戻す (`outputResults` には入れない)。
+ * 戻すのは、保存した区切りが今の案件の区切りと完全に一致するときだけ。
+ * `auto` (案件を開いたときの読み戻し) は、応答より先に「ZIP を作る」が押されていたら捨てる。
+ */
+async function showVersionResults(epoch: number, caseId: string, v: LitigationOutputVersion, auto: boolean) {
+  try {
+    const res = await $fetch<{ version?: { results?: unknown } }>('/restraint-api/litigation-outputs', {
+      headers: authHeaders(),
+      query: { case_id: caseId, version_id: v.versionId },
+    })
+    if (epoch !== outputEpoch) return
+    if (auto && outputResults.value.length > 0) return
+    const snapshot = parseLitigationOutputSnapshot(res?.version?.results)
+    if (!snapshot || !litigationSnapshotMatchesChunks(snapshot, outputChunks.value)) {
+      restoredOutput.value = null
+      outputRestoreNotice.value = snapshot
+        ? `案件の期間・乗務員を変えたため、保存した結果は表示していません (${VERSION_ZIP_HINT})`
+        : `${fmtJstDateTime(v.createdAt)} の版は、結果が読めない形で保存されているため表示していません (${VERSION_ZIP_HINT})`
+      return
+    }
+    restoredOutput.value = { versionId: v.versionId, createdAt: v.createdAt, results: snapshot.results, changes: snapshot.changes }
+    outputRestoreNotice.value = ''
+  }
+  catch (e) {
+    if (epoch === outputEpoch) versionActionError.value = `保存した結果を読めませんでした: ${describeCaughtError(e, VERSION_SHOW_RETRY)}`
+  }
+}
+
+async function showVersion(v: LitigationOutputVersion) {
+  const target = openCase.value
+  if (!target || versionBusy.value) return
+  const epoch = outputEpoch
+  versionBusy.value = { versionId: v.versionId, action: 'show' }
+  versionActionError.value = ''
+  await showVersionResults(epoch, target.caseId, v, false)
+  if (epoch === outputEpoch) versionBusy.value = null
+}
+
+/** 版から戻した表示をやめ、このページで「ZIP を作る」を実行した結果に戻す */
+function showRunResults() {
+  restoredOutput.value = null
+  outputRestoreNotice.value = ''
+}
+
+/** 版のファイルを 1 つずつ取って ZIP に組み、ダウンロードする。1 つでも取れなければ ZIP は作らない (欠けた ZIP をその版として渡さない)。 */
+async function downloadVersionZip(v: LitigationOutputVersion) {
+  const target = openCase.value
+  if (!target || versionBusy.value) return
+  const epoch = outputEpoch
+  const live = () => epoch === outputEpoch
+  const comp = viewerComp.value
+  versionBusy.value = { versionId: v.versionId, action: 'zip' }
+  versionActionError.value = ''
+  versionZipProgress.value = { done: 0, total: v.files.length }
+  const files: OutputFile[] = []
+  let failure = ''
+  try {
+    for (const [i, f] of v.files.entries()) {
+      try {
+        const query = new URLSearchParams({ case_id: target.caseId, version_id: v.versionId, name: f.name })
+        const res = await fetch(`/restraint-api/litigation-outputs/file?${query}`, { headers: authHeaders(comp) })
+        if (!res.ok) {
+          failure = `${f.label} — ${await describeResponseFailure(res, VERSION_ZIP_RETRY)}`
+          break
+        }
+        files.push({ name: f.name, label: f.label, bytes: await res.arrayBuffer() })
+      }
+      catch (e) {
+        failure = `${f.label} — ${describeCaughtError(e, VERSION_ZIP_RETRY)}`
+        break
+      }
+      if (live()) versionZipProgress.value = { done: i + 1, total: v.files.length }
+    }
+    if (failure) {
+      if (live()) versionActionError.value = `この版の ZIP を作れませんでした (取れなかったファイル): ${failure}`
+      return
+    }
+    downloadBlob(await zipOutputFiles(files), litigationZipFilename(target.name, new Date(v.createdAt)))
+  }
+  catch (e) {
+    if (live()) versionActionError.value = `ZIP を組めませんでした: ${describeCaughtError(e, VERSION_ZIP_RETRY)}`
+  }
+  finally {
+    if (live()) {
+      versionBusy.value = null
+      versionZipProgress.value = null
+    }
   }
 }
 
@@ -1590,11 +1912,12 @@ function fmtDateTime(iso: string): string {
         <!-- 出力: Y時間 Excel を区切りごとに作って ZIP 1 つにまとめる -->
         <div v-if="activeTab === 'output'" data-testid="litigation-output" class="space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
-            案件の乗務員 × 期間ぶんの Y時間 Excel (京都ソフト案件のテンプレ) を作り、1 つの ZIP で保存します。
+            案件の乗務員 × 期間ぶんの Y時間 Excel (京都ソフト案件のテンプレ) を作り、1 つの ZIP でダウンロードします。
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
             ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
             作った冊ごとに、Y金額 シートの時間の行 (賃金月度ごとの残業・休日労働・深夜労働・総労働時間) を下に出します。
+            ダウンロードのあと、同じファイルと結果を版として保存します (出力するたびに 1 版)。元のデータが後から変わっても、その時点で出力した Excel を下の「保存した版」からダウンロードできます。案件を開き直すと、最新の版の結果を表示します。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
@@ -1605,17 +1928,32 @@ function fmtDateTime(iso: string): string {
               :disabled="outputRunning || outputChunks.length === 0"
               @click="buildOutputZip"
             />
-            <span v-if="outputRunning || outputFinished" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-output-progress">
+            <span v-if="outputRunning || outputFinished || restoredOutput" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-output-progress">
               {{ outputDoneCount }} / {{ outputChunks.length }} 冊
-              <template v-if="outputFinished">
+              <template v-if="outputFinished || restoredOutput">
                 (作成 {{ outputCounts.ok }} / 運行 0 件 {{ outputCounts.empty }} / alc に未登録 {{ outputCounts.not_found }} / 失敗 {{ outputCounts.error }})
               </template>
+            </span>
+            <span v-if="outputSaveProgress" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-output-save-progress">
+              <UIcon name="i-lucide-loader-circle" class="size-3 animate-spin mr-1" />保存 {{ outputSaveProgress.done }} / {{ outputSaveProgress.total }}
             </span>
             <span v-if="outputChunks.length === 0" class="text-sm text-gray-500">区切りがありません (期間か乗務員が空です)</span>
           </div>
 
           <UAlert v-if="outputZipMessage" color="success" :title="outputZipMessage" />
           <UAlert v-if="outputZipError" color="error" :title="outputZipError" />
+          <div v-if="outputSaveMessage" class="text-sm text-green-700 dark:text-green-400" data-testid="litigation-output-save-message">{{ outputSaveMessage }}</div>
+          <div v-if="outputSaveWarning" class="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-800 dark:text-amber-300 space-y-1" data-testid="litigation-output-save-warning">
+            <div class="font-medium">{{ outputSaveWarning.title }}</div>
+            <ul v-if="outputSaveWarning.items.length > 0" class="list-disc pl-5 text-xs space-y-0.5">
+              <li v-for="item in outputSaveWarning.items" :key="item">{{ item }}</li>
+            </ul>
+          </div>
+          <div v-if="restoredOutput" class="text-sm text-blue-700 dark:text-blue-300 flex items-center gap-2 flex-wrap" data-testid="litigation-output-restored">
+            <span>{{ restoredOutputText }}</span>
+            <UButton v-if="outputResults.length > 0" label="このページで作った結果に戻す" variant="link" size="xs" @click="showRunResults" />
+          </div>
+          <div v-if="outputRestoreNotice" class="text-sm text-amber-700 dark:text-amber-400" data-testid="litigation-output-restore-notice">{{ outputRestoreNotice }}</div>
 
           <div v-if="outputChunks.length > 0" class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-3 space-y-1" data-testid="litigation-zip-summary">
             <div class="text-sm font-medium">ZIP に入るもの</div>
@@ -1650,8 +1988,8 @@ function fmtDateTime(iso: string): string {
                   <td class="px-4 py-2 whitespace-nowrap">{{ chunk.label }}</td>
                   <td class="px-4 py-2 font-mono text-xs text-gray-500">{{ chunk.filename }}</td>
                   <td class="px-4 py-2 whitespace-nowrap">
-                    <span v-if="outputResults[i]" class="text-xs rounded px-2 py-0.5" :class="OUTPUT_STATUS_CLASS[outputResults[i]!.status]">
-                      {{ OUTPUT_STATUS_LABEL[outputResults[i]!.status] }}
+                    <span v-if="shownOutputResults[i]" class="text-xs rounded px-2 py-0.5" :class="OUTPUT_STATUS_CLASS[shownOutputResults[i]!.status]">
+                      {{ OUTPUT_STATUS_LABEL[shownOutputResults[i]!.status] }}
                     </span>
                     <span v-else-if="outputRunning && outputCurrent === i" class="text-xs text-gray-500">
                       <UIcon name="i-lucide-loader-circle" class="size-3 animate-spin mr-1" />作成中
@@ -1659,14 +1997,14 @@ function fmtDateTime(iso: string): string {
                     <span v-else class="text-xs text-gray-400">未実行</span>
                   </td>
                   <td class="px-4 py-2">
-                    <template v-if="outputResults[i]">
-                      <div>{{ outputResults[i]!.message }}</div>
-                      <div v-if="outputResults[i]!.missingCount > 0" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
-                        テンプレに行が無く書けなかった日 {{ outputResults[i]!.missingCount }} 日
-                        ({{ outputResults[i]!.missingDates.join(', ') }}<template v-if="outputResults[i]!.missingCount > outputResults[i]!.missingDates.length"> ほか</template>)
+                    <template v-if="shownOutputResults[i]">
+                      <div>{{ shownOutputResults[i]!.message }}</div>
+                      <div v-if="shownOutputResults[i]!.missingCount > 0" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                        テンプレに行が無く書けなかった日 {{ shownOutputResults[i]!.missingCount }} 日
+                        ({{ shownOutputResults[i]!.missingDates.join(', ') }}<template v-if="shownOutputResults[i]!.missingCount > shownOutputResults[i]!.missingDates.length"> ほか</template>)
                       </div>
-                      <div v-if="outputResults[i]!.warningsCount > 0" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
-                        警告 {{ outputResults[i]!.warningsCount }} 件: {{ outputResults[i]!.warnings.join(' / ') }}<template v-if="outputResults[i]!.warningsCount > outputResults[i]!.warnings.length"> ほか</template>
+                      <div v-if="shownOutputResults[i]!.warningsCount > 0" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                        警告 {{ shownOutputResults[i]!.warningsCount }} 件: {{ shownOutputResults[i]!.warnings.join(' / ') }}<template v-if="shownOutputResults[i]!.warningsCount > shownOutputResults[i]!.warnings.length"> ほか</template>
                       </div>
                     </template>
                   </td>
@@ -1676,6 +2014,67 @@ function fmtDateTime(iso: string): string {
           </div>
 
           <LitigationKingakuTable v-if="kingakuBooks.length > 0" :books="kingakuBooks" :driver-label="driverLabel" />
+
+          <!-- 保存した版 (出力するたびに 1 版)。403 (admin / payroll 以外) は 1 行だけ出す -->
+          <p v-if="outputVersionsForbidden" class="text-sm text-gray-500" data-testid="litigation-output-versions-forbidden">出力の保存と履歴は admin / payroll のみ使えます</p>
+          <div v-else class="space-y-2" data-testid="litigation-output-versions">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-sm font-medium">保存した版</span>
+              <UButton icon="i-lucide-refresh-cw" label="履歴を読み直す" variant="ghost" size="xs" :loading="outputVersionsLoading" @click="reloadOutputVersions" />
+              <span v-if="versionZipProgress" class="text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-version-zip-progress">
+                ファイルを取得中 {{ versionZipProgress.done }} / {{ versionZipProgress.total }}
+              </span>
+            </div>
+            <div v-if="outputVersionsError" class="text-xs text-red-600 dark:text-red-400" data-testid="litigation-output-versions-error">{{ outputVersionsError }}</div>
+            <div v-if="versionActionError" class="text-xs text-red-600 dark:text-red-400" data-testid="litigation-version-action-error">{{ versionActionError }}</div>
+            <div v-if="outputVersionsUnreadable > 0" class="text-xs text-amber-700 dark:text-amber-400">形が読めない版が {{ outputVersionsUnreadable }} 件あり、一覧に出していません</div>
+            <div v-if="outputVersionRows.length === 0" class="text-xs text-gray-500">
+              {{ outputVersionsLoading ? '読み込み中…' : outputVersionsError ? '' : '保存した版はまだありません' }}
+            </div>
+            <div v-else class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
+              <table class="w-full text-sm" data-testid="litigation-output-versions-table">
+                <thead>
+                  <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
+                    <th class="text-left px-4 py-2 font-medium">出力した日時</th>
+                    <th class="text-left px-4 py-2 font-medium">出力した人</th>
+                    <th class="text-left px-4 py-2 font-medium">保存したファイル</th>
+                    <th class="text-left px-4 py-2 font-medium">大きさ</th>
+                    <th class="text-left px-4 py-2 font-medium" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="{ v, row } in outputVersionRows"
+                    :key="v.versionId"
+                    class="border-b border-gray-100 dark:border-gray-800"
+                    :data-version="v.versionId"
+                  >
+                    <td class="px-4 py-2 whitespace-nowrap">
+                      {{ row.createdAtText }}
+                      <span v-if="restoredOutput?.versionId === v.versionId" class="text-xs rounded px-1.5 ml-1 bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">表示中</span>
+                    </td>
+                    <td class="px-4 py-2 text-gray-500">{{ row.createdBy }}</td>
+                    <td class="px-4 py-2 whitespace-nowrap">Excel {{ row.excelCount }} 冊 / ファイル {{ row.fileCount }} 個</td>
+                    <td class="px-4 py-2 whitespace-nowrap text-gray-500">{{ row.sizeText }}</td>
+                    <td class="px-4 py-2 text-right whitespace-nowrap">
+                      <UButton
+                        icon="i-lucide-download" label="この版の ZIP をダウンロード" variant="soft" size="xs"
+                        :loading="versionBusy?.versionId === v.versionId && versionBusy.action === 'zip'"
+                        :disabled="versionBusy !== null || row.fileCount === 0"
+                        @click="downloadVersionZip(v)"
+                      />
+                      <UButton
+                        icon="i-lucide-eye" label="この版の結果を表示" variant="ghost" size="xs"
+                        :loading="versionBusy?.versionId === v.versionId && versionBusy.action === 'show'"
+                        :disabled="versionBusy !== null || outputRunning"
+                        @click="showVersion(v)"
+                      />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
 
         <!-- エラー: 乗務員 × 月ごとに 4 つの検知 (litigation-errors.ts) -->
@@ -2035,6 +2434,7 @@ function fmtDateTime(iso: string): string {
 
         <div v-if="activeTab === 'output'" data-testid="litigation-print-output">
         <h2 class="font-bold mt-2">出力 (Y時間 Excel)</h2>
+        <div v-if="restoredOutput" class="litigation-print-meta" data-testid="litigation-print-restored">{{ restoredOutputText }}</div>
         <table class="litigation-print-table">
           <thead>
             <tr><th>乗務員</th><th>期間</th><th>ファイル名</th><th>状態</th><th>結果</th></tr>
@@ -2044,19 +2444,19 @@ function fmtDateTime(iso: string): string {
               <td>{{ driverLabel(chunk.driverCd) }} ({{ chunk.driverCd }})</td>
               <td>{{ chunk.label }}</td>
               <td>{{ chunk.filename }}</td>
-              <td>{{ outputResults[i] ? OUTPUT_STATUS_LABEL[outputResults[i]!.status] : '未実行' }}</td>
+              <td>{{ shownOutputResults[i] ? OUTPUT_STATUS_LABEL[shownOutputResults[i]!.status] : '未実行' }}</td>
               <td>
-                <template v-if="outputResults[i]">
-                  {{ outputResults[i]!.message }}<template v-if="outputResults[i]!.missingCount > 0"> / 書けなかった日 {{ outputResults[i]!.missingCount }} 日</template><template v-if="outputResults[i]!.warningsCount > 0"> / 警告 {{ outputResults[i]!.warningsCount }} 件</template>
+                <template v-if="shownOutputResults[i]">
+                  {{ shownOutputResults[i]!.message }}<template v-if="shownOutputResults[i]!.missingCount > 0"> / 書けなかった日 {{ shownOutputResults[i]!.missingCount }} 日</template><template v-if="shownOutputResults[i]!.warningsCount > 0"> / 警告 {{ shownOutputResults[i]!.warningsCount }} 件</template>
                 </template>
               </td>
             </tr>
           </tbody>
         </table>
 
-        <div v-if="chunkWarnings.length > 0" class="litigation-print-meta">
+        <div v-if="outputChunkWarnings.length > 0" class="litigation-print-meta">
           Y時間の警告 (冊単位):
-          <template v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
+          <template v-for="w in outputChunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
         </div>
 
         <LitigationKingakuTable v-if="kingakuBooks.length > 0" :books="kingakuBooks" :driver-label="driverLabel" compact />

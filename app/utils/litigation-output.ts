@@ -57,7 +57,8 @@ export interface LitigationOutputChunk {
 
 export type LitigationOutputStatus = 'ok' | 'empty' | 'not_found' | 'error'
 
-/** 区切り 1 つの結果 (後続のエラータブ #c1133-5 が読む。保存はしない) */
+/** 区切り 1 つの結果 (エラータブ #c1133-5 が読む)。「ZIP を作る」のたびに、版の結果として relay に保存する
+ * (`litigation-output-version.ts`、#c1133-34) */
 export interface LitigationOutputResult {
   driverCd: string
   from: string
