@@ -75,6 +75,7 @@ export default defineConfig({
         'src/vehicle-state-ingest.ts',
         'src/litigation-case.ts',
         'src/litigation-check.ts',
+        'src/litigation-output.ts',
       ],
       thresholds: {
         lines: 100,

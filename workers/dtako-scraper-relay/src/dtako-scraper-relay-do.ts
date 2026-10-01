@@ -312,7 +312,6 @@ import {
   workScheduleMinutesResolver,
 } from "./work-schedule";
 import {
-  buildLitigationCaseDeleteStatement,
   buildLitigationCaseGetStatement,
   buildLitigationCaseListResponse,
   buildLitigationCaseListStatement,
@@ -324,13 +323,25 @@ import {
   type LitigationCaseD1Row,
 } from "./litigation-case";
 import {
-  buildLitigationCheckDeleteStatement,
   buildLitigationCheckListResponse,
   buildLitigationCheckListStatement,
   buildLitigationCheckUpsertStatement,
   normalizeLitigationCheckPut,
   type LitigationCheckD1Row,
 } from "./litigation-check";
+import {
+  buildLitigationCaseMoveToDeletedStatements,
+  buildLitigationCaseRestoreStatements,
+  buildLitigationDeletedCaseGetStatement,
+  buildLitigationDeletedCaseListResponse,
+  buildLitigationDeletedCaseListStatement,
+  buildLitigationExpiredCaseListStatement,
+  buildLitigationExpiredCasePurgeStatements,
+  isLitigationAdminRoute,
+  LITIGATION_ADMIN_FORBIDDEN,
+  litigationDeletedCutoffIso,
+  type LitigationDeletedCaseD1Row,
+} from "./litigation-output";
 import {
   isClericalJob,
   kintaiR2Paths,
@@ -4478,6 +4489,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/litigation/alc-upload-driver" && request.method === "POST") {
       return this.handleLitigationAlcUploadDriver(request, url, routing);
     }
+    // 案件の削除・復活 (Refs #1133 c1133-32)。上と同じ理由で、保存済み theearth
+    // セッションの読み出しより前で分ける (role を見る口)。
+    if (isLitigationAdminRoute(request.method, url.pathname)) {
+      return this.dispatchLitigationAdmin(request, url, routing);
+    }
 
     const stored = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
     const token = extractBearerToken(request.headers);
@@ -4578,9 +4594,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (url.pathname === "/restraint-api/litigation-cases" && request.method === "PUT") {
       return this.handleLitigationCasesPut(request, record!);
-    }
-    if (url.pathname === "/restraint-api/litigation-cases" && request.method === "DELETE") {
-      return this.handleLitigationCasesDelete(record!, url);
     }
     // ---- 訴訟用の準備ページのエラータブの検知結果 (D1、Refs #1133) ----
     if (url.pathname === "/restraint-api/litigation-checks" && request.method === "GET") {
@@ -5553,6 +5566,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async handleLitigationCasesGet(record: TheearthSessionRecord): Promise<Response> {
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    // 30 日を過ぎた「削除した案件」の掃除。応答は待たせない・掃除の失敗で応答を変えない
+    // (sweepExpiredLitigationCases は throw しない)。起動した人の入力は何も使わない。
+    this.ctx.waitUntil(this.sweepExpiredLitigationCases(db, record.compId));
     try {
       const stmt = buildLitigationCaseListStatement(record.compId);
       const result = await db.prepare(stmt.sql).bind(...stmt.params).all<LitigationCaseD1Row>();
@@ -5565,7 +5581,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /**
    * PUT /restraint-api/litigation-cases — 案件の新規作成/更新 (Refs #1133)。
-   * body に `caseId` があれば更新、無ければ新規作成 (crypto.randomUUID())。
+   * body に `caseId` があれば更新 (その案件が無ければ 404)、無ければ新規作成 (crypto.randomUUID())。
    * 書き込み先の comp・created_by はセッション record から取る (body の値は見ない)。
    */
   private async handleLitigationCasesPut(request: Request, record: TheearthSessionRecord): Promise<Response> {
@@ -5584,10 +5600,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (err instanceof LitigationCaseError) return dvrJsonError(400, err.message);
       throw err;
     }
-    const caseId = extractCaseId(raw) ?? crypto.randomUUID();
+    const givenCaseId = extractCaseId(raw);
+    const caseId = givenCaseId ?? crypto.randomUUID();
     const nowIso = new Date().toISOString();
     const stmt = buildLitigationCaseUpsertStatement(input, caseId, record.compId, record.viewerEmail ?? null, nowIso);
     try {
+      // caseId 指定 = 既存の案件の更新。無い案件を作り直さない — 削除済みの case_id で
+      // 作り直すと「削除した案件」の表に同じ case_id が残り、復活とぶつかる (c1133-32)。
+      // 新規は caseId 無しで来る (上の randomUUID) ので、この分岐を通らない。
+      if (givenCaseId) {
+        const existsStmt = buildLitigationCaseGetStatement(record.compId, givenCaseId);
+        const exists = await db.prepare(existsStmt.sql).bind(...existsStmt.params).first<LitigationCaseD1Row>();
+        if (!exists) return dvrJsonError(404, "案件が見つかりません (削除された可能性があります)");
+      }
       await db.prepare(stmt.sql).bind(...stmt.params).run();
       // upsert 直後に読み直す — 更新時は created_by/created_at が upsert 文で
       // 上書きされない (excluded の SET に含めていない) ので、その場で組んだ
@@ -5602,25 +5627,142 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** DELETE /restraint-api/litigation-cases?case_id= — 案件の削除 (Refs #1133)。
-   * 存在しない case_id を渡しても冪等に 200 を返す (0 行削除でもエラーにしない)。 */
-  private async handleLitigationCasesDelete(record: TheearthSessionRecord, url: URL): Promise<Response> {
+  /**
+   * 役割 (admin / payroll) を見る訴訟準備の口の前置き (Refs #1133 c1133-32)。
+   * `handleLitigationAlcUploadDriver` と同じ線: **毎回 introspect** (`authorizeRestraintViewer`。
+   * 保存済み theearth セッションは使わない) → 不成立は 401 → `canRunLitigationUpload` が
+   * 偽なら 403 (dev の短絡 `RESTRAINT_DEV_VIEWER_COMP` も role を持たないので 403)。
+   * 通ったら閲覧用 record を返す — **会社はこの `record.compId` だけ**を使う
+   * (body・query の会社は受け取らない)。
+   */
+  private async authorizeLitigationAdmin(
+    request: Request,
+    url: URL,
+    routing: TheearthRouting,
+  ): Promise<TheearthSessionRecord | Response> {
+    const viewer = await this.authorizeRestraintViewer(extractBearerToken(request.headers), routing, url);
+    if (!viewer) {
+      return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    }
+    if (!canRunLitigationUpload(viewer.viewerRole)) {
+      return dvrJsonError(403, LITIGATION_ADMIN_FORBIDDEN);
+    }
+    return viewer;
+  }
+
+  /** `isLitigationAdminRoute` に当たる口の入口。前置き → binding → 各ハンドラ。 */
+  private async dispatchLitigationAdmin(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
+    const record = await this.authorizeLitigationAdmin(request, url, routing);
+    if (record instanceof Response) return record;
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    if (url.pathname === "/restraint-api/litigation-cases/deleted") {
+      return this.handleLitigationDeletedCasesGet(db, record);
+    }
+    if (url.pathname === "/restraint-api/litigation-cases/restore") {
+      return this.handleLitigationCaseRestore(db, request, record);
+    }
+    return this.handleLitigationCasesDelete(db, record, url);
+  }
+
+  /**
+   * DELETE /restraint-api/litigation-cases?case_id= — 案件の削除 (Refs #1133)。admin / payroll のみ。
+   * 物理削除ではなく「削除した案件」の表への移動 — 検知結果と出力の版は消さないので、
+   * 30 日のあいだは復活 (`/restore`) でそのまま戻る。
+   * 存在しない case_id を渡しても冪等に 200 を返す (0 行の移動でもエラーにしない)。
+   */
+  private async handleLitigationCasesDelete(db: D1Database, record: TheearthSessionRecord, url: URL): Promise<Response> {
     const caseId = url.searchParams.get("case_id");
     if (!caseId) return dvrJsonError(400, "case_id が必要です");
     try {
-      const stmt = buildLitigationCaseDeleteStatement(record.compId, caseId);
-      const checks = buildLitigationCheckDeleteStatement(record.compId, caseId);
-      await db.batch([
-        db.prepare(stmt.sql).bind(...stmt.params),
-        db.prepare(checks.sql).bind(...checks.params),
-      ]);
+      const statements = buildLitigationCaseMoveToDeletedStatements(
+        record.compId,
+        caseId,
+        new Date().toISOString(),
+        record.viewerEmail ?? null,
+      );
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
     } catch (err) {
       console.error(JSON.stringify({ litigation_cases_delete: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "案件の削除に失敗しました");
     }
     return Response.json({ deleted: true });
+  }
+
+  /** GET /restraint-api/litigation-cases/deleted — 削除から 30 日以内の案件 (削除の新しい順)。 */
+  private async handleLitigationDeletedCasesGet(db: D1Database, record: TheearthSessionRecord): Promise<Response> {
+    try {
+      const stmt = buildLitigationDeletedCaseListStatement(record.compId, litigationDeletedCutoffIso(Date.now()));
+      const result = await db.prepare(stmt.sql).bind(...stmt.params).all<LitigationDeletedCaseD1Row>();
+      return Response.json(
+        { cases: buildLitigationDeletedCaseListResponse(result.results ?? []) },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_deleted_cases_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "削除した案件の一覧の取得に失敗しました");
+    }
+  }
+
+  /**
+   * POST /restraint-api/litigation-cases/restore — body `{ caseId }`。削除した案件を元の表へ戻す。
+   * 「削除した案件」の表に無い・30 日を過ぎたものは 404。cases に同じ case_id が既に在れば
+   * 409 (上書きしない)。
+   */
+  private async handleLitigationCaseRestore(
+    db: D1Database,
+    request: Request,
+    record: TheearthSessionRecord,
+  ): Promise<Response> {
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const caseId = extractCaseId(raw);
+    if (!caseId) return dvrJsonError(400, "caseId が必要です");
+    const cutoffIso = litigationDeletedCutoffIso(Date.now());
+    try {
+      const deletedStmt = buildLitigationDeletedCaseGetStatement(record.compId, caseId, cutoffIso);
+      const deleted = await db.prepare(deletedStmt.sql).bind(...deletedStmt.params).first<LitigationDeletedCaseD1Row>();
+      if (!deleted) return dvrJsonError(404, "削除した案件が見つかりません (30 日を過ぎた可能性があります)");
+      const getStmt = buildLitigationCaseGetStatement(record.compId, caseId);
+      const live = await db.prepare(getStmt.sql).bind(...getStmt.params).first<LitigationCaseD1Row>();
+      if (live) return dvrJsonError(409, "同じ案件が既に在るため復活できません");
+      const statements = buildLitigationCaseRestoreStatements(record.compId, caseId, cutoffIso);
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+      const restored = await db.prepare(getStmt.sql).bind(...getStmt.params).first<LitigationCaseD1Row>();
+      if (!restored) return dvrJsonError(502, "案件の復活直後の読み込みに失敗しました");
+      return Response.json({ restored: true, case: parseLitigationCaseRow(restored) });
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_case_restore: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "案件の復活に失敗しました");
+    }
+  }
+
+  /**
+   * 30 日を過ぎた「削除した案件」の掃除 (案件の一覧 GET の `ctx.waitUntil` から呼ぶ)。
+   * 検知結果と deleted の行を消す。**throw しない** (失敗は構造化ログ。一覧の応答は変えない)。
+   * ★ この中でさらに `ctx.waitUntil` を呼ばない — 内側の D1 書き込みが完了を保証されず
+   * 消える (`saveNet780ToR2` の doc comment の実害)。全部 `await` で直列にする。
+   */
+  private async sweepExpiredLitigationCases(db: D1Database, compId: string): Promise<void> {
+    try {
+      const cutoffIso = litigationDeletedCutoffIso(Date.now());
+      const listStmt = buildLitigationExpiredCaseListStatement(compId, cutoffIso);
+      const expired = await db.prepare(listStmt.sql).bind(...listStmt.params).all<{ case_id: string }>();
+      const caseIds = (expired.results ?? []).map((r) => r.case_id);
+      for (const caseId of caseIds) {
+        const statements = buildLitigationExpiredCasePurgeStatements(compId, caseId, cutoffIso);
+        await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+      }
+      if (caseIds.length > 0) {
+        console.log(JSON.stringify({ litigation_sweep: "done", comp: compId, cases: caseIds.length }));
+      }
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_sweep: "error", comp: compId, error: describeUnknownError(err) }));
+    }
   }
 
   /** GET /restraint-api/litigation-checks?case_id= — エラータブの保存済み検知結果 (Refs #1133)。 */
