@@ -4,9 +4,10 @@
  *
  * 「何月から何月まで・どの乗務員の勤務を記録するか」を選び、案件として保存して
  * 開き直せる土台。案件を「開く」と詳細にタブが出る。「出力」タブ (#c1133-2) は
- * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめ、作った冊ごとに
- * Y金額 シートの時間の行 (賃金月度ごとの合計、#c1133-31) を表にする。ZIP をダウンロードしたあと、
+ * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめる。ZIP をダウンロードしたあと、
  * 同じファイルと結果を relay へ 1 つの版として保存し (#c1133-34)、開き直すと最新の版の結果を表示する。
+ * 冊ごとの「月ごとの時間」の表 (#c1133-36) は、給与比較タブと同じ保存済みの wage report から作る
+ * (「ZIP を作る」の結果にも、保存した版の表示にも依らない)。
  * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
  * Y時間の欠け / alc にあってオンプレのデジタコに無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
  * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
@@ -26,7 +27,7 @@ import { getDrivers, getYTimePreview, getOperations, getDtakoOperationChanges, c
 import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
-  buildLitigationKingakuBooks,
+  buildLitigationHoursBooks,
   buildLitigationOutputChunks,
   buildLitigationZipSummary,
   countLitigationResults,
@@ -463,7 +464,7 @@ const outputVersionsLoading = ref(false)
 /** 版の一覧が 403 (admin / payroll 以外)。エラーにせず 1 行だけ出す — front は役割を知らない */
 const outputVersionsForbidden = ref(false)
 const outputVersionsError = ref('')
-/** 保存した版から戻した結果。出力タブの表示 (区切りの表・Y金額・ZIP に入るもの・紙面) だけが読む */
+/** 保存した版から戻した結果。出力タブの表示 (区切りの表・ZIP に入るもの・紙面) だけが読む */
 const restoredOutput = ref<{ versionId: string, createdAt: string, results: (LitigationOutputResult | null)[], changes: LitigationOutputChanges } | null>(null)
 /** 版の結果を表示しなかった理由 */
 const outputRestoreNotice = ref('')
@@ -529,8 +530,6 @@ const zipSummary = computed(() => {
   })
 })
 
-/** Excel を作れた冊ごとの「Y金額 (時間の行)」(「ZIP を作る」の結果として出る。画面と紙面で共用) */
-const kingakuBooks = computed(() => buildLitigationKingakuBooks(outputChunks.value, shownOutputResults.value))
 /** 出力タブの紙面に出す冊単位の警告 (エラータブの `chunkWarnings` は、このページで実行した結果だけを読む) */
 const outputChunkWarnings = computed(() => litigationChunkWarnings(outputChunks.value, shownOutputResults.value))
 
@@ -874,6 +873,19 @@ const errWageReports = ref(new Map<string, LitigationFetched<WageReportResponse>
 const errCheckedAt = ref(new Map<string, string>())
 const errorsStoreLoading = ref(false)
 const errorsStoreError = ref('')
+
+/** 冊ごとの「月ごとの時間」。給与比較タブと同じ保存済みの wage report から作る (「ZIP を作る」の結果にも、
+ * 保存した版の表示にも依らない。画面と紙面で共用) */
+const hoursBooks = computed(() => buildLitigationHoursBooks(outputChunks.value, errWageReports.value, errCheckedAt.value))
+/** 紙面には、値の在る月が 1 つでも在る冊だけ出す (全部「未取得」の表を刷らない) */
+const printHoursBooks = computed(() => hoursBooks.value.filter(b => b.valueMonths > 0))
+/** 保存済みの wage report を読み込み中・読めなかったときは、全月を「未取得」に見せずその状態を言う。
+ * 保存の失敗 (読めた値は手元に在る) では表を出す */
+const hoursNotice = computed(() => {
+  if (errorsStoreLoading.value) return '保存済みの結果を読み込み中…'
+  return errorsStoreError.value && errWageReports.value.size === 0 ? errorsStoreError.value : ''
+})
+
 const errorsRunning = ref(false)
 const errorsFinished = ref(false)
 const errorsProgress = ref<{ done: number, total: number, label: string } | null>(null)
@@ -1916,7 +1928,7 @@ function fmtDateTime(iso: string): string {
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
             ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
-            作った冊ごとに、Y金額 シートの時間の行 (賃金月度ごとの残業・休日労働・深夜労働・総労働時間) を下に出します。
+            下の「月ごとの時間」は、給与比較と同じ wage report の月ごとの時間 (暦月) です。ZIP を作る前から出ます。
             ダウンロードのあと、同じファイルと結果を版として保存します (出力するたびに 1 版)。元のデータが後から変わっても、その時点で出力した Excel を下の「保存した版」からダウンロードできます。案件を開き直すと、最新の版の結果を表示します。
           </p>
 
@@ -2013,7 +2025,7 @@ function fmtDateTime(iso: string): string {
             </table>
           </div>
 
-          <LitigationKingakuTable v-if="kingakuBooks.length > 0" :books="kingakuBooks" :driver-label="driverLabel" />
+          <LitigationMonthlyHoursTable v-if="hoursBooks.length > 0" :books="hoursBooks" :driver-label="driverLabel" :notice="hoursNotice" />
 
           <!-- 保存した版 (出力するたびに 1 版)。403 (admin / payroll 以外) は 1 行だけ出す -->
           <p v-if="outputVersionsForbidden" class="text-sm text-gray-500" data-testid="litigation-output-versions-forbidden">出力の保存と履歴は admin / payroll のみ使えます</p>
@@ -2459,7 +2471,7 @@ function fmtDateTime(iso: string): string {
           <template v-for="w in outputChunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
         </div>
 
-        <LitigationKingakuTable v-if="kingakuBooks.length > 0" :books="kingakuBooks" :driver-label="driverLabel" compact />
+        <LitigationMonthlyHoursTable v-if="printHoursBooks.length > 0" :books="printHoursBooks" :driver-label="driverLabel" compact />
         </div>
 
         <div v-if="activeTab === 'errors'" data-testid="litigation-print-errors">
@@ -2597,10 +2609,10 @@ function fmtDateTime(iso: string): string {
   .litigation-print-table th, .litigation-print-table td { border: 1px solid #999; padding: 1px 3px; text-align: left; vertical-align: top; }
   .litigation-print-table th { background: #eee; }
   .litigation-print-table tr { break-inside: avoid; }
-  /* Y金額 (時間の行): 1 冊を 1 枚の中に収める。表は中身の幅に詰め、時間は右寄せ */
-  .litigation-kingaku-book { break-inside: avoid; margin-top: 3px; }
-  .litigation-print-table.litigation-kingaku-table { width: auto; }
-  .litigation-print-table td.litigation-kingaku-num { text-align: right; }
+  /* 月ごとの時間: 1 冊を 1 枚の中に収める。表は中身の幅に詰め、時間は右寄せ */
+  .litigation-hours-book { break-inside: avoid; margin-top: 3px; }
+  .litigation-print-table.litigation-hours-table { width: auto; }
+  .litigation-print-table td.litigation-hours-num { text-align: right; }
   .litigation-print-salary { font-size: 7.5px; }
   .litigation-print-salary .litigation-print-table td { padding: 0 2px; }
 }

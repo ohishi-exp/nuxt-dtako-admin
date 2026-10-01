@@ -14,7 +14,7 @@
  */
 
 import type { WageReportRow } from './restraint-wage-view'
-import { fmtMinutes, fmtYen } from './restraint-wage-view'
+import { fmtMinutes, fmtYen, monthlyOvertimeMinutes } from './restraint-wage-view'
 
 /**
  * 支給項目の区分 (Refs #278)。法令上の除外集合は 2 軸で別物のため、
@@ -960,7 +960,7 @@ export function compareSalaryMonth(
     const overtime = sums.buckets['overtime'].total
     // 残業時間は wage report が正本 (時間外 + 時間外深夜 + 週 40 時間超)。ここで summary から数え直さない —
     // 残業(計算)・37条が同じ月で違う時間になるため
-    const overtimeMinutes = report.wage.overtimeMinutes + report.wage.nightOvertimeMinutes
+    const overtimeMinutes = monthlyOvertimeMinutes(report.wage)
 
     // 基本給(計算) は wage report の 単価マスタ × 法定時間内 (給与区分に関わらず同じ式)。単価が無い月は null。
     // 明細の基本単価 × 日数は使わない — 日数を掛ければ明細の基本給の項目そのものになり、比較にならない

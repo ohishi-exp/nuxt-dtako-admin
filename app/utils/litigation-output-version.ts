@@ -18,7 +18,6 @@
  */
 import { fmtJstDateTime } from './litigation-changes'
 import type { LitigationOutputChunk, LitigationOutputResult, LitigationOutputStatus } from './litigation-output'
-import { decodeYKingakuHeader, type YKingakuMonth } from './y-kingaku'
 
 /** 保存する結果の形の版 */
 export const LITIGATION_OUTPUT_SNAPSHOT_VERSION = 1
@@ -74,28 +73,19 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every(s => typeof s === 'string')
 }
 
-/** 形の検査は応答ヘッダの読み口 (`decodeYKingakuHeader`) に任せる — 同じ検査を 2 つ持たない。 */
-function parseKingaku(raw: unknown): YKingakuMonth[] | null {
-  if (!Array.isArray(raw)) return null
-  const rows = raw.map((m: unknown) => {
-    const r = isRecord(m) ? m : {}
-    return [r.from, r.to, r.statutoryIn, r.statutoryOut, r.over60, r.holiday, r.night, r.total]
-  })
-  return decodeYKingakuHeader(encodeURIComponent(JSON.stringify(rows)))
-}
-
-/** 区切り 1 つの結果。形が違えば false (null は「作らなかった冊」なので別の値にする)。 */
+/**
+ * 区切り 1 つの結果。形が違えば false (null は「作らなかった冊」なので別の値にする)。
+ * 古い版の結果に残っている `kingaku` / `kingakuError` (c1133-31 の頃の時間の集計) は**読まずに無視する**
+ * — 形が壊れていても弾かず、戻した結果にも入れない (時間の表は wage report から作る、c1133-36)。
+ */
 function parseResult(raw: unknown): LitigationOutputResult | false {
   if (!isRecord(raw)) return false
-  const { driverCd, from, to, status, rows, missingDates, missingCount, warnings, warningsCount, message, kingaku, kingakuError } = raw
+  const { driverCd, from, to, status, rows, missingDates, missingCount, warnings, warningsCount, message } = raw
   if (typeof driverCd !== 'string' || typeof from !== 'string' || typeof to !== 'string') return false
   if (typeof message !== 'string' || !STATUSES.includes(status)) return false
   if (rows !== null && !isCount(rows)) return false
   if (!isStringArray(missingDates) || !isCount(missingCount)) return false
   if (!isStringArray(warnings) || !isCount(warningsCount)) return false
-  if (kingakuError !== undefined && typeof kingakuError !== 'string') return false
-  const months = kingaku === undefined ? undefined : parseKingaku(kingaku)
-  if (months === null) return false
   return {
     driverCd,
     from,
@@ -107,8 +97,6 @@ function parseResult(raw: unknown): LitigationOutputResult | false {
     warnings,
     warningsCount,
     message,
-    ...(months ? { kingaku: months } : {}),
-    ...(kingakuError !== undefined ? { kingakuError } : {}),
   }
 }
 

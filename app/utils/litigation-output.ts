@@ -25,17 +25,22 @@
  * alc の dtako は 2024-04〜2025-12 が 0 件 (nuxt-dtako-admin-map skill「Y時間 エクスポート」)
  * なので、`empty` は「働いていない」ではなく「alc に材料が無い」と読ませる。
  *
- * ## Y金額 (時間の行) の表 (Refs #1133 c1133-31)
+ * ## 月ごとの時間の表 (Refs #1133 c1133-36)
  *
- * サーバは `period_rewrite: true` の応答に、Y金額 シートの時間の行 (賃金月度ごとの合計) を
- * `x-y-time-kingaku` で載せる (計算は `y-kingaku.ts`)。ここはそれを結果に畳み、冊ごとの表の
- * 行 (`buildLitigationKingakuBooks`) にする。**別の通信はしない** — 「ZIP を作る」の結果として出る。
+ * 出力タブと紙面の「月ごとの時間 (wage report)」は、**給与比較タブと同じ保存済みの wage report**
+ * (エラータブの `errWageReports`) の月の区分から作る ({@link buildLitigationHoursBooks})。
+ * 「ZIP を作る」の結果 (この上の 4 分類) には依らない — Excel を作れなかった冊も、wage report が
+ * 在る月は出る。ここで時間を計算し直さない (区分を足すだけ。残業時間と月 60h 超は
+ * `restraint-wage-view.ts` の式をそのまま呼ぶ)。
  */
-import { monthRange } from './restraint-wage-view'
+import { monthRange, monthlyOvertimeMinutes, monthlyOvertimeOver60hMinutes } from './restraint-wage-view'
+import type { WageCategoryKey, WageReportResponse, WageRow } from './restraint-wage-view'
 import { daysInMonth } from './timecard-view'
 import { LITIGATION_CASE_MAX_MONTHS } from './litigation-case-form'
 import { fmtTimecardCompareMinutes } from './timecard-compare-view'
-import { decodeYKingakuHeader, sumYKingakuMonths, type YKingakuMonth } from './y-kingaku'
+import { fmtJstDateTime } from './litigation-changes'
+import { litigationCheckedAtKey, litigationChunkMonths, litigationDriverMonthKey } from './litigation-errors'
+import type { LitigationFetched } from './litigation-errors'
 
 /** 京都ソフト案件の Y時間 テンプレ (y-time-export.vue の既定と同じ R2 key) */
 export const LITIGATION_TEMPLATE_KEY = 'templates/kyoto-soft/base.xlsx'
@@ -76,13 +81,6 @@ export interface LitigationOutputResult {
   warningsCount: number
   /** 画面に出す 1 文 */
   message: string
-  /**
-   * Y金額 シートの時間の行 (賃金月度ごと、分)。サーバが集計を返したときだけ在る
-   * (失敗の結果・集計を返さない版のサーバでは無い)
-   */
-  kingaku?: YKingakuMonth[]
-  /** 集計できなかった理由 (テンプレの設定が読めない等)。`kingaku` とは同時に持たない */
-  kingakuError?: string
 }
 
 /** 応答ヘッダを読むための最小の形 (`Headers` がそのまま渡せる) */
@@ -92,7 +90,6 @@ export interface HeaderReader {
 
 export const LITIGATION_EMPTY_MESSAGE = 'この期間に運行が 0 件 (alc に取り込まれていない可能性)'
 export const LITIGATION_NOT_FOUND_MESSAGE = 'この乗務員CD は alc に登録が無い'
-export const LITIGATION_KINGAKU_UNREADABLE = 'サーバーが返した集計が読めなかった'
 
 /**
  * 案件を区切りの配列にする。並びは乗務員ごと・期間の古い順。
@@ -165,12 +162,6 @@ export function litigationResultFromHeaders(
   if (rows === null) message = '行数が返らなかった (0 件かどうか判定できない)'
   else if (rows === 0) message = LITIGATION_EMPTY_MESSAGE
   else message = `${rows} 行`
-  const rawKingaku = headers.get('x-y-time-kingaku')
-  const rawKingakuError = headers.get('x-y-time-kingaku-error')
-  const kingaku = rawKingaku === null ? null : decodeYKingakuHeader(rawKingaku)
-  let kingakuError: string | null = null
-  if (rawKingakuError !== null) kingakuError = decodeURIComponent(rawKingakuError)
-  else if (rawKingaku !== null && kingaku === null) kingakuError = LITIGATION_KINGAKU_UNREADABLE
   return {
     driverCd: chunk.driverCd,
     from: chunk.from,
@@ -182,8 +173,6 @@ export function litigationResultFromHeaders(
     warnings,
     warningsCount: parseCount(headers.get('x-y-time-warnings-count')) ?? warnings.length,
     message,
-    ...(kingaku ? { kingaku } : {}),
-    ...(kingakuError !== null ? { kingakuError } : {}),
   }
 }
 
@@ -273,72 +262,164 @@ export function buildLitigationZipSummary(input: LitigationZipSummaryInput): Lit
   return [...excel, changes]
 }
 
-// ---- Y金額 シートの時間の行 (出力タブの表と紙面) ----
+// ---- 月ごとの時間 (wage report。出力タブの表と紙面) ----
 
-/** 表の時間の列 (Y金額 シートの E〜J 列の見出しと同じ並び) */
-export const LITIGATION_KINGAKU_COLUMNS = ['法内残業', '法外残業', '月60h超', '休日労働', '深夜労働', '総労働時間'] as const
+/** 表の時間の列。wage report の月の区分をそのまま出す (Excel の列名には寄せない) */
+export const LITIGATION_HOURS_COLUMNS = ['法定時間内', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間'] as const
 
-export const LITIGATION_KINGAKU_NOT_APPLIED = '不適用'
+export const LITIGATION_HOURS_NOT_APPLIED = '不適用'
+/** まだ取りに行っていない月 */
+export const LITIGATION_HOURS_PENDING = '未取得'
+/** 取りに行って取れなかった月 (後ろに理由を続ける) */
+export const LITIGATION_HOURS_FAILED = '取得に失敗'
+/** 取れたが、その月にこの乗務員の行が無い (取り直しても同じ) */
+export const LITIGATION_HOURS_NO_ROW = '拘束の記録なし'
+/** GCP の拘束時間が欠測の月 (0 分ではない) */
+export const LITIGATION_HOURS_MISSING = '欠測'
 
-export interface LitigationKingakuRow {
-  /** 対象期間 `YYYY-MM-DD〜YYYY-MM-DD` (合計行は「合計」) */
-  period: string
-  /** `LITIGATION_KINGAKU_COLUMNS` の順の `H:MM` (月 60h 超が不適用なら「不適用」) */
+export interface LitigationHoursRow {
+  /** 対象月 `YYYY-MM` (合計行は「合計 (N か月ぶん)」) */
+  month: string
+  /** `LITIGATION_HOURS_COLUMNS` の順の `H:MM` (月 60h 超が不適用なら「不適用」)。値の無い月は空 */
   cells: string[]
-  /** 月度が冊の期間からはみ出している (はみ出した日はこの冊の Excel に無く、合計に入らない) */
-  partial: boolean
-}
-
-/** 1 冊ぶんの表。Excel を作れた冊 (`status: 'ok'`) だけが対象 */
-export interface LitigationKingakuBook {
-  driverCd: string
-  /** 冊の期間 `YYYY-MM〜YYYY-MM` */
-  label: string
-  /** 賃金月度ごとの行。集計が無い冊は空 */
-  rows: LitigationKingakuRow[]
-  /** 冊の合計行。集計が無い冊は null */
-  total: LitigationKingakuRow | null
-  /** 表を出せない理由。表があるときは null */
+  /** 値の無い月の状態 (未取得 / 取得に失敗: 理由 / 拘束の記録なし / 欠測)。値の在る月は null */
   note: string | null
 }
 
-function kingakuCells(m: Omit<YKingakuMonth, 'from' | 'to'>): string[] {
+/** 1 冊ぶんの表。「ZIP を作る」の結果に依らず、案件の全部の冊について作る */
+export interface LitigationHoursBook {
+  driverCd: string
+  /** 冊の期間 `YYYY-MM〜YYYY-MM` */
+  label: string
+  /** 冊の月ごとの行 (古い順)。値の無い月も行を持つ */
+  rows: LitigationHoursRow[]
+  /** 値の在る月だけの合計。値の在る月が 1 つも無ければ null */
+  total: LitigationHoursRow | null
+  /** 値の在る月の数 (紙面は 1 つ以上の冊だけ刷る) */
+  valueMonths: number
+  /** 未取得か取得に失敗の月が在る (「拘束の材料を取ると出ます」を出す条件。記録なし・欠測は入れない) */
+  needsFetch: boolean
+  /** この冊の月の wage report を取った時刻のうち、いちばん新しいもの (JST `YYYY-MM-DD HH:mm`)。1 つも無ければ null */
+  checkedAtText: string | null
+}
+
+/** 1 か月ぶんの値 (分)。`over60` が null = 月 60h 超の割増が適用されない月 */
+interface HoursMinutes {
+  statutory: number
+  overtime: number
+  over60: number | null
+  nonLegalHoliday: number
+  legalHoliday: number
+  night: number
+  total: number
+}
+
+const WAGE_CATEGORY_KEYS = [
+  'statutory', 'overtime', 'night', 'overtimeNight', 'nonLegalHoliday', 'nonLegalHolidayNight',
+  'legalHoliday', 'legalHolidayNight', 'weekly40Excess',
+] as const satisfies readonly WageCategoryKey[]
+
+/**
+ * wage report の 1 行を表の列にする。**`night` は `statutory` の内数**なので総労働時間に足さない
+ * (深夜の列にだけ入れる)。区分が数でない行 (保存の検査は `wage.minutes` の形まで見ない) は null。
+ */
+function hoursMinutes(wage: WageRow, month: string): HoursMinutes | null {
+  const m: Partial<Record<WageCategoryKey, unknown>> | undefined = wage.minutes
+  const isMinutes = (v: unknown) => typeof v === 'number' && Number.isFinite(v)
+  if (!m || !WAGE_CATEGORY_KEYS.every(k => isMinutes(m[k]))) return null
+  if (!isMinutes(wage.overtimeMinutes) || !isMinutes(wage.nightOvertimeMinutes)) return null
+  const v = wage.minutes
+  return {
+    statutory: v.statutory,
+    overtime: monthlyOvertimeMinutes(wage),
+    over60: monthlyOvertimeOver60hMinutes(wage, month),
+    nonLegalHoliday: v.nonLegalHoliday + v.nonLegalHolidayNight,
+    legalHoliday: v.legalHoliday + v.legalHolidayNight,
+    night: v.night + v.overtimeNight + v.nonLegalHolidayNight + v.legalHolidayNight,
+    total: v.statutory + v.overtime + v.overtimeNight + v.weekly40Excess
+      + v.nonLegalHoliday + v.nonLegalHolidayNight + v.legalHoliday + v.legalHolidayNight,
+  }
+}
+
+function hoursCells(m: HoursMinutes): string[] {
   return [
-    fmtTimecardCompareMinutes(m.statutoryIn),
-    fmtTimecardCompareMinutes(m.statutoryOut),
-    m.over60 === null ? LITIGATION_KINGAKU_NOT_APPLIED : fmtTimecardCompareMinutes(m.over60),
-    fmtTimecardCompareMinutes(m.holiday),
+    fmtTimecardCompareMinutes(m.statutory),
+    fmtTimecardCompareMinutes(m.overtime),
+    m.over60 === null ? LITIGATION_HOURS_NOT_APPLIED : fmtTimecardCompareMinutes(m.over60),
+    fmtTimecardCompareMinutes(m.nonLegalHoliday),
+    fmtTimecardCompareMinutes(m.legalHoliday),
     fmtTimecardCompareMinutes(m.night),
     fmtTimecardCompareMinutes(m.total),
   ]
 }
 
+/** 値の在る月の合計。月 60h 超は適用される月の超過ぶんだけを足し、適用される月が無ければ null (不適用) */
+function sumHours(months: readonly HoursMinutes[]): HoursMinutes {
+  const sum = (pick: (m: HoursMinutes) => number) => months.reduce((acc, m) => acc + pick(m), 0)
+  const applied = months.filter(m => m.over60 !== null)
+  return {
+    statutory: sum(m => m.statutory),
+    overtime: sum(m => m.overtime),
+    over60: applied.length === 0 ? null : applied.reduce((acc, m) => acc + m.over60!, 0),
+    nonLegalHoliday: sum(m => m.nonLegalHoliday),
+    legalHoliday: sum(m => m.legalHoliday),
+    night: sum(m => m.night),
+    total: sum(m => m.total),
+  }
+}
+
+/** 乗務員 × 月の値か、値が無い理由 (`fetch` = 取り直すと出る可能性が在る)。 */
+function hoursOfMonth(
+  entry: LitigationFetched<WageReportResponse> | undefined,
+  driverCd: string,
+  month: string,
+): { minutes: HoursMinutes } | { note: string, fetch: boolean } {
+  if (!entry) return { note: LITIGATION_HOURS_PENDING, fetch: true }
+  if (!entry.ok) return { note: `${LITIGATION_HOURS_FAILED}: ${entry.reason}`, fetch: true }
+  const rows = entry.value.rows.filter(r => r.summary.driverCd === driverCd)
+  if (rows.length === 0) return { note: LITIGATION_HOURS_NO_ROW, fetch: false }
+  if (rows.some(r => r.restraint_missing)) return { note: LITIGATION_HOURS_MISSING, fetch: false }
+  const minutes = hoursMinutes(rows[0]!.wage, month)
+  return minutes ? { minutes } : { note: `${LITIGATION_HOURS_FAILED}: 保存された区分が読めない形`, fetch: true }
+}
+
 /**
- * 出力の結果から、冊ごとの「Y金額 (時間の行)」の表を作る。添字は `chunks` と `results` で揃える。
- * 未実行の冊と、Excel を作れなかった冊 (0 件・未登録・失敗) は出さない — 理由は区切りの一覧が言う。
- * **集計が無い冊を黙って落とさない** (理由を `note` に書く)。
+ * 冊ごとの「月ごとの時間」の表を作る。行は**暦月** (wage report の月。締め日ではまとめ直さない)。
+ * `wageReports` は給与比較タブと同じ Map (キー `乗務員CD|YYYY-MM`)、`checkedAt` はその保存時刻
+ * (キー `種類|乗務員CD|YYYY-MM`)。**値の在る月だけを合計する** — 未取得・失敗・記録なし・欠測の月を
+ * 0 時間として足さない。
  */
-export function buildLitigationKingakuBooks(
+export function buildLitigationHoursBooks(
   chunks: readonly LitigationOutputChunk[],
-  results: readonly (LitigationOutputResult | null)[],
-): LitigationKingakuBook[] {
-  const books: LitigationKingakuBook[] = []
-  chunks.forEach((chunk, i) => {
-    const r = results[i]
-    if (!r || r.status !== 'ok') return
-    const book: LitigationKingakuBook = { driverCd: chunk.driverCd, label: chunk.label, rows: [], total: null, note: null }
-    books.push(book)
-    if (r.kingakuError !== undefined) book.note = `集計なし: ${r.kingakuError}`
-    else if (!r.kingaku) book.note = '集計なし: サーバーが集計を返さなかった'
-    else if (r.kingaku.length === 0) book.note = '集計なし: Y時間 シートに書けた日が 1 日も無い'
-    else {
-      book.rows = r.kingaku.map((m) => ({
-        period: `${m.from}〜${m.to}`,
-        cells: kingakuCells(m),
-        partial: m.from < chunk.from || m.to > chunk.to,
-      }))
-      book.total = { period: '合計', cells: kingakuCells(sumYKingakuMonths(r.kingaku)), partial: false }
+  wageReports: ReadonlyMap<string, LitigationFetched<WageReportResponse>>,
+  checkedAt: ReadonlyMap<string, string>,
+): LitigationHoursBook[] {
+  return chunks.map((chunk) => {
+    const values: HoursMinutes[] = []
+    const times: string[] = []
+    let needsFetch = false
+    const rows = litigationChunkMonths(chunk).map((month): LitigationHoursRow => {
+      const key = litigationDriverMonthKey(chunk.driverCd, month)
+      const at = checkedAt.get(litigationCheckedAtKey('wageReport', key))
+      if (at !== undefined) times.push(at)
+      const got = hoursOfMonth(wageReports.get(key), chunk.driverCd, month)
+      if ('note' in got) {
+        needsFetch ||= got.fetch
+        return { month, cells: [], note: got.note }
+      }
+      values.push(got.minutes)
+      return { month, cells: hoursCells(got.minutes), note: null }
+    })
+    return {
+      driverCd: chunk.driverCd,
+      label: chunk.label,
+      rows,
+      total: values.length === 0
+        ? null
+        : { month: `合計 (${values.length} か月ぶん)`, cells: hoursCells(sumHours(values)), note: null },
+      valueMonths: values.length,
+      needsFetch,
+      checkedAtText: times.length === 0 ? null : fmtJstDateTime(times.reduce((a, b) => (b > a ? b : a))),
     }
   })
-  return books
 }

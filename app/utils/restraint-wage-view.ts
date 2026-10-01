@@ -642,9 +642,28 @@ export function isMonthlyOvertimeOver60h(
   wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>,
   month: string,
 ): boolean {
-  // 猶予期間の月は 60h を超えても割増が変わらないので警告色を点けない
-  if (!isOver60hPremiumMonth(month)) return false
-  return wage.overtimeMinutes + wage.nightOvertimeMinutes > MONTHLY_OVERTIME_THRESHOLD_MINUTES
+  return (monthlyOvertimeOver60hMinutes(wage, month) ?? 0) > 0
+}
+
+/**
+ * その月の残業時間 (分) = 時間外 + 週40超過 + 時間外深夜。**wage report が正本で、ここは足すだけ**。
+ * 給与比較の「残業時間」(`compareSalaryMonth`)・月 60h 超の判定・訴訟準備の出力タブの
+ * 「法外残業」が同じこの式を通る (同じ月で違う時間を出さない)。
+ */
+export function monthlyOvertimeMinutes(wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>): number {
+  return wage.overtimeMinutes + wage.nightOvertimeMinutes
+}
+
+/**
+ * 残業時間のうち月 60 時間を超えたぶん (分)。**猶予期間の月 (`isOver60hPremiumMonth` が false) は
+ * null** — 60h を超えても割増が変わらないので、0 分 (超えていない) とは別の値にする。
+ */
+export function monthlyOvertimeOver60hMinutes(
+  wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>,
+  month: string,
+): number | null {
+  if (!isOver60hPremiumMonth(month)) return null
+  return Math.max(monthlyOvertimeMinutes(wage) - MONTHLY_OVERTIME_THRESHOLD_MINUTES, 0)
 }
 
 // ---- 最低賃金チェックの並び (ユーザー決定 2026-07-30) ----
