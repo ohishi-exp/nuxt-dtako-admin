@@ -1208,7 +1208,8 @@ branches = true
 
 # Y時間 の Excel に書く行を取ってくる util (Refs #1133 c1133-46)。勤怠の勤務の記録から作る経路
 # (relay → 応答の tenant の照合 → 上流の POST) と、運行の経路へ倒す 3 つの形・倒さない失敗の
-# 投げ方・行の元の応答ヘッダを持つ。1 社固定の認可がここに在るので gate に載せる。
+# 投げ方・行の元の応答ヘッダ・2 つの route (`y-time-export.post.ts` / `y-time-rows.post.ts`) が共用する
+# body の検証を持つ。1 社固定の認可がここに在るので gate に載せる。
 [[files]]
 path = "server/utils/y-time-rows.ts"
 branches = true
@@ -1262,6 +1263,15 @@ branches = true
 # **route の分岐**であって xlsx 生成ではない (それは `tests/utils/y-time-xlsx.test.ts`)。
 [[files]]
 path = "server/api/y-time-export.post.ts"
+branches = true
+
+# Y時間 の行を JSON で返す口 (`POST /api/y-time-rows`、Refs #1133 c1133-47)。訴訟準備のエラータブの検知と
+# Y時間 のページのプレビューが使う。行は Excel の route と同じ util (`server/utils/y-time-rows.ts`) が作り、
+# ここは前置き (`authorizeScraperRelay`) → body の検証 → util → 結果をそのまま返すだけ。
+# 乗務員 1 人の日別の始業/終業/休憩を返すので、role の関門を通ることを route で測る
+# (`tests/server/y-time-rows-route.test.ts` と `tests/server/require-role-routes.test.ts`)。
+[[files]]
+path = "server/api/y-time-rows.post.ts"
 branches = true
 
 # **Google Maps API key を平文で返す口** (`GET /api/vid-check/map-key`)。

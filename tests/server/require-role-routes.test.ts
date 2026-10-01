@@ -51,10 +51,11 @@ import vehicleSettingsObject from '../../server/api/vehicle-settings/object.get'
 import vehicleSettingsUnconfirmed from '../../server/api/vehicle-settings/unconfirmed.get'
 import vidCheckMapKey from '../../server/api/vid-check/map-key.get'
 import yTimeExport from '../../server/api/y-time-export.post'
+import yTimeRows from '../../server/api/y-time-rows.post'
 import yTimeTemplateGet from '../../server/api/y-time-template.get'
 import yTimeTemplatePut from '../../server/api/y-time-template.put'
 
-/** この PR で role 認可を配線した A 段 route **全 25 本**。**追加したらここにも足す。** */
+/** role 認可を配線した A 段 route。**追加したらここにも足す。** */
 const WIRED: [string, unknown][] = [
   ['GET /api/etc-csv/download', etcCsvDownload],
   ['GET /api/ichiban/[...path]', ichibanProxy],
@@ -79,6 +80,7 @@ const WIRED: [string, unknown][] = [
   ['GET /api/vehicle-settings/unconfirmed', vehicleSettingsUnconfirmed],
   ['GET /api/vid-check/map-key', vidCheckMapKey],
   ['POST /api/y-time-export', yTimeExport],
+  ['POST /api/y-time-rows', yTimeRows],
   ['GET /api/y-time-template', yTimeTemplateGet],
   ['PUT /api/y-time-template', yTimeTemplatePut],
 ]

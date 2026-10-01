@@ -16,7 +16,7 @@ import {
   updateEventClassification,
   getDailyHours,
   getWorkTimes,
-  getYTimePreview,
+  getYTimeRows,
   getDtakoOperationChanges,
   getRestraintReport,
   getMembers,
@@ -52,6 +52,7 @@ import {
   splitCsvAllStream,
   getDtakoEventsEtags,
 } from '~/utils/api'
+import { describeCaughtError, isAlcDriverNotFound, ResponseFailure } from '~/utils/api-error'
 import {
   isLive,
   mockFetch,
@@ -406,7 +407,6 @@ describe('api', () => {
       ['getDailyHours({driver_id})', () => getDailyHours({ driver_id: 'D1' }), '/api/daily-hours?driver_id=D1'],
       ['getWorkTimes()', () => getWorkTimes(), '/api/work-times'],
       ['getWorkTimes({date_from})', () => getWorkTimes({ date_from: '2026-01-01' }), '/api/work-times?date_from=2026-01-01'],
-      ['getYTimePreview', () => getYTimePreview('D1', '2024-04-01', '2024-04-30'), '/api/dtako/y-time-export?driver_cd=D1&from=2024-04-01&to=2024-04-30'],
       ['getDtakoOperationChanges', () => getDtakoOperationChanges('D1', '2024-04-01', '2024-04-30'), '/api/dtako/operation-changes?driver_cd=D1&from=2024-04-01&to=2024-04-30'],
     ] as [string, () => Promise<unknown>, string][])('%s → GET %s', async (_name, fn, expectedPath) => {
       stubOk({})
@@ -1663,6 +1663,95 @@ describe('api', () => {
       await expect(getNetprintTargets()).rejects.toThrow('通知先の設定の応答が JSON ではありません')
       mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
       await expect(putNetprintTargets([])).rejects.toThrow('通知先の保存の応答が JSON ではありません')
+    })
+  })
+
+  // Y時間 の行 (JSON)。上流を直に叩かず、この repo の server route を通る (Refs #1133 c1133-47)。
+  // 値はすべて架空。
+  describe.runIf(!isLive)('getYTimeRows', () => {
+    const PREVIEW = {
+      source: 'kintai',
+      source_reason: null,
+      rows: [{ date: '2025-01-06', start_minutes_of_day: 480 }],
+      warnings: ['w1'],
+      excluded: [{ start: '2025-01-08 08:00:00', end: '2025-01-08 17:00:00', reason: 'no_non_working' }],
+      missing_months: ['2025-02'],
+    }
+    const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body })
+
+    it('★ POST /api/y-time-rows を Bearer 付きで叩き (backend ではなく同一オリジン)、応答の欄を返す', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce(ok(PREVIEW))
+      expect(await getYTimeRows('9001', '2025-01-01', '2025-01-31')).toEqual(PREVIEW)
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/y-time-rows')
+      expect(opts.method).toBe('POST')
+      expect(opts.headers['authorization']).toBe('Bearer tok-1')
+      expect(opts.headers['content-type']).toBe('application/json')
+      // tenant は送らない (server が認証結果から決める)
+      expect(JSON.parse(opts.body)).toEqual({ driver_cd: '9001', from: '2025-01-01', to: '2025-01-31' })
+    })
+
+    it('運行の元へ倒した応答の driver / period は読まない (画面は名前を一覧から、期間を入力から出す)', async () => {
+      mockFetch.mockResolvedValueOnce(ok({
+        ...PREVIEW, source: 'alc', source_reason: 'out_of_scope', excluded: [], missing_months: [],
+        driver: { cd: '9001', name: '架空 太郎' }, period: { from: '2025-01-01', to: '2025-01-31' },
+      }))
+      const got = await getYTimeRows('9001', '2025-01-01', '2025-01-31')
+      expect(got).toEqual({ ...PREVIEW, source: 'alc', source_reason: 'out_of_scope', excluded: [], missing_months: [] })
+      expect(got).not.toHaveProperty('driver')
+      expect(got).not.toHaveProperty('period')
+    })
+
+    it('token が無ければ Authorization を付けない (cookie だけで通す経路)', async () => {
+      initApi(API_BASE, () => null, undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce(ok(PREVIEW))
+      await getYTimeRows('9001', '2025-01-01', '2025-01-31')
+      expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
+    })
+
+    it('★ 非 2xx は status と本文を持つ失敗で投げる (勤怠の経路の失敗: 1 文は message、本文の data も読める)', async () => {
+      const body = {
+        error: true, statusCode: 502, statusMessage: 'kintai y-time rows failed (relay)',
+        message: '勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る)',
+        data: { source: 'kintai', stage: 'relay', status: 502 },
+      }
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => body })
+      const e = await getYTimeRows('9001', '2025-01-01', '2025-01-31').catch((err: unknown) => err)
+      expect(e).toBeInstanceOf(ResponseFailure)
+      expect(e).toMatchObject({ statusCode: 502, data: body, message: '勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る)' })
+      // 画面はこの 1 本を既存の読み方 (`describeCaughtError`) にそのまま渡せる
+      expect(describeCaughtError(e, 'やり直してください')).toBe(
+        '502 勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る) — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからやり直してください',
+      )
+      expect(isAlcDriverNotFound(502, (e as ResponseFailure).data)).toBe(false)
+    })
+
+    it('★ 運行の経路の 404 (本文の data.upstream = alc) は、呼び手が「乗務員CD が alc に未登録」と見分けられる', async () => {
+      const body = { error: true, statusCode: 404, statusMessage: 'backend error: driver_cd not found: 9001', data: { upstream: 'alc' } }
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => body })
+      const e = await getYTimeRows('9001', '2025-01-01', '2025-01-31').catch((err: unknown) => err) as ResponseFailure
+      expect(isAlcDriverNotFound(e.statusCode, e.data)).toBe(true)
+    })
+
+    it('本文が JSON でない非 2xx は、理由が無いと言う (本文は null。status は欄で持つ)', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => { throw new Error('not json') } })
+      const e = await getYTimeRows('9001', '2025-01-01', '2025-01-31').catch((err: unknown) => err)
+      expect(e).toMatchObject({ statusCode: 503, data: null, message: '応答に理由が入っていません' })
+    })
+
+    it('★ 2xx でも形の合わない応答・JSON でない応答は投げる (読めなかった応答を 0 件として返さない)', async () => {
+      for (const bad of [{ ...PREVIEW, source: 'other' }, { ...PREVIEW, excluded: undefined }, {}, []]) {
+        mockFetch.mockResolvedValueOnce(ok(bad))
+        await expect(getYTimeRows('9001', '2025-01-01', '2025-01-31')).rejects.toThrow('Y時間 の行の応答が読めない形でした')
+      }
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
+      await expect(getYTimeRows('9001', '2025-01-01', '2025-01-31')).rejects.toThrow('Y時間 の行の応答が読めない形でした')
+    })
+
+    it('応答が 1 つも得られなかった (fetch が throw) ときは、接続できなかった 1 文に差し替えて投げる', async () => {
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      await expect(getYTimeRows('9001', '2025-01-01', '2025-01-31')).rejects.toThrow('サーバに接続できませんでした')
     })
   })
 

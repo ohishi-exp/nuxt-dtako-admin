@@ -8,6 +8,8 @@
  *    認証結果に tenant が無ければ relay も呼ばない
  * 3. 運行の経路へ倒すのは 3 つの形だけ。それ以外の失敗は投げて、運行の GET を呼ばない
  * 4. 勤怠の経路の失敗に `upstream: 'alc'` を付けない (404 を「乗務員CD が alc に未登録」と読ませない)
+ * 5. どの呼び出しも勤怠の元を試す (試さない呼び方は無い。Refs #1133 c1133-47)
+ * 6. route の body の検証 (`yTimeRowsInputFromBody`) — 2 つの route が共用する
  *
  * 値はすべて架空。
  */
@@ -21,10 +23,10 @@ const { sendToScraperRelayMock, alcProxyFetchMock } = vi.hoisted(() => ({
 vi.mock('../../server/utils/scraper-relay', () => ({ sendToScraperRelay: sendToScraperRelayMock }))
 vi.mock('../../server/utils/alc-proxy', () => ({ alcProxyFetch: alcProxyFetchMock }))
 
-import { fetchYTimeRows, yTimeSourceHeaders, Y_TIME_EXCLUDED_HEADER_LIMIT, type YTimeRowsResult } from '../../server/utils/y-time-rows'
+import { fetchYTimeRows, yTimeRowsInputFromBody, yTimeSourceHeaders, Y_TIME_EXCLUDED_HEADER_LIMIT, type YTimeRowsResult } from '../../server/utils/y-time-rows'
 
 const INPUT = { driverCd: '9001', from: '2025-01-01', to: '2025-12-31' }
-const KINTAI = { tryKintai: true, tenantId: 'tenant-a', sharedSecret: 'secret-x' }
+const KINTAI = { tenantId: 'tenant-a', sharedSecret: 'secret-x' }
 
 const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { env } } }) as unknown as H3Event
 /** binding が在る環境 (中身は `sendToScraperRelay` を mock しているので呼ばれない) */
@@ -272,20 +274,49 @@ describe('fetchYTimeRows — 倒さない失敗 (黙って運行の元にすり�
   })
 })
 
-describe('fetchYTimeRows — 勤怠を試さない呼び出し', () => {
-  it('★ relay を呼ばず、tenant が無くても今までの運行の GET だけを呼ぶ (倒した理由は持たない)', async () => {
-    routeUpstream({ alc: () => alcOk() })
-    const res = await fetchYTimeRows(withRelay(), INPUT, { tryKintai: false, tenantId: undefined, sharedSecret: 'secret-x' })
-    expect(sendToScraperRelayMock).not.toHaveBeenCalled()
-    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-export'])
-    expect(res).toMatchObject({ source: 'alc', sourceReason: null, rows: [{ date: '2025-03-01' }] })
+describe('fetchYTimeRows — 試さない呼び方は無い (Refs #1133 c1133-47)', () => {
+  it('★ 認可の結果 (`authorizeScraperRelay` の戻り値の形) をそのまま渡せば、relay を呼ぶ', async () => {
+    sendToScraperRelayMock.mockResolvedValue(relayOk())
+    routeUpstream({ rows: () => rowsOk(), alc: () => alcOk() })
+    const res = await fetchYTimeRows(withRelay(), INPUT, { sharedSecret: 'secret-x', tenantId: 'tenant-a' })
+    expect(sendToScraperRelayMock).toHaveBeenCalledTimes(1)
+    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-rows'])
+    expect(res.source).toBe('kintai')
   })
 
-  it('運行の GET の失敗は status と本文で投げる (本文が読めなければ statusText)', async () => {
+  it('倒した先の運行の GET で本文が読めなければ statusText を理由にする', async () => {
     routeUpstream({ alc: () => ({ ok: false, status: 502, statusText: 'Bad Gateway', text: async () => { throw new Error('x') } }) as unknown as Response })
-    const e = await rejection(fetchYTimeRows(withRelay(), INPUT, { tryKintai: false, tenantId: 'tenant-a', sharedSecret: 's' }))
+    const e = await rejection(fetchYTimeRows(eventWith({}), INPUT, KINTAI))
     expect(e.statusCode).toBe(502)
     expect(e.statusMessage).toBe('backend error: Bad Gateway')
+  })
+})
+
+describe('yTimeRowsInputFromBody — 2 つの route が共用する body の検証', () => {
+  it('★ 3 欄を読んで返す。body のほかの欄 (tenant_id・template_key) は読まない', () => {
+    expect(yTimeRowsInputFromBody({ driver_cd: '9001', from: '2025-01-01', to: '2025-01-31', tenant_id: 'tenant-b', template_key: 'templates/x.xlsx' }))
+      .toStrictEqual({ driverCd: '9001', from: '2025-01-01', to: '2025-01-31' })
+  })
+
+  it.each([
+    ['null', null],
+    ['文字列', 'x'],
+    ['配列', ['9001', '2025-01-01', '2025-01-31']],
+    ['空の object', {}],
+    ['driver_cd が空', { driver_cd: '', from: '2025-01-01', to: '2025-01-31' }],
+    ['driver_cd が数', { driver_cd: 9001, from: '2025-01-01', to: '2025-01-31' }],
+    ['from が無い', { driver_cd: '9001', to: '2025-01-31' }],
+    ['to が空', { driver_cd: '9001', from: '2025-01-01', to: '' }],
+  ])('★ %s は 400 (statusMessage は ASCII)', (_name, body) => {
+    let thrown: { statusCode?: number, statusMessage?: string } = {}
+    try {
+      yTimeRowsInputFromBody(body)
+    }
+    catch (e) {
+      thrown = e as typeof thrown
+    }
+    expect(thrown.statusCode).toBe(400)
+    expect(thrown.statusMessage).toBe('driver_cd / from / to are required')
   })
 })
 

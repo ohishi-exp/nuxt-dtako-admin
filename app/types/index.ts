@@ -417,3 +417,20 @@ export interface YTimeRowsResponse {
   warnings: string[]
   excluded: YTimeExcludedShift[]
 }
+
+/**
+ * この repo の `POST /api/y-time-rows` の応答から画面が読む欄 (Refs #1133 c1133-47)。
+ * 行は Excel (`POST /api/y-time-export`) と同じ util が作る。**乗務員の名前と期間は読まない** —
+ * 勤怠の元の応答には無いので、画面は名前を乗務員の一覧から、期間を入力から出す。
+ */
+export interface YTimeRowsPreview {
+  source: YTimeSource
+  /** 勤怠の元を試して運行の元へ倒した理由。倒していなければ null */
+  source_reason: YTimeSourceReason | null
+  rows: YTimeRow[]
+  warnings: string[]
+  /** 行を作れなかった勤務 (勤怠の元だけ。運行の元は空) */
+  excluded: YTimeExcludedShift[]
+  /** 勤務の記録が 1 本も無い月 `YYYY-MM` (勤怠の元だけ。運行の元は空) */
+  missing_months: string[]
+}

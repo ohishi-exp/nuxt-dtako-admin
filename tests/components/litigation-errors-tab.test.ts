@@ -22,7 +22,7 @@ import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
 
 const { api, saved } = vi.hoisted(() => ({
-  api: { getDrivers: vi.fn(), getYTimePreview: vi.fn(), getOperations: vi.fn() },
+  api: { getDrivers: vi.fn(), getYTimeRows: vi.fn(), getOperations: vi.fn() },
   saved: [] as { blob: Blob, name: string }[],
 }))
 
@@ -35,7 +35,7 @@ vi.mock('@ippoan/auth-client', () => ({ useAuth: () => ({ token: { value: 'jwt-t
 vi.mock('~/utils/api', async importOriginal => ({
   ...(await importOriginal<typeof import('~/utils/api')>()),
   getDrivers: api.getDrivers,
-  getYTimePreview: api.getYTimePreview,
+  getYTimeRows: api.getYTimeRows,
   getOperations: api.getOperations,
 }))
 
@@ -49,6 +49,8 @@ mockNuxtImport('useState', () => (key: string, init?: () => unknown) => {
 })
 
 import JSZip from 'jszip'
+import { ResponseFailure } from '~/utils/api-error'
+import { LITIGATION_CHECK_LABELS } from '~/utils/litigation-errors'
 const Page = (await import('~/pages/litigation.vue')).default
 
 const CASE = {
@@ -327,12 +329,14 @@ beforeEach(() => {
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
   api.getDrivers.mockResolvedValue([{ id: 'd1', driver_cd: '1078', driver_name: '甲野太郎' }])
-  // 1 月だけ勤務がある → 2 月は alc に運行 0 件
-  api.getYTimePreview.mockResolvedValue({
-    driver: { cd: '1078', name: '甲野太郎' },
-    period: { from: '2025-01-01', to: '2025-02-28' },
+  // 既定は運行の元へ倒した応答 (勤怠の記録が無い会社)。1 月だけ勤務がある → 2 月は alc に運行 0 件
+  api.getYTimeRows.mockResolvedValue({
+    source: 'alc',
+    source_reason: 'out_of_scope',
     rows: [{ date: '2025-01-10' }, { date: '2025-01-11' }],
     warnings: [],
+    excluded: [],
+    missing_months: [],
   })
   stubDollarFetch()
   stubFetch(() => new Response('{}', { status: 500 }))
@@ -364,7 +368,7 @@ describe('エラータブ: wage-snapshot を呼ばない', () => {
 describe('エラータブ: 3 状態の出し分け', () => {
   it('★ セルごとに 異常あり / 異常なし / 判定できない を出し、取れなかった月を「異常なし」にしない', async () => {
     const w = await openErrorsTabAndRun()
-    expect(api.getYTimePreview).toHaveBeenCalledWith('1078', '2025-01-01', '2025-02-28')
+    expect(api.getYTimeRows).toHaveBeenCalledWith(CASE.driverCds[0], '2025-01-01', '2025-02-28')
     // alc の運行
     expect(cell(w, '1078|2025-01', 'alcOps')).toContain('異常なし')
     expect(cell(w, '1078|2025-01', 'alcOps')).toContain('勤務日 2 日')
@@ -389,17 +393,155 @@ describe('エラータブ: 3 状態の出し分け', () => {
 
 describe('エラータブ: Y時間の欠けを ZIP なしで判定する', () => {
   it('★ プレビューの警告で Y時間に入らなかった運行がある月は、ZIP を作らなくても異常あり (他の月は異常なし)', async () => {
-    api.getYTimePreview.mockResolvedValue({
-      driver: { cd: '1078', name: '甲野太郎' },
-      period: { from: '2025-01-01', to: '2025-02-28' },
+    api.getYTimeRows.mockResolvedValue({
+      source: 'alc',
+      source_reason: 'out_of_scope',
       rows: [{ date: '2025-01-10' }, { date: '2025-01-11' }],
       warnings: ['2502030000000000001234: departure_at/return_at が不足、skip', '2025-01-10: 複数 segment 結合 (1 行に集約)'],
+      excluded: [],
+      missing_months: [],
     })
     const w = await openErrorsTabAndRun()
     expect(cell(w, '1078|2025-02', 'yTime')).toContain('異常あり')
     expect(cell(w, '1078|2025-02', 'yTime')).toContain('2502030000000000001234 (出庫/帰庫が無い)')
     // 「複数 segment 結合」は欠けではない (陰性対照)
     expect(cell(w, '1078|2025-01', 'yTime')).toContain('異常なし')
+    w.unmount()
+  })
+})
+
+describe('エラータブ: Y時間 の行の元 — 出力タブと同じ、勤怠の勤務の記録 (Refs #1133 c1133-47)', () => {
+  /** 案件の乗務員 (ファイル冒頭の案件のもの) */
+  const CD = CASE.driverCds[0]!
+  const rowKey = (month: string) => `${CD}|${month}`
+  const importButton = (w: VueWrapper, month: string) => w.find(`tr[data-row="${rowKey(month)}"] [data-testid="litigation-import"]`)
+  /** 勤怠の元の応答。1 月に 2 日・2 月は行が 0 で、行を作れなかった勤務が 2 月に 2 件 */
+  const KINTAI = {
+    source: 'kintai',
+    source_reason: null,
+    rows: [{ date: '2025-01-10' }, { date: '2025-01-11' }],
+    warnings: [],
+    excluded: [
+      { start: '2025-02-03 08:00:00', end: '2025-02-03 17:00:00', reason: 'no_non_working' },
+      { start: '2025-02-04 22:00:00', end: '2025-02-05 07:00:00', reason: 'overlap' },
+    ],
+    missing_months: [],
+  }
+
+  it('★ 1 列目の見出しは元を言わない「Y時間の勤務日」(表・件数の要約)。検知は区切りごとに新しい口を 1 回呼ぶ', async () => {
+    api.getYTimeRows.mockClear()
+    const w = await openErrorsTabAndRun()
+    expect(LITIGATION_CHECK_LABELS.alcOps).toBe('Y時間の勤務日')
+    expect(w.findAll('[data-testid="litigation-errors-table"] thead th').map(th => th.text())).toContain('Y時間の勤務日')
+    expect(w.findAll('[data-testid="litigation-errors-table"] thead th').map(th => th.text())).not.toContain('alc の運行')
+    expect(w.find('[data-testid="litigation-errors-summary"]').text()).toContain('Y時間の勤務日: 異常あり 1')
+    expect(api.getYTimeRows.mock.calls).toEqual([[CD, '2025-01-01', '2025-02-28']])
+    w.unmount()
+  })
+
+  it('★ 勤怠の元の検知: 文で元を言い、0 日の月に運行の取り込みのボタンを出さず、行を作れなかった勤務を「Y時間の欠け」に出す', async () => {
+    api.getYTimeRows.mockResolvedValue(KINTAI)
+    const w = await openErrorsTabAndRun()
+    expect(cell(w, rowKey('2025-01'), 'alcOps')).toContain('異常なし')
+    expect(cell(w, rowKey('2025-01'), 'alcOps')).toContain('勤務日 2 日 (勤怠の記録)')
+    expect(cell(w, rowKey('2025-02'), 'alcOps')).toContain('異常あり')
+    expect(cell(w, rowKey('2025-02'), 'alcOps')).toContain('勤怠の記録から作れた勤務日が 0 日')
+    expect(cell(w, rowKey('2025-02'), 'alcOps')).not.toContain('alc に運行が 0 件')
+    // 勤怠の元の 0 日は、運行を取り込んでも直らない
+    expect(importButton(w, '2025-02').exists()).toBe(false)
+    expect(importButton(w, '2025-01').exists()).toBe(false)
+    // 黙って「欠けなし」にしない
+    expect(cell(w, rowKey('2025-02'), 'yTime')).toContain('異常あり')
+    expect(cell(w, rowKey('2025-02'), 'yTime')).toContain('行を作れなかった勤務 2 件: まだ畳み直していない 1 件・別の勤務と時間が重なる 1 件 — 勤怠の畳み直しが要ります')
+    expect(cell(w, rowKey('2025-01'), 'yTime')).toContain('異常なし')
+    // 保存する検知結果は、元とその月の除外を持つ (kind とキーの名前は今までのまま)
+    const puts = calls.filter(c => c.url.startsWith('/restraint-api/litigation-checks') && c.method === 'PUT')
+    const items = puts.flatMap(c => (c.body as { items: { kind: string, key: string, payload: unknown }[] }).items).filter(it => it.kind === 'alcOps')
+    expect(items).toEqual([
+      { kind: 'alcOps', key: rowKey('2025-01'), payload: { ok: true, days: 2, dropped: [], source: 'kintai', excluded: [] } },
+      {
+        kind: 'alcOps',
+        key: rowKey('2025-02'),
+        payload: {
+          ok: true, days: 0, dropped: [], source: 'kintai',
+          excluded: [{ start: '2025-02-03 08:00:00', reason: 'no_non_working' }, { start: '2025-02-04 22:00:00', reason: 'overlap' }],
+        },
+      },
+    ])
+    w.unmount()
+  })
+
+  it('★ 運行の元の検知 (倒した応答): 今までどおり 0 件の月にだけ運行の取り込みのボタンを出す', async () => {
+    const w = await openErrorsTabAndRun()
+    expect(cell(w, rowKey('2025-01'), 'alcOps')).toContain('勤務日 2 日')
+    expect(cell(w, rowKey('2025-01'), 'alcOps')).not.toContain('(勤怠の記録)')
+    expect(cell(w, rowKey('2025-02'), 'alcOps')).toContain('alc に運行が 0 件 (Y時間の勤務日 0 日)')
+    expect(importButton(w, '2025-02').exists()).toBe(true)
+    expect(importButton(w, '2025-01').exists()).toBe(false)
+    // 欠けなしの文が指す列の名前は、いまの見出し
+    expect(cell(w, rowKey('2025-02'), 'yTime')).toContain('「Y時間の勤務日」の列を見てください')
+    w.unmount()
+  })
+
+  it('★ 勤怠の経路の失敗: util の 1 文をそのまま出し、判定できないにする (0 日とも「alc に未登録」とも言わない)', async () => {
+    api.getYTimeRows.mockRejectedValue(new ResponseFailure(502, {
+      error: true, statusCode: 502, statusMessage: 'kintai y-time rows failed (relay)',
+      message: '勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る)',
+      data: { source: 'kintai', stage: 'relay', status: 502 },
+    }))
+    const w = await openErrorsTabAndRun()
+    for (const m of ['2025-01', '2025-02']) {
+      expect(cell(w, rowKey(m), 'alcOps')).toContain('判定できない')
+      expect(cell(w, rowKey(m), 'alcOps')).toContain('502 勤怠の勤務の記録を読めませんでした (relay 502: 読めない月が在る)')
+      expect(cell(w, rowKey(m), 'alcOps')).not.toContain('未登録')
+      expect(cell(w, rowKey(m), 'yTime')).toContain('判定できない')
+      expect(importButton(w, m).exists()).toBe(false)
+    }
+    w.unmount()
+  })
+
+  it('★ 404 は元を見て言い分ける: 運行の経路の印 (data.upstream = alc) が在るときだけ「乗務員CD が alc に未登録」', async () => {
+    api.getYTimeRows.mockRejectedValue(new ResponseFailure(404, { error: true, statusCode: 404, statusMessage: 'backend error: driver_cd not found', data: { upstream: 'alc' } }))
+    const alc = await openErrorsTabAndRun()
+    expect(cell(alc, rowKey('2025-01'), 'alcOps')).toContain('乗務員CD が alc に未登録 (404)')
+    expect(cell(alc, rowKey('2025-01'), 'yTime')).toContain('乗務員CD が alc に未登録で Y時間を作れない')
+    alc.unmount()
+
+    api.getYTimeRows.mockRejectedValue(new ResponseFailure(404, {
+      error: true, statusCode: 404, message: '勤務の記録から Y時間 の行を作れませんでした (上流 404: no route)',
+      data: { source: 'kintai', stage: 'upstream', status: 404 },
+    }))
+    const kintai = await openErrorsTabAndRun()
+    expect(cell(kintai, rowKey('2025-01'), 'alcOps')).toContain('判定できない')
+    expect(cell(kintai, rowKey('2025-01'), 'alcOps')).toContain('勤務の記録から Y時間 の行を作れませんでした (上流 404: no route)')
+    expect(cell(kintai, rowKey('2025-01'), 'alcOps')).not.toContain('未登録')
+    expect(cell(kintai, rowKey('2025-01'), 'yTime')).not.toContain('未登録')
+    kintai.unmount()
+  })
+
+  it('★ 保存した旧い検知結果 (元と除外の欄なし) を開く: 捨てずに運行の元として出し、0 件の月に取り込みのボタンが出る。勤怠の元の保存には出ない', async () => {
+    const at = '2026-09-28T01:00:00.000Z'
+    storedItems = [
+      // 旧い形 (この欄ができる前の保存)
+      { kind: 'alcOps', key: rowKey('2025-01'), payload: { ok: true, days: 0, dropped: [] }, checkedAt: at },
+      // 新しい形 (勤怠の元)
+      { kind: 'alcOps', key: rowKey('2025-02'), payload: { ok: true, days: 0, dropped: [], source: 'kintai', excluded: [{ start: '2025-02-03 08:00:00', reason: 'no_non_working' }] }, checkedAt: at },
+    ]
+    api.getYTimeRows.mockClear()
+    const w = mount(Page, {
+      global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
+    })
+    await settle()
+    await buttonByText(w, '開く').trigger('click')
+    await buttonByText(w, 'エラー').trigger('click')
+    await settle()
+    // 検知を押していない (保存を読んだだけ)
+    expect(api.getYTimeRows).not.toHaveBeenCalled()
+    expect(cell(w, rowKey('2025-01'), 'alcOps')).toContain('alc に運行が 0 件 (Y時間の勤務日 0 日)')
+    expect(importButton(w, '2025-01').exists()).toBe(true)
+    expect(cell(w, rowKey('2025-02'), 'alcOps')).toContain('勤怠の記録から作れた勤務日が 0 日')
+    expect(importButton(w, '2025-02').exists()).toBe(false)
+    expect(cell(w, rowKey('2025-02'), 'yTime')).toContain('行を作れなかった勤務 1 件: まだ畳み直していない 1 件')
     w.unmount()
   })
 })
@@ -443,7 +585,7 @@ describe('取り込みボタン', () => {
         : Response.json({ error: '取得したデータが空の ZIP です (22 bytes) — その読取日に theearth 側のデータがありません' }, { status: 502 })
     })
     const w = await openErrorsTabAndRun()
-    const before = api.getYTimePreview.mock.calls.length
+    const before = api.getYTimeRows.mock.calls.length
     await w.find('tr[data-row="1078|2025-02"] [data-testid="litigation-import"]').trigger('click')
     await settle()
     const posts = calls.filter(c => c.url === '/restraint-api/litigation/alc-upload-driver')
@@ -459,7 +601,7 @@ describe('取り込みボタン', () => {
       '読取日 2025-03-01〜2025-03-31: その期間に運行なし (theearth にも無い)',
     ])
     // 取り込めたので、その月だけ読み直す
-    expect(api.getYTimePreview.mock.calls.slice(before)).toEqual([['1078', '2025-02-01', '2025-02-28']])
+    expect(api.getYTimeRows.mock.calls.slice(before)).toEqual([[CASE.driverCds[0], '2025-02-01', '2025-02-28']])
     expect(calls.filter(c => c.url.includes('/restraint-api/wage-snapshot'))).toHaveLength(0)
     w.unmount()
   })
@@ -467,13 +609,13 @@ describe('取り込みボタン', () => {
   it('★ 403 は「取り込みは admin / payroll のみ」と出し、翌月は呼ばない・読み直さない', async () => {
     stubFetch(() => Response.json({ error: '取り込みは admin / payroll のみ実行できます' }, { status: 403 }))
     const w = await openErrorsTabAndRun()
-    const before = api.getYTimePreview.mock.calls.length
+    const before = api.getYTimeRows.mock.calls.length
     await w.find('tr[data-row="1078|2025-02"] [data-testid="litigation-import"]').trigger('click')
     await settle()
     expect(calls.filter(c => c.url === '/restraint-api/litigation/alc-upload-driver')).toHaveLength(1)
     expect(w.find('tr[data-row="1078|2025-02"] [data-testid="litigation-import-result"]').text())
       .toBe('読取日 2025-02-01〜2025-02-28: 取り込みは admin / payroll のみ')
-    expect(api.getYTimePreview.mock.calls.length).toBe(before)
+    expect(api.getYTimeRows.mock.calls.length).toBe(before)
     w.unmount()
   })
 })
@@ -572,19 +714,19 @@ describe('エラータブ: 検知結果の保存と続きから', () => {
       { kind: 'unkoGaps', key: '1078|2025-02', payload: { ok: false, reason: '502 …' }, checkedAt: at },
       { kind: 'wageReport', key: '1078|2025-01', payload: rep, checkedAt: at },
     ]
-    api.getYTimePreview.mockClear()
+    api.getYTimeRows.mockClear()
     const w = await mountAndOpen()
     // 検知を押さなくても前回の結果が出る
     expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('異常なし')
     expect(cell(w, '1078|2025-01', 'invariants')).toContain('異常なし')
     expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('判定できない')
     expect(cell(w, '1078|2025-02', 'invariants')).toContain('未実行')
-    expect(api.getYTimePreview).not.toHaveBeenCalled()
+    expect(api.getYTimeRows).not.toHaveBeenCalled()
     // 取れていないのは 2 月のデジタコの突き合わせと 2 月の最低賃金の 2 件
     calls = []
     await buttonByText(w, '続きから (2 件)').trigger('click')
     await settle()
-    expect(api.getYTimePreview).not.toHaveBeenCalled()
+    expect(api.getYTimeRows).not.toHaveBeenCalled()
     expect(calls.filter(c => c.method === 'GET' && !c.url.startsWith('/restraint-api/litigation-checks')).map(c => c.url)).toEqual([
       '/restraint-api/kintai/onprem-month-operations?month=2025-02&driver_cd=1078',
       '/restraint-api/wage-report?month=2025-02&source=gcp',

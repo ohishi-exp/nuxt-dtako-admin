@@ -26,8 +26,12 @@ const { requireAuthMock, alcProxyFetchMock, sendToScraperRelayMock, readBodyMock
 }))
 vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 vi.mock('../../server/utils/alc-proxy', () => ({ alcProxyFetch: alcProxyFetchMock }))
-// 行を取る util (`server/utils/y-time-rows.ts`) は本物を通す。肩代わりするのはその先の relay と上流だけ
-vi.mock('../../server/utils/scraper-relay', () => ({ sendToScraperRelay: sendToScraperRelayMock }))
+// 行を取る util (`server/utils/y-time-rows.ts`) と、前置きの `authorizeScraperRelay` は本物を通す
+// (503 の文言・`requireAuth` の引数と回数をここで測るため)。肩代わりするのはその先の relay と上流だけ
+vi.mock('../../server/utils/scraper-relay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../server/utils/scraper-relay')>()),
+  sendToScraperRelay: sendToScraperRelayMock,
+}))
 vi.mock('~/utils/y-time-xlsx', () => ({
   writeYTimeRows: writeYTimeRowsMock,
   buildFilename: (cd: string, from: string, to: string) => `y-time_${cd}_${from}_${to}.xlsx`,
@@ -87,9 +91,18 @@ describe('POST /api/y-time-export — 認可 (Refs #988)', () => {
   it('INTERNAL_SHARED_SECRET 未設定なら 503 (auth を通す前に落ちる)', async () => {
     await expect(call(eventWith({ DTAKO_R2: templateR2() }))).rejects.toMatchObject({
       statusCode: 503,
-      statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET'),
+      // 前置きを `authorizeScraperRelay` に寄せても、文言は 1 文字も変わらない
+      statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です',
     })
     expect(requireAuthMock).not.toHaveBeenCalled()
+  })
+
+  it('★ role が admin / payroll でなければ 403 で、body も読まず relay も上流も叩かない', async () => {
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'viewer', tenant_id: 'tenant-a' })
+    await expect(call(eventWith(okEnv({ DTAKO_R2: templateR2(), SCRAPER_RELAY: { fetch: vi.fn() } })))).rejects.toMatchObject({ statusCode: 403 })
+    expect(readBodyMock).not.toHaveBeenCalled()
+    expect(sendToScraperRelayMock).not.toHaveBeenCalled()
+    expect(alcProxyFetchMock).not.toHaveBeenCalled()
   })
 
   it('cloudflare env そのものが無くても 503 (落ちない)', async () => {
@@ -149,12 +162,16 @@ describe('POST /api/y-time-export — 陽性対照 (塞いだだけで使えな�
       readBodyMock.mockResolvedValue(bad)
       await expect(call(eventWith(env))).rejects.toMatchObject({ statusCode: 400 })
     }
-    readBodyMock.mockResolvedValue({ ...BODY, template_key: 'vehicle-settings/4437/x.json' })
-    await expect(call(eventWith(env))).rejects.toMatchObject({
-      statusCode: 400,
-      statusMessage: expect.stringContaining('templates/'),
-    })
+    for (const key of ['vehicle-settings/4437/x.json', 7]) {
+      readBodyMock.mockResolvedValue({ ...BODY, template_key: key })
+      await expect(call(eventWith(env))).rejects.toMatchObject({
+        statusCode: 400,
+        statusMessage: expect.stringContaining('templates/'),
+      })
+    }
     expect(alcProxyFetchMock).not.toHaveBeenCalled()
+    // 認証は body の検証より前 (未ログイン + 不正な body が 400 にならない)
+    expect(requireAuthMock).toHaveBeenCalled()
   })
 
   it('上流エラーはその status と本文で loud fail する (本文が読めなければ statusText)', async () => {
@@ -340,6 +357,8 @@ describe('POST /api/y-time-export — 行の元 (勤怠の勤務の記録、Refs
       expect.anything(), { sharedSecret: 'secret' }, '/kintai-relay/y-time-shifts',
       { driver_cd: '0001', from: '2026-07-01', to: '2026-07-31', tenant_id: 'tenant-a' },
     )
+    // relay へ渡すのは secret だけ (認可の結果の tenant を relay の関門の引数に混ぜない)
+    expect(Object.keys(sendToScraperRelayMock.mock.calls[0]![1] as object)).toEqual(['sharedSecret'])
     // 認証は 1 回だけ (relay の定型の認証を重ねて呼ばない)
     expect(requireAuthMock).toHaveBeenCalledTimes(1)
   })
@@ -375,18 +394,31 @@ describe('POST /api/y-time-export — 行の元 (勤怠の勤務の記録、Refs
     expect(writeYTimeRowsMock).not.toHaveBeenCalled()
   })
 
-  it('★ period_rewrite の無い呼び出しは relay を呼ばず、認証結果に tenant が無くても今までどおり運行の元で作る', async () => {
-    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
-    await call(eventWith(relayEnv()))
-    expect(sendToScraperRelayMock).not.toHaveBeenCalled()
-    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-export'])
-    expect(headersSet()).toMatchObject({ 'x-y-time-source': 'alc' })
+  it('★ period_rewrite の無い呼び出し (Y時間 のページ) も勤怠の元を試す: relay を呼び、勤怠の行で作る。期間は振り直さない (Refs #1133 c1133-47)', async () => {
+    // BODY は period_rewrite を持たない。binding を立てているので、倒れずに relay まで届く
+    kintaiUpstream()
+    const res = await call(eventWith(relayEnv()))
+    expect(res).toBe(XLSX_BYTES)
+    expect(sendToScraperRelayMock).toHaveBeenCalledTimes(1)
+    expect(sendToScraperRelayMock).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ sharedSecret: 'secret' }), '/kintai-relay/y-time-shifts',
+      { driver_cd: '0001', from: '2026-07-01', to: '2026-07-31', tenant_id: 'tenant-a' },
+    )
+    expect(upstreamPaths()).toEqual(['/api/dtako/y-time-rows'])
+    expect(writeYTimeRowsMock.mock.calls[0]![1]).toBe(ROWS)
+    expect(headersSet()).toMatchObject({ 'x-y-time-source': 'kintai', 'x-y-time-missing-months': '2026-08' })
     expect(headersSet()).not.toHaveProperty('x-y-time-source-reason')
+    // period_rewrite は「テンプレの期間を振り直すか」だけ
+    expect(writeYTimeRowsMock.mock.calls[0]![2]).toEqual({ clearPeriod: { from: '2026-07-01', to: '2026-07-31' } })
+    expect(requireAuthMock).toHaveBeenCalledTimes(1)
   })
 
-  it('period_rewrite: true で認証結果に tenant が無ければ 500 (relay も上流も呼ばない)', async () => {
+  it.each([
+    ['period_rewrite: true', REWRITE],
+    ['period_rewrite 無し', BODY],
+  ])('認証結果に tenant が無ければ 500 (relay も上流も呼ばない): %s', async (_name, body) => {
     requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
-    readBodyMock.mockResolvedValue(REWRITE)
+    readBodyMock.mockResolvedValue(body)
     await expect(call(eventWith(relayEnv()))).rejects.toMatchObject({ statusCode: 500, data: { source: 'kintai', stage: 'auth' } })
     expect(sendToScraperRelayMock).not.toHaveBeenCalled()
     expect(alcProxyFetchMock).not.toHaveBeenCalled()

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { describeApiError, describeCaughtError, describeFetchThrow, describeListFailure, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
+import { caughtErrorStatus, describeApiError, describeCaughtError, describeFetchThrow, describeListFailure, describeResponseFailure, isAlcDriverNotFound, pickBodyReason, ResponseFailure } from '~/utils/api-error'
 import { marginSummarySaveNote } from '~/utils/margin-r2'
 
 describe('describeApiError', () => {
@@ -715,5 +715,50 @@ describe('describeListFailure — 4 画面 (daily-hours/operations/restraint-rep
     const e = new Error('Unexpected token \'<\' … is not valid JSON')
     expect(describeCaughtError(e, RETRY)).toBe(describeApiError(e))
     expect(describeListFailure(e, RETRY)).toBe(`${describeApiError(e)} — ${RETRY}`)
+  })
+})
+
+describe('ResponseFailure — status と本文を持つ失敗 (Refs #1133 c1133-47)', () => {
+  it('★ message は本文の理由 (error → message → statusMessage)。status と本文をそのまま持つ', () => {
+    const body = { error: true, statusCode: 403, statusMessage: 'administrator role is required', message: '管理者の権限が必要です' }
+    const e = new ResponseFailure(403, body)
+    expect(e).toBeInstanceOf(Error)
+    expect(e.name).toBe('ResponseFailure')
+    expect(e.message).toBe('管理者の権限が必要です')
+    expect(e.statusCode).toBe(403)
+    expect(e.data).toBe(body)
+  })
+
+  it('★ 本文に理由が無ければそう言う。status は入れない (画面で status が 2 回出ない)', () => {
+    expect(new ResponseFailure(502, null).message).toBe('応答に理由が入っていません')
+    expect(new ResponseFailure(500, { error: true }).message).toBe('応答に理由が入っていません')
+    expect(describeCaughtError(new ResponseFailure(503, null), 'やり直してください')).toBe(
+      '503 応答に理由が入っていません — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからやり直してください',
+    )
+  })
+
+  it('★ 既存の読み方がそのまま通る: caughtErrorStatus は statusCode を、describeCaughtError は本文の理由と次の一手を出す', () => {
+    const e = new ResponseFailure(403, { error: true, statusMessage: 'administrator role is required', message: '管理者の権限が必要です' })
+    expect(caughtErrorStatus(e)).toBe(403)
+    expect(describeCaughtError(e, 'やり直してください')).toBe(
+      '403 管理者の権限が必要です — この操作の権限がありません (ログインし直しても変わりません)。管理者に許可の追加を依頼してください',
+    )
+  })
+})
+
+describe('isAlcDriverNotFound — 「乗務員CD が alc に未登録」は 404 かつ本文の印のときだけ (Refs #1133 c1133-47)', () => {
+  it('★ 404 かつ data.upstream = alc だけが true', () => {
+    expect(isAlcDriverNotFound(404, { data: { upstream: 'alc' } })).toBe(true)
+  })
+
+  it.each([
+    ['404 だが印が無い (R2 にテンプレが無い)', 404, { statusMessage: 'template not found in R2' }],
+    ['404 だが勤怠の経路の失敗', 404, { data: { source: 'kintai', stage: 'upstream', status: 404 } }],
+    ['404 で本文なし', 404, null],
+    ['404 で本文が文字列', 404, 'not found'],
+    ['印は在るが 502', 502, { data: { upstream: 'alc' } }],
+    ['応答なし', null, null],
+  ])('★ %s は false (404 だけで未登録と言わない)', (_name, status, body) => {
+    expect(isAlcDriverNotFound(status, body)).toBe(false)
   })
 })

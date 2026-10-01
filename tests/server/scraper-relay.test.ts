@@ -56,6 +56,19 @@ describe('authorizeScraperRelay', () => {
       .rejects.toMatchObject({ statusCode: 503 })
   })
 
+  it('★ 戻り値に認証結果の tenant を持つ (在れば tenantId、認証結果に無ければ undefined。補わない)', async () => {
+    requireAuthMock.mockResolvedValue({ sub: 'user-1', role: 'admin', tenant_id: 'tenant-a' })
+    expect(await authorizeScraperRelay(eventWith({ INTERNAL_SHARED_SECRET: 'secret-x' })))
+      .toStrictEqual({ sharedSecret: 'secret-x', tenantId: 'tenant-a' })
+
+    requireAuthMock.mockResolvedValue({ sub: 'user-1', role: 'payroll' })
+    const auth = await authorizeScraperRelay(eventWith({ INTERNAL_SHARED_SECRET: 'secret-x' }))
+    expect(auth.sharedSecret).toBe('secret-x')
+    expect(auth.tenantId).toBeUndefined()
+    // tenant を持たせても、認証は 1 回のまま
+    expect(requireAuthMock).toHaveBeenCalledTimes(2)
+  })
+
   it('requireAuth の throw はそのまま伝播する', async () => {
     requireAuthMock.mockRejectedValue(Object.assign(new Error('unauthorized'), { statusCode: 401 }))
     await expect(authorizeScraperRelay(eventWith({ INTERNAL_SHARED_SECRET: 'secret-x' })))

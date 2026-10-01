@@ -41,16 +41,22 @@ interface ScraperRelayEnv {
   NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
-/** {@link authorizeScraperRelay} の戻り値。secret を {@link sendToScraperRelay} へ運ぶだけ。 */
+/**
+ * {@link authorizeScraperRelay} の戻り値。secret を {@link sendToScraperRelay} へ運ぶのに加えて、
+ * 認証済みの身元の tenant を持つ — relay の応答の tenant と突き合わせる呼び手
+ * (`server/utils/y-time-rows.ts` の 1 社固定の認可) が、`requireAuth` をもう 1 回呼ばずに済むように。
+ */
 export interface ScraperRelayAuth {
   readonly sharedSecret: string
+  /** `requireAuth` の結果の `tenant_id`。認証結果に無ければ undefined (補わない) */
+  readonly tenantId?: string
 }
 
 /**
  * secret 解決 → `requireAuth` → `assertAllowedRole` まで。
  * `INTERNAL_SHARED_SECRET` 未設定は 503、未ログインは `requireAuth` の例外がそのまま
  * 伝播 (通常 401)、role 不許可は 403。通れば {@link sendToScraperRelay} に渡す
- * `sharedSecret` を返す。
+ * `sharedSecret` と、認証結果の `tenantId` を返す。
  */
 export async function authorizeScraperRelay(event: H3Event): Promise<ScraperRelayAuth> {
   const env = cfEnv<ScraperRelayEnv>(event)
@@ -64,7 +70,7 @@ export async function authorizeScraperRelay(event: H3Event): Promise<ScraperRela
       : 'https://auth.ippoan.org'
   const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
   assertAllowedRole(auth)
-  return { sharedSecret }
+  return { sharedSecret, tenantId: auth.tenant_id }
 }
 
 export interface CallScraperRelayOptions {

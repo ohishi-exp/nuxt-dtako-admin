@@ -12,10 +12,11 @@ import type {
   SwitchTenantResponse,
   ScrapeRequest, ScrapeHistoryItem,
   CalendarResponse,
-  YTimeExportResponse,
+  YTimeRowsPreview,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
-import { caughtErrorStatus, describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
+import { caughtErrorStatus, describeFetchThrow, describeResponseFailure, pickBodyReason, ResponseFailure } from '~/utils/api-error'
+import { parseYTimeRowsPreview } from '~/utils/litigation-output'
 import { parseViewerComps } from '~/utils/dtako-comps'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
@@ -166,21 +167,32 @@ export async function getDrivers(): Promise<Driver[]> {
   return request<Driver[]>('/api/drivers')
 }
 
-// --- Y時間 Export (preview / 計算結果取得) ---
+// --- Y時間 の行 (xlsx 化前の JSON) ---
 
 /**
- * Y時間 集計結果 (xlsx 化前) を取得する。
- * `/api/y-time-export` (Worker server route → xlsx) と異なり、こちらは
- * backend (rust-alc-api) の `/api/dtako/y-time-export` を直接叩いて JSON を返す。
- * R2 binding 不要、xlsx 生成不要。プレビュー画面で使う。
+ * Y時間 の行を JSON で取る (`server/api/y-time-rows.post.ts`、Refs #1133 c1133-47)。
+ * 訴訟準備のエラータブの「検知を実行」と、Y時間 のページのプレビューが使う。
+ * **行は Excel (`POST /api/y-time-export`) と同じ util が作る** — 元は勤怠の勤務の記録で、
+ * 勤怠の記録が無い会社・勤怠の設定が無い環境だけ運行 (応答の `source` / `source_reason`)。
+ *
+ * 上流を直に叩かず server route を通す: 勤怠の元の行は relay の共有 secret が要り、ブラウザは持てない。
+ * cookie / Bearer の扱いは `postNet780Archive` と同じ。`request()` は backend 向けなので使わない。
+ *
+ * 非 2xx は {@link ResponseFailure} (status と本文つき) で投げる — 呼び手が `describeCaughtError` で
+ * 1 文にし、`isAlcDriverNotFound` で「乗務員CD が alc に未登録」を見分ける。**2xx でも形の合わない
+ * 応答は投げる** (読めなかった応答を 0 件として返さない)。
  */
-export async function getYTimePreview(
-  driverCd: string,
-  from: string,
-  to: string,
-): Promise<YTimeExportResponse> {
-  const params = new URLSearchParams({ driver_cd: driverCd, from, to })
-  return request<YTimeExportResponse>(`/api/dtako/y-time-export?${params.toString()}`)
+export async function getYTimeRows(driverCd: string, from: string, to: string): Promise<YTimeRowsPreview> {
+  const res = await fetchOrDescribe('/api/y-time-rows', {
+    method: 'POST',
+    headers: serverRouteHeaders(),
+    body: JSON.stringify({ driver_cd: driverCd, from, to }),
+  })
+  const body = await res.json().catch(() => null) as unknown
+  if (!res.ok) throw new ResponseFailure(res.status, body)
+  const preview = parseYTimeRowsPreview(body)
+  if (!preview) throw new Error('Y時間 の行の応答が読めない形でした')
+  return preview
 }
 
 // --- 運行の変更記録 (訴訟準備「変更記録」タブ、Refs #1133 c1133-6) ---
@@ -882,10 +894,10 @@ export async function postDriverMasterRun(compId: string): Promise<DriverMasterR
   return buildDriverMasterRunOutcome(res.status, res.ok, body, compId)
 }
 
-/** front worker の server route (`/api/netprint/*`) 向けヘッダ。同一オリジンなので
+/** front worker の server route (`/api/netprint/*`・`/api/y-time-rows`) 向けヘッダ。同一オリジンなので
  * cookie (`logi_auth_token`) は自動で載るが、cookie の無い経路でも通るよう
  * `Authorization: Bearer` も明示する (`postNet780Archive` と同じ扱い)。 */
-function netprintRouteHeaders(): Record<string, string> {
+function serverRouteHeaders(): Record<string, string> {
   const token = currentAccessToken()
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (token) headers['authorization'] = `Bearer ${token}`
@@ -910,7 +922,7 @@ async function readNetprintTargetsResponse(res: Response, label: string): Promis
  * Refs #874 の 12)。応答は KV `netprint_targets` の生 JSON 配列 (未設定は `[]`)。
  */
 export async function getNetprintTargets(): Promise<unknown> {
-  const res = await fetchOrDescribe('/api/netprint/targets', { headers: netprintRouteHeaders() })
+  const res = await fetchOrDescribe('/api/netprint/targets', { headers: serverRouteHeaders() })
   return readNetprintTargetsResponse(res, '通知先の設定')
 }
 
@@ -921,7 +933,7 @@ export async function getNetprintTargets(): Promise<unknown> {
 export async function putNetprintTargets(targets: NetprintTargetPayloadItem[]): Promise<unknown> {
   const res = await fetchOrDescribe('/api/netprint/targets', {
     method: 'PUT',
-    headers: netprintRouteHeaders(),
+    headers: serverRouteHeaders(),
     body: JSON.stringify(targets),
   })
   return readNetprintTargetsResponse(res, '通知先の保存')

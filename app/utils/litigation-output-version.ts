@@ -17,6 +17,7 @@
  *   一部だけ「未実行」や 0 件に見せない
  */
 import { fmtJstDateTime } from './litigation-changes'
+import { Y_TIME_SOURCES, Y_TIME_SOURCE_REASONS } from './litigation-errors'
 import type { LitigationOutputChunk, LitigationOutputResult, LitigationOutputStatus, YTimeSourceInfo } from './litigation-output'
 import type { YTimeSource, YTimeSourceReason } from '~/types'
 
@@ -74,9 +75,6 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every(s => typeof s === 'string')
 }
 
-const SOURCES: readonly unknown[] = ['kintai', 'alc'] satisfies YTimeSource[]
-const SOURCE_REASONS: readonly unknown[] = ['out_of_scope', 'not_configured'] satisfies YTimeSourceReason[]
-
 /**
  * 行の元の 5 欄 (Refs #1133 c1133-46)。**どの欄も無くてよい** — この欄ができる前に保存した版は
  * 1 つも持たず、運行から作ったものとして読む (版の形の番号は上げていない)。
@@ -86,11 +84,11 @@ function parseSourceInfo(raw: Record<string, unknown>): YTimeSourceInfo | false 
   const { source, sourceReason, excludedReasons, excluded, missingMonths } = raw
   const info: YTimeSourceInfo = {}
   if (source !== undefined) {
-    if (!SOURCES.includes(source)) return false
+    if (!Y_TIME_SOURCES.includes(source)) return false
     info.source = source as YTimeSource
   }
   if (sourceReason !== undefined) {
-    if (!SOURCE_REASONS.includes(sourceReason)) return false
+    if (!Y_TIME_SOURCE_REASONS.includes(sourceReason)) return false
     info.sourceReason = sourceReason as YTimeSourceReason
   }
   if (excludedReasons !== undefined) {

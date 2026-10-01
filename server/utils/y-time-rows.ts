@@ -12,9 +12,11 @@
  * そのまま上流へ渡し、上流が返した `rows` をそのまま返す (並べ替えない・丸めない・足さない)。
  * wage report と同じ元から作るための口で、2 つ目の計算を置かない。
  *
- * ## 勤怠の元を試すかは呼び手が決める (`tryKintai`)
+ * ## どの呼び出しも、まず勤怠の元を試す (Refs #1133 c1133-47)
  *
- * 試さない呼び出しは今までの運行の経路そのまま (relay を呼ばず、`tenantId` も見ない)。
+ * 呼び手は 2 つの route — Excel を作る `POST /api/y-time-export` (訴訟準備の出力タブと Y時間 のページ) と、
+ * 行を JSON で返す `POST /api/y-time-rows` (訴訟準備のエラータブの検知と Y時間 のページのプレビュー)。
+ * 同じ人・同じ期間なら、どの画面も同じ元の行を見る。運行の元になるのは下の 3 つの形のときだけ。
  *
  * ## 運行の経路へ倒すのは 3 つの形だけ
  *
@@ -36,7 +38,7 @@
  *    違えば 500 で、勤務を返さず上流も呼ばない
  *
  * 認証結果に `tenant_id` が無いときは照合できないので、relay も上流も呼ばず 500
- * (運行の経路にも倒さない)。
+ * (運行の経路にも倒さない。照合できない状態を通さない)。
  *
  * ## 失敗の運び方
  *
@@ -80,13 +82,27 @@ export interface YTimeRowsInput {
   to: string
 }
 
+/** `authorizeScraperRelay` の戻り値がそのまま渡せる形 */
 export interface YTimeRowsOptions {
-  /** 勤怠の元を試すか。false なら今までの運行の経路 */
-  tryKintai: boolean
-  /** `requireAuth` の結果の `tenant_id` (勤怠を試すときだけ見る) */
-  tenantId: string | undefined
+  /** `requireAuth` の結果の `tenant_id` */
+  tenantId?: string
   /** 呼び手が解決済みの共有 secret (relay の関門に渡す) */
   sharedSecret: string
+}
+
+/**
+ * route の body から `driver_cd` / `from` / `to` を読む (`POST /api/y-time-export` と
+ * `POST /api/y-time-rows` が共用。同じ検証を 2 つ持たない)。3 つとも空でない文字列でなければ 400。
+ * **日付の形と期間の長さはここで見ない** — relay と上流がそれぞれ見る (規則の写しを置かない)。
+ */
+export function yTimeRowsInputFromBody(body: unknown): YTimeRowsInput {
+  const b = isRecord(body) ? body : {}
+  const text = (v: unknown) => (typeof v === 'string' ? v : '')
+  const input = { driverCd: text(b.driver_cd), from: text(b.from), to: text(b.to) }
+  if (!input.driverCd || !input.from || !input.to) {
+    throw createError({ statusCode: 400, statusMessage: 'driver_cd / from / to are required' })
+  }
+  return input
 }
 
 export interface YTimeRowsResult {
@@ -125,7 +141,7 @@ function kintaiError(
   })
 }
 
-/** 運行の経路 (今までの GET)。非 2xx は今までと同じ形 (`data.upstream = 'alc'`) で投げる。 */
+/** 運行の経路 (GET)。非 2xx は `data.upstream = 'alc'` を付けて、上流の status のまま投げる。 */
 async function rowsFromAlc(event: H3Event, input: YTimeRowsInput, sourceReason: YTimeSourceReason | null): Promise<YTimeRowsResult> {
   // #434 step 3 (方式 B): rust-alc-api を直叩きせず auth-worker `/alc-proxy` に委譲する。
   // introspect / ACL / OIDC mint / identity 注入は auth-worker 側で行われる。
@@ -237,11 +253,10 @@ async function rowsFromShifts(event: H3Event, input: YTimeRowsInput, shifts: unk
 }
 
 /**
- * Y時間 の行と、その元を返す。呼び手 (route) は返った `rows` をそのまま Excel に書く。
- * 認証 (`requireAuth`) と role の確認は呼び手が済ませてから呼ぶ。
+ * Y時間 の行と、その元を返す。呼び手 (route) は返った `rows` をそのまま Excel に書くか、そのまま返す。
+ * 認証 (`requireAuth`) と role の確認は呼び手が済ませてから呼ぶ (`authorizeScraperRelay`)。
  */
 export async function fetchYTimeRows(event: H3Event, input: YTimeRowsInput, opts: YTimeRowsOptions): Promise<YTimeRowsResult> {
-  if (!opts.tryKintai) return rowsFromAlc(event, input, null)
   if (!opts.tenantId) {
     throw kintaiError(500, 'auth', 'ログイン中の会社を特定できないため、勤怠の勤務の記録を読みませんでした')
   }
@@ -267,7 +282,8 @@ function headerToken(s: string, fallback: string): string {
 /**
  * 行の元を応答ヘッダにする (本文が binary の route 用)。**値は ASCII の決まった語だけ**
  * (日本語をヘッダに入れると 500 になる)。読む側は `app/utils/litigation-output.ts` の
- * `yTimeSourceFromHeaders`。
+ * `yTimeSourceFromHeaders` (訴訟準備の出力タブと Y時間 のページのダウンロードが使う)。
+ * 本文が JSON の route (`POST /api/y-time-rows`) はヘッダを使わず、結果を本文で返す。
  *
  * - `x-y-time-source`: `kintai` | `alc`
  * - `x-y-time-source-reason`: 倒したときだけ
