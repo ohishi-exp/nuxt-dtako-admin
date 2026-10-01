@@ -1684,3 +1684,156 @@ describe('印刷: 開いているタブの中身だけを紙面に出す (Refs #
     w.unmount()
   })
 })
+
+describe('出力タブ: 月ごとの時間 (wage report、Refs #1133 c1133-36)', () => {
+  // 値はすべて架空。night は statutory の内数。overtimeMinutes = 時間外 + 週40超過
+  const HOURS_WAGE = {
+    minutes: { statutory: 9000, overtime: 3000, night: 240, overtimeNight: 420, nonLegalHoliday: 300, nonLegalHolidayNight: 60, legalHoliday: 480, legalHolidayNight: 30, weekly40Excess: 510 },
+    overtimeMinutes: 3510,
+    nightOvertimeMinutes: 420,
+  }
+  const AT = '2026-09-28T01:00:00.000Z'
+  const stored = (month: string, rows: unknown[], checkedAt = AT) => ({
+    kind: 'wageReport',
+    key: `1078|${month}`,
+    payload: { ok: true, value: { month, restraint_source: 'gcp', no_data_drivers: [], warnings: [], rows } },
+    checkedAt,
+  })
+  const wageRow = (extra: Record<string, unknown> = {}) => ({ summary: { driverCd: '1078', workDays: 20 }, wage: HOURS_WAGE, invariants: OK_INV, ...extra })
+  const mountPage = () => mount(Page, {
+    global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, DriverSearchSelect: true, USelectMenu: true } },
+  })
+  async function mountAndOpenOutput() {
+    const w = mountPage()
+    await settle()
+    await buttonByText(w, '開く').trigger('click')
+    await settle()
+    return w
+  }
+  const hours = (w: VueWrapper) => w.find('[data-testid="litigation-hours"]')
+  const monthRows = (w: VueWrapper) => hours(w).findAll('[data-hours="month"]').map(tr => tr.findAll('td').map(td => td.text()))
+  const printHours = (w: VueWrapper) => w.find('[data-testid="litigation-print-sheet"] [data-testid="litigation-print-hours"]')
+
+  it('★ 「ZIP を作る」の前から、保存済みの wage report が在る月の時間が出る (Excel も wage report も取りに行かない)。未取得の月は「未取得」で合計に入れない', async () => {
+    storedItems = [stored('2025-01', [wageRow()])]
+    const w = await mountAndOpenOutput()
+    expect(hours(w).find('[data-hours="heading"]').text()).toBe('甲野太郎 (1078) 2025-01〜2025-02')
+    expect(monthRows(w)).toEqual([
+      ['2025-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
+      ['2025-02', '未取得'],
+    ])
+    expect(hours(w).find('[data-hours="total"]').findAll('td').map(td => td.text())).toEqual([
+      '合計 (1 か月ぶん)', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00',
+    ])
+    expect(hours(w).find('[data-hours="checked-at"]').text()).toBe('最終取得 2026-09-28 10:00')
+    expect(hours(w).find('[data-hours="needs-fetch"]').text()).toBe('エラータブ (または給与比較) で拘束の材料を取ると出ます')
+    // 出力の結果には依らない: 区切りの表はまだ「未実行」のまま
+    expect(w.find('[data-testid="litigation-output-table"]').text()).toContain('未実行')
+    expect(calls.filter(c => c.url.startsWith('/api/y-time-export') || c.url.startsWith('/restraint-api/wage-report'))).toEqual([])
+    // 紙面にも同じ表が出る
+    expect(printHours(w).findAll('[data-hours="month"]').map(tr => tr.findAll('td').map(td => td.text()))).toEqual(monthRows(w))
+    expect(printHours(w).find('[data-hours="total"]').text()).toContain('合計 (1 か月ぶん)')
+    w.unmount()
+  })
+
+  it('★ 取れたがその月の行が無い月は「拘束の記録なし」、欠測の月は「欠測」— 「取ると出ます」は出さず、値の在る月が無い冊は紙面に刷らない', async () => {
+    storedItems = [stored('2025-01', []), stored('2025-02', [wageRow({ restraint_missing: true })])]
+    const w = await mountAndOpenOutput()
+    expect(monthRows(w)).toEqual([['2025-01', '拘束の記録なし'], ['2025-02', '欠測']])
+    expect(hours(w).find('[data-hours="needs-fetch"]').exists()).toBe(false)
+    expect(hours(w).text()).not.toContain('取ると出ます')
+    expect(hours(w).find('[data-hours="total"]').exists()).toBe(false)
+    expect(printHours(w).exists()).toBe(false)
+    // 陽性対照: 紙面そのものは出ている
+    expect(w.find('[data-testid="litigation-print-output"]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('wage report が 1 つも無い案件は、画面は全月「未取得」+ 案内、紙面には表を刷らない', async () => {
+    const w = await mountAndOpenOutput()
+    expect(monthRows(w)).toEqual([['2025-01', '未取得'], ['2025-02', '未取得']])
+    expect(hours(w).find('[data-hours="needs-fetch"]').exists()).toBe(true)
+    expect(hours(w).find('[data-hours="checked-at"]').exists()).toBe(false)
+    expect(printHours(w).exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('★ 保存済みの結果を読み込み中は、全月を「未取得」に見せずその状態を言う。読めたら表になる', async () => {
+    let release!: () => void
+    storeGetGate = new Promise<void>((r) => { release = r })
+    storedItems = [stored('2025-01', [wageRow()])]
+    const w = mountPage()
+    await settle()
+    await buttonByText(w, '開く').trigger('click')
+    await settle()
+    expect(hours(w).find('[data-hours="notice"]').text()).toBe('保存済みの結果を読み込み中…')
+    expect(hours(w).text()).not.toContain('未取得')
+    expect(hours(w).find('table').exists()).toBe(false)
+    release()
+    await settle()
+    expect(hours(w).find('[data-hours="notice"]').exists()).toBe(false)
+    expect(monthRows(w)[0]).toEqual(['2025-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'])
+    w.unmount()
+  })
+
+  it('★ 保存済みの結果を読めなかったときも、全月「未取得」ではなく読めなかった旨を出す', async () => {
+    storeGetFails = true
+    const w = await mountAndOpenOutput()
+    expect(hours(w).find('[data-hours="notice"]').text()).toContain('保存済みの検知結果を読めませんでした')
+    expect(hours(w).text()).not.toContain('未取得')
+    expect(hours(w).find('table').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('★ 給与比較の「法定時間内」「残業時間」と同じ値が表に出る (同じ wage report)。取りに行って失敗した月は「取得に失敗」+ 理由', async () => {
+    wageExtra = { '2025-01': { ...HOURS_WAGE, hourlyRate: 1100, amounts: { statutory: 165000 } } }
+    const w = await openErrorsTabAndRun()
+    await buttonByText(w, '給与比較').trigger('click')
+    await settle()
+    const salary = w.find('[data-salary-row="1078|2025-01"]')
+    const baseBasis = salary.find('[data-salary-cell="base"] [data-salary-line="basis"]').text()
+    const overtimeBasis = salary.find('[data-salary-cell="overtime"] [data-salary-line="basis"]').text()
+    expect(baseBasis).toBe('単価マスタ 1,100 円/h × 法定時間内 150h00m')
+    expect(overtimeBasis).toBe('最低賃金ベース × 残業時間 65h30m')
+    await buttonByText(w, '出力').trigger('click')
+    await settle()
+    const [jan, feb] = monthRows(w)
+    // 給与比較は `150h00m`、表は `150:00` — 表記だけが違う
+    const asColon = (s: string) => /(\d+)h(\d{2})m$/.exec(s)!.slice(1).join(':')
+    expect(jan!.slice(1, 3)).toEqual([asColon(baseBasis), asColon(overtimeBasis)])
+    expect(jan!.slice(1, 3)).toEqual(['150:00', '65:30'])
+    expect(feb![0]).toBe('2025-02')
+    expect(feb![1]).toMatch(/^取得に失敗: .*504/)
+    expect(hours(w).find('[data-hours="needs-fetch"]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it.each<[string, Record<string, unknown>]>([
+    ['集計つき', { kingaku: [{ from: '2025-01-01', to: '2025-01-31', statutoryIn: 60, statutoryOut: 6239, over60: null, holiday: 0, night: 30, total: 9600 }] }],
+    ['集計できなかった理由つき', { kingakuError: '集計できなかった' }],
+    ['集計の形が壊れている', { kingaku: {} }],
+  ])('★ 古い版 (結果に Excel の式を写した時間の集計を持つ) を戻しても落ちず、結果は戻り、表は wage report のまま: %s', async (_name, legacy) => {
+    storedItems = [stored('2025-01', [wageRow()])]
+    storedVersions = [{
+      versionId: 'ver-old',
+      createdAt: '2026-09-29T01:30:00.000Z',
+      createdBy: 'someone@example.com',
+      files: [],
+      results: {
+        v: 1,
+        chunks: [{ driverCd: '1078', from: '2025-01-01', to: '2025-02-28' }],
+        results: [{ driverCd: '1078', from: '2025-01-01', to: '2025-02-28', status: 'ok', rows: 41, missingDates: [], missingCount: 0, warnings: [], warningsCount: 0, message: '41 行', ...legacy }],
+        changes: { finished: true, rows: 0 },
+      },
+    }]
+    const w = await mountAndOpenOutput()
+    expect(w.find('[data-testid="litigation-output-restored"]').text()).toContain('2026-09-29 10:30 に出力して保存した結果を表示しています')
+    expect(w.find('[data-testid="litigation-output-restore-notice"]').exists()).toBe(false)
+    expect(w.find('[data-testid="litigation-output-table"]').text()).toContain('41 行')
+    // 版の中の古い集計 (法外残業 103:59) は出ない。表は wage report の値
+    expect(monthRows(w)[0]).toEqual(['2025-01', '150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'])
+    expect(w.text()).not.toContain('103:59')
+    expect(w.text()).not.toContain('集計できなかった')
+    w.unmount()
+  })
+})

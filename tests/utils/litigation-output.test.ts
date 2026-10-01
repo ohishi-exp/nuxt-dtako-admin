@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  buildLitigationKingakuBooks,
+  buildLitigationHoursBooks,
   buildLitigationZipSummary,
   buildLitigationOutputChunks,
   countLitigationResults,
@@ -15,12 +15,14 @@ import {
   litigationResultFromHeaders,
   litigationZipFilename,
   LITIGATION_EMPTY_MESSAGE,
-  LITIGATION_KINGAKU_COLUMNS,
+  LITIGATION_HOURS_COLUMNS,
   LITIGATION_NOT_FOUND_MESSAGE,
   type LitigationOutputChunk,
   type LitigationOutputResult,
 } from '~/utils/litigation-output'
-import { encodeYKingakuHeader, type YKingakuMonth } from '~/utils/y-kingaku'
+import type { LitigationFetched } from '~/utils/litigation-errors'
+import { compareSalaryMonth } from '~/utils/salary-compare'
+import type { WageReportResponse, WageReportRow, WageRow } from '~/utils/restraint-wage-view'
 
 function headers(h: Record<string, string>) {
   return new Headers(h)
@@ -216,102 +218,177 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
   })
 })
 
-describe('Y金額 (時間の行) — 応答ヘッダの畳みと冊ごとの表 (Refs #1133 c1133-31)', () => {
-  const month = (from: string, to: string, over: Partial<YKingakuMonth> = {}): YKingakuMonth => ({
-    from, to, statutoryIn: 65, statutoryOut: 3725, over60: null, holiday: 480, night: 90, total: 12345, ...over,
-  })
-  const MONTHS = [month('2024-06-01', '2024-06-30'), month('2024-07-01', '2024-07-31', { statutoryIn: 0, holiday: 0 })]
-  const ok = (extra: Partial<LitigationOutputResult> = {}): LitigationOutputResult => ({
-    ...litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10' })), ...extra,
+describe('月ごとの時間の表 — 給与比較と同じ wage report の月の区分から作る (Refs #1133 c1133-36)', () => {
+  // 値はすべて架空。night は statutory の内数 (総労働時間には足さない)
+  const MINUTES: WageRow['minutes'] = {
+    statutory: 9000, overtime: 3000, night: 240, overtimeNight: 420,
+    nonLegalHoliday: 300, nonLegalHolidayNight: 60, legalHoliday: 480, legalHolidayNight: 30, weekly40Excess: 510,
+  }
+  function wageRow(driverCd: string, over: { minutes?: unknown, wage?: Record<string, unknown>, row?: Partial<WageReportRow> } = {}): WageReportRow {
+    const minutes = (over.minutes === undefined ? MINUTES : over.minutes) as WageRow['minutes']
+    return {
+      summary: { driverCd, driverName: '架空 太郎', workDays: 22, workingMinutes: 13800, days: [] },
+      pay_kubun: 2,
+      wage: {
+        minutes,
+        amounts: { statutory: 180000 },
+        // overtimeMinutes = 時間外 + 週40超過、nightOvertimeMinutes = 時間外深夜 (relay が付ける)
+        overtimeMinutes: 3510,
+        nightOvertimeMinutes: 420,
+        minWageOvertimePay: 14000,
+        minWageNightOvertimePay: 1000,
+        ...over.wage,
+      },
+      ...over.row,
+    } as unknown as WageReportRow
+  }
+  const got = (month: string, rows: WageReportRow[]): LitigationFetched<WageReportResponse> =>
+    ({ ok: true, value: { month, rows, no_data_drivers: [], warnings: [], restraint_source: 'gcp' } })
+  const chunksOf = (fromMonth: string, toMonth: string, driverCd = '9101') =>
+    buildLitigationOutputChunks({ fromMonth, toMonth, driverCds: [driverCd] })
+  const NONE = new Map<string, string>()
+
+  it('列は wage report の区分の並び (「法内残業」は出さない)', () => {
+    expect(LITIGATION_HOURS_COLUMNS).toEqual(['法定時間内', '法外残業', 'うち月60h超', '法定外休日', '法定休日', '深夜 (内数)', '総労働時間'])
   })
 
-  it('★ 集計のヘッダを月度の配列に畳む', () => {
-    const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10', 'x-y-time-kingaku': encodeYKingakuHeader(MONTHS) }))
-    expect(r.kingaku).toEqual(MONTHS)
-    expect(r).not.toHaveProperty('kingakuError')
-  })
-
-  it('★ ヘッダが無ければ欄そのものを持たない (集計を返さない呼び出し・版の結果は今までと同じ形)', () => {
-    const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10' }))
-    expect(r).not.toHaveProperty('kingaku')
-    expect(r).not.toHaveProperty('kingakuError')
-    expect(litigationResultFromFailure(CHUNK, 500, null, '失敗')).not.toHaveProperty('kingaku')
-  })
-
-  it('★ 集計できなかった理由のヘッダは、復号して理由として持つ', () => {
-    const r = litigationResultFromHeaders(CHUNK, headers({
-      'x-y-time-rows': '10', 'x-y-time-kingaku-error': encodeURIComponent('要素!F5 (法定休日の曜日) が 日〜土 の 1 文字でない'),
-    }))
-    expect(r.kingakuError).toBe('要素!F5 (法定休日の曜日) が 日〜土 の 1 文字でない')
-    expect(r).not.toHaveProperty('kingaku')
-    expect(r.status).toBe('ok')
-  })
-
-  it('★ 壊れた集計のヘッダは 0 として読まず、読めなかったと言う', () => {
-    for (const raw of ['%', 'x', encodeURIComponent('{"a":1}')]) {
-      const r = litigationResultFromHeaders(CHUNK, headers({ 'x-y-time-rows': '10', 'x-y-time-kingaku': raw }))
-      expect(r).not.toHaveProperty('kingaku')
-      expect(r.kingakuError).toBe('サーバーが返した集計が読めなかった')
-    }
-  })
-
-  it('列の見出しは Y金額 シートの時間の行と同じ並び', () => {
-    expect(LITIGATION_KINGAKU_COLUMNS).toEqual(['法内残業', '法外残業', '月60h超', '休日労働', '深夜労働', '総労働時間'])
-  })
-
-  it('★ 冊ごとに、賃金月度の行 (H:MM、24 時超えもそのまま) と合計行を作る。月 60h 超が不適用なら「不適用」', () => {
-    const books = buildLitigationKingakuBooks([CHUNK], [ok({ kingaku: MONTHS })])
-    expect(books).toEqual([{
-      driverCd: CHUNK.driverCd,
-      label: '2024-06〜2025-05',
-      rows: [
-        { period: '2024-06-01〜2024-06-30', cells: ['1:05', '62:05', '不適用', '8:00', '1:30', '205:45'], partial: false },
-        { period: '2024-07-01〜2024-07-31', cells: ['0:00', '62:05', '不適用', '0:00', '1:30', '205:45'], partial: false },
-      ],
-      total: { period: '合計', cells: ['1:05', '124:10', '不適用', '8:00', '3:00', '411:30'], partial: false },
+  it('★ 区分 → 列: 法外残業 = 時間外 + 時間外深夜 + 週40超過、深夜は 4 区分の内数、総労働時間は night を除く 8 区分の和', () => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-06'), new Map([['9101|2024-06', got('2024-06', [wageRow('9101')])]]), NONE)
+    expect(book!.rows).toEqual([{
+      month: '2024-06',
+      // 150:00 / 3000+420+510 / 3930−3600 / 300+60 / 480+30 / 240+420+60+30 / 9000+3000+420+510+300+60+480+30
+      cells: ['150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'],
       note: null,
     }])
+    expect(book!.total).toEqual({ month: '合計 (1 か月ぶん)', cells: ['150:00', '65:30', '5:30', '6:00', '8:30', '12:30', '230:00'], note: null })
+    expect(book).toMatchObject({ driverCd: '9101', label: '2024-06〜2024-06', valueMonths: 1, needsFetch: false, checkedAtText: null })
   })
 
-  it('月 60h 超を適用する冊は時間で出し、合計も足す', () => {
-    const books = buildLitigationKingakuBooks([CHUNK], [ok({
-      kingaku: [month('2024-06-01', '2024-06-30', { over60: 125 }), month('2024-07-01', '2024-07-31', { over60: 0 })],
-    })])
-    expect(books[0]!.rows.map(r => r.cells[2])).toEqual(['2:05', '0:00'])
-    expect(books[0]!.total!.cells[2]).toBe('2:05')
+  it('★ 「法定時間内」「法外残業」は、同じ wage report の行を給与比較 (compareSalaryMonth) に通した 法定時間内・残業時間 と同じ分数', () => {
+    const report = wageRow('9101')
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-06'), new Map([['9101|2024-06', got('2024-06', [report])]]), NONE)
+    const compared = compareSalaryMonth(
+      [{ driverCd: '9101', cdKey: '9101', company: '0200', driverName: '架空 太郎', month: '2024-07', amounts: { 基本給: 200000 }, reportedTotal: 200000, rates: { base: 10000, overtime: 1500 } }] as unknown as Parameters<typeof compareSalaryMonth>[0],
+      [report],
+      { items: { 基本給: 'base' } } as unknown as Parameters<typeof compareSalaryMonth>[2],
+      '2024-06',
+    ).rows[0]!
+    expect([compared.statutoryMinutes, compared.overtimeMinutes]).toEqual([9000, 3930])
+    const hm = (min: number) => `${Math.floor(min / 60)}:${String(min % 60).padStart(2, '0')}`
+    expect(book!.rows[0]!.cells.slice(0, 2)).toEqual([hm(compared.statutoryMinutes), hm(compared.overtimeMinutes)])
   })
 
-  it('★ 冊の期間からはみ出す月度 (締め日が月の途中) には印を付ける', () => {
-    const books = buildLitigationKingakuBooks([CHUNK], [ok({
-      kingaku: [month('2024-05-21', '2024-06-20'), month('2024-06-21', '2024-07-20'), month('2025-05-21', '2025-06-20')],
-    })])
-    expect(books[0]!.rows.map(r => r.partial)).toEqual([true, false, true])
-    expect(books[0]!.total!.partial).toBe(false)
-  })
-
-  it('★ 集計が無い冊は黙って落とさず、理由を言う (表は作らない)', () => {
-    const note = (extra: Partial<LitigationOutputResult>) => {
-      const [book] = buildLitigationKingakuBooks([CHUNK], [ok(extra)])
-      expect(book!.rows).toEqual([])
-      expect(book!.total).toBeNull()
-      return book!.note
-    }
-    expect(note({ kingakuError: '要素!G19 (締め日) が「末」でも 1〜31 の日でもない' }))
-      .toBe('集計なし: 要素!G19 (締め日) が「末」でも 1〜31 の日でもない')
-    expect(note({})).toBe('集計なし: サーバーが集計を返さなかった')
-    expect(note({ kingaku: [] })).toBe('集計なし: Y時間 シートに書けた日が 1 日も無い')
-  })
-
-  it('未実行の冊と、Excel を作れなかった冊 (0 件・未登録・失敗) は出さない', () => {
-    const chunks = buildLitigationOutputChunks({ fromMonth: '2024-06', toMonth: '2028-05', driverCds: [CHUNK.driverCd] })
-    expect(chunks).toHaveLength(4)
-    const books = buildLitigationKingakuBooks(chunks, [
-      null,
-      litigationResultFromHeaders(chunks[1]!, headers({ 'x-y-time-rows': '0', 'x-y-time-kingaku': encodeYKingakuHeader([]) })),
-      litigationResultFromFailure(chunks[2]!, 404, { data: { upstream: 'alc' } }, ''),
-      { ...ok({ kingaku: [month('2027-06-01', '2027-06-30')] }), from: chunks[3]!.from, to: chunks[3]!.to },
+  it('★ 月 60h 超: 適用前の月 (〜2023-03) は「不適用」、適用後は超えたぶんだけ (超えていなければ 0:00)。合計は適用される月の超過ぶんだけ', () => {
+    const under = wageRow('9101', { wage: { overtimeMinutes: 3000, nightOvertimeMinutes: 0 } })
+    const books = buildLitigationHoursBooks(chunksOf('2023-03', '2023-05'), new Map([
+      ['9101|2023-03', got('2023-03', [wageRow('9101')])],
+      ['9101|2023-04', got('2023-04', [wageRow('9101')])],
+      ['9101|2023-05', got('2023-05', [under])],
+    ]), NONE)
+    expect(books[0]!.rows.map(r => [r.month, r.cells[1], r.cells[2]])).toEqual([
+      ['2023-03', '65:30', '不適用'],
+      ['2023-04', '65:30', '5:30'],
+      ['2023-05', '50:00', '0:00'],
     ])
-    expect(books.map(b => b.label)).toEqual(['2027-06〜2028-05'])
-    expect(buildLitigationKingakuBooks(chunks, [])).toEqual([])
+    // 法外残業 65:30 + 65:30 + 50:00 / 60h 超は 2023-04 の 5:30 だけ
+    expect(books[0]!.total!.cells.slice(1, 3)).toEqual(['181:00', '5:30'])
+  })
+
+  it('適用される月が 1 つも無い冊の合計は「不適用」', () => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2023-02', '2023-03'), new Map([
+      ['9101|2023-02', got('2023-02', [wageRow('9101')])],
+      ['9101|2023-03', got('2023-03', [wageRow('9101')])],
+    ]), NONE)
+    expect(book!.total!.cells[2]).toBe('不適用')
+    expect(book!.total!.month).toBe('合計 (2 か月ぶん)')
+  })
+
+  it('★ 月の状態は 4 つ — 未取得 / 取得に失敗 / 拘束の記録なし / 欠測。値の在る月だけを合計し、合計行に月数を出す', () => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-11'), new Map<string, LitigationFetched<WageReportResponse>>([
+      ['9101|2024-06', got('2024-06', [wageRow('9101')])],
+      // 2024-07 はキーなし (未取得)
+      ['9101|2024-08', { ok: false, reason: '504 (架空の理由)' }],
+      ['9101|2024-09', got('2024-09', [])],
+      ['9101|2024-10', got('2024-10', [wageRow('9101', { row: { restraint_missing: true } })])],
+      ['9101|2024-11', got('2024-11', [wageRow('9101')])],
+    ]), NONE)
+    expect(book!.rows.map(r => [r.month, r.note, r.cells.length])).toEqual([
+      ['2024-06', null, 7],
+      ['2024-07', '未取得', 0],
+      ['2024-08', '取得に失敗: 504 (架空の理由)', 0],
+      ['2024-09', '拘束の記録なし', 0],
+      ['2024-10', '欠測', 0],
+      ['2024-11', null, 7],
+    ])
+    // 欠測の月 (区分は入っている) も 0 時間としても実値としても足さない: 2 か月ぶん = 230:00 × 2
+    expect(book!.total).toEqual({ month: '合計 (2 か月ぶん)', cells: ['300:00', '131:00', '11:00', '12:00', '17:00', '25:00', '460:00'], note: null })
+    expect(book).toMatchObject({ valueMonths: 2, needsFetch: true })
+  })
+
+  it('★ 「拘束の記録なし」「欠測」だけの冊は needsFetch が false (取り直しても同じなので「取ると出ます」を出さない)。値の在る月が無ければ合計行も無い', () => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-09', '2024-10'), new Map([
+      ['9101|2024-09', got('2024-09', [])],
+      ['9101|2024-10', got('2024-10', [wageRow('9101', { row: { restraint_missing: true } })])],
+    ]), NONE)
+    expect(book).toMatchObject({ needsFetch: false, valueMonths: 0, total: null })
+    // 陽性対照: 未取得の月だけの冊は true
+    expect(buildLitigationHoursBooks(chunksOf('2024-09', '2024-09'), new Map(), NONE)[0]).toMatchObject({ needsFetch: true, valueMonths: 0, total: null })
+  })
+
+  it.each<[string, Parameters<typeof wageRow>[1]]>([
+    ['区分そのものが無い', { minutes: null }],
+    ['区分が欠けている (法定時間内だけの古い形)', { minutes: { statutory: 9000 } }],
+    ['区分が数でない', { minutes: { ...MINUTES, night: '240' } }],
+    ['区分が NaN', { minutes: { ...MINUTES, legalHoliday: Number.NaN } }],
+    ['残業時間 (時間外 + 週40超過) が無い', { wage: { overtimeMinutes: undefined } }],
+    ['時間外深夜の時間が数でない', { wage: { nightOvertimeMinutes: null } }],
+  ])('区分が読めない形の行は落ちずに「取得に失敗」と同じ扱い (合計に入れない・取り直しの対象): %s', (_name, over) => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-07'), new Map([
+      ['9101|2024-06', got('2024-06', [wageRow('9101', over)])],
+      ['9101|2024-07', got('2024-07', [wageRow('9101')])],
+    ]), NONE)
+    expect(book!.rows[0]).toEqual({ month: '2024-06', cells: [], note: '取得に失敗: 保存された区分が読めない形' })
+    expect(book).toMatchObject({ valueMonths: 1, needsFetch: true })
+    expect(book!.total!.cells[6]).toBe('230:00')
+  })
+
+  it('★ 冊ごとに、その冊の月・その乗務員の wage report だけを引く (「ZIP を作る」の結果には依らず、全部の冊を出す)', () => {
+    const chunks = chunksOf('2024-01', '2025-01')
+    const books = buildLitigationHoursBooks(chunks, new Map([
+      ['9101|2024-12', got('2024-12', [wageRow('9101')])],
+      ['9101|2025-01', got('2025-01', [wageRow('9101', { minutes: { ...MINUTES, statutory: 6000 } })])],
+      // 別の乗務員のキーと、応答に混ざった別の乗務員の行は引かない
+      ['9102|2024-01', got('2024-01', [wageRow('9102')])],
+      ['9101|2024-02', got('2024-02', [wageRow('9102')])],
+    ]), NONE)
+    expect(books.map(b => [b.label, b.rows.length, b.valueMonths])).toEqual([['2024-01〜2024-12', 12, 1], ['2025-01〜2025-01', 1, 1]])
+    expect(books[0]!.rows.map(r => r.note ?? r.cells[0])).toEqual([
+      '未取得', '拘束の記録なし', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '未取得', '150:00',
+    ])
+    expect(books[1]!.rows).toEqual([{ month: '2025-01', cells: ['100:00', '65:30', '5:30', '6:00', '8:30', '12:30', '180:00'], note: null }])
+    expect(buildLitigationHoursBooks([], new Map(), NONE)).toEqual([])
+  })
+
+  it('★ 乗務員CD は給与比較と同じ比べ方 (数にして比べる): 応答の行の CD に先頭の 0 が付いていても値として出る (「拘束の記録なし」にしない)', () => {
+    const [book] = buildLitigationHoursBooks(chunksOf('2024-06', '2024-07'), new Map([
+      ['9101|2024-06', got('2024-06', [wageRow('09101')])],
+      // 陽性対照: 別の乗務員の行は引かない
+      ['9101|2024-07', got('2024-07', [wageRow('19101')])],
+    ]), NONE)
+    expect(book!.rows.map(r => r.note ?? r.cells[6])).toEqual(['230:00', '拘束の記録なし'])
+    expect(book!.valueMonths).toBe(1)
+  })
+
+  it('最終取得は、その冊の月の wage report を取った時刻のうちいちばん新しいもの (JST)。ほかの検知の時刻・ほかの冊の月は見ない', () => {
+    const chunks = chunksOf('2024-01', '2025-01')
+    const checkedAt = new Map([
+      ['wageReport|9101|2024-03', '2026-09-30T15:10:00.000Z'],
+      ['wageReport|9101|2024-05', '2026-10-01T01:02:00.000Z'],
+      ['wageReport|9101|2024-04', '2026-09-29T00:00:00.000Z'],
+      ['alcOps|9101|2024-06', '2026-10-02T00:00:00.000Z'],
+      ['wageReport|9102|2024-06', '2026-10-03T00:00:00.000Z'],
+    ])
+    const books = buildLitigationHoursBooks(chunks, new Map(), checkedAt)
+    expect(books.map(b => b.checkedAtText)).toEqual(['2026-10-01 10:02', null])
   })
 })

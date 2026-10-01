@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs, TimecardKosokuState, WageInvariantCheck, WageReportResponse } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, fmtRatePerHour, groupMinWageRows, isMonthlyOvertimeOver60h, isOver60hPremiumMonth, OVERTIME_OVER60H_EFFECTIVE_FROM, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, fmtRatePerHour, groupMinWageRows, isMonthlyOvertimeOver60h, isOver60hPremiumMonth, OVERTIME_OVER60H_EFFECTIVE_FROM, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthlyOvertimeMinutes, monthlyOvertimeOver60hMinutes, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -515,6 +515,20 @@ describe('fmtYen が `-0` を出さない (Refs #843)', () => {
     expect(fmtYen(50000)).toBe('50,000')
     expect(fmtYen(null)).toBe('-')
     expect(fmtYen(undefined)).toBe('-')
+  })
+})
+
+describe('monthlyOvertimeMinutes / monthlyOvertimeOver60hMinutes (給与比較と訴訟準備の時間の表が共有する式、Refs #1133)', () => {
+  it('残業時間 = (時間外 + 週40超過) + 時間外深夜', () => {
+    expect(monthlyOvertimeMinutes({ overtimeMinutes: 3510, nightOvertimeMinutes: 420 })).toBe(3930)
+    expect(monthlyOvertimeMinutes({ overtimeMinutes: 0, nightOvertimeMinutes: 0 })).toBe(0)
+  })
+
+  it('★ 月 60h を超えたぶんだけを返す (ちょうど 60h・未満は 0)。猶予期間の月は 0 ではなく null', () => {
+    expect(monthlyOvertimeOver60hMinutes({ overtimeMinutes: 3510, nightOvertimeMinutes: 420 }, '2023-04')).toBe(330)
+    expect(monthlyOvertimeOver60hMinutes({ overtimeMinutes: MONTHLY_OVERTIME_THRESHOLD_MINUTES, nightOvertimeMinutes: 0 }, '2023-04')).toBe(0)
+    expect(monthlyOvertimeOver60hMinutes({ overtimeMinutes: 1200, nightOvertimeMinutes: 300 }, '2024-06')).toBe(0)
+    expect(monthlyOvertimeOver60hMinutes({ overtimeMinutes: 3510, nightOvertimeMinutes: 420 }, '2023-03')).toBeNull()
   })
 })
 

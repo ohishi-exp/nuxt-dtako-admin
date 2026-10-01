@@ -398,32 +398,29 @@ fail することが本番で発覚 → revert。
 |---|---|
 | `app/pages/y-time-export.vue` | UI、`fetch('/api/y-time-export')` で server route 呼び出し |
 | `server/api/y-time-export.post.ts` | backend GET → R2 テンプレ → JSZip xlsx 生成 |
-| `app/utils/y-time-xlsx.ts` | JSZip single-pass writer (PR #30)。`yTimeRowInputCells` (1 行が入力列 F〜O のどのセルに何を書くか) と `readSheetCells` (シートのセルを型つきで読む) もここ |
-| `app/utils/y-kingaku.ts` | **Y金額 シートの時間の行**を Excel を開かずに出す pure ロジック (Refs #1133 c1133-31、100% gate)。テンプレの Y時間 / Y金額 の式を列ごとに写したもの |
+| `app/utils/y-time-xlsx.ts` | JSZip single-pass writer (PR #30)。`yTimeRowInputCells` (1 行が入力列 F〜O のどのセルに何を書くか) もここ |
 | `app/utils/api.ts` | `getYTimePreview()` (preview ボタン用、sync GET) |
 
-### Y金額 の時間の行 (訴訟準備の出力タブ、Refs #1133 c1133-31)
+### 訴訟準備の出力タブの「月ごとの時間」は wage report から作る (Refs #1133 c1133-36)
 
 このシステムは Y時間 シートの入力列 (C・F〜O) を書くだけで、**式は Excel が開いたときに計算する**。
-訴訟準備 (`/litigation`) の出力タブは、Y金額 シートの時間の行 (賃金月度ごとの 法内残業 / 法外残業 /
-月60h超 / 休日労働 / 深夜労働 / 総労働時間) を冊ごとの表にして画面と紙面に出すので、
-`app/utils/y-kingaku.ts` が**テンプレの式を列ごとに写して**計算する。
+訴訟準備 (`/litigation`) の出力タブと紙面の時間の表は、**Excel の式を写さず**、給与比較タブと同じ
+保存済みの wage report (`errWageReports`、キー `乗務員CD|YYYY-MM`) の月の区分から作る
+(`buildLitigationHoursBooks` = `app/utils/litigation-output.ts`、部品 `LitigationMonthlyHoursTable.vue`)。
 
-- **正本はテンプレの式。** 式を変えたテンプレを PUT したら `y-kingaku.ts` も写し直す。
-  relay の賃金計算 (`restraint-wage.ts`) は規則が違う (締め日が無い・週の超過の計上月が違う) ので使わない
-- 届け方は `POST /api/y-time-export` の応答ヘッダ `x-y-time-kingaku` (月度の配列の JSON を URI encode)。
-  **`period_rewrite: true` のときだけ**付く。新しい route も追加の通信も無い
-- 入力は「シートに実際に書いた値」(`writeYTimeRows` の `inputDays`)。上流の行そのままではない
-  (テンプレに行が無い日は入らず、同じ日付の行はセルごとに後勝ち)。xlsx に書くセルと同じ
-  `yTimeRowInputCells` から作る
-- 設定 (法定休日の曜日・週の制限時間・週の起算曜日・曜日ごとの所定・締め日・月 60h 規制の適用) は
-  テンプレの `要素` シートから**セルの型で**読む。読めない・想定外の値は既定値で計算せず、
-  `x-y-time-kingaku-error` に理由を載せて画面は「集計なし: …」と出す
-- 集計が例外で落ちても xlsx は返す (route は集計ブロックだけを try/catch で囲み、理由を同じ
-  `x-y-time-kingaku-error` に載せる)。集計は付け足しで、主機能は Excel を返すこと
-- **1 冊 = 1 ブック**: 週の累計は冊の初日から数え直し、冊の期間の外の日は月度に入らない (Excel と同じ)。
-  締め日が月の途中だと冊の最初と最後の月度が欠けるので、画面は ※ を付けて断る
-- 金額の行 (賃金単価・既払額は Excel で手入力)、`/y-time-export` 画面への表示、X金額 / J金額 は出していない
+- 行は**暦月** (締め日ではまとめ直さない — 保存した wage report は日別を持たない)。
+  列は 法定時間内 / 法外残業 / うち月60h超 / 法定外休日 / 法定休日 / 深夜 (内数) / 総労働時間。
+  **`night` は `statutory` の内数**なので総労働時間に足さない。「法内残業」は wage report に無いので出さない
+- 法外残業と月 60h 超は `restraint-wage-view.ts` の `monthlyOvertimeMinutes` / `monthlyOvertimeOver60hMinutes`
+  (給与比較の残業時間・`isMonthlyOvertimeOver60h` と同じ式)。**ここに 2 つ目の計算を置かない**
+- 月の状態は 4 つ: 未取得 / 取得に失敗 (理由つき) / 拘束の記録なし (取り直しても同じ) / 欠測。
+  値の在る月だけを合計し、「拘束の材料を取ると出ます」は未取得か取得に失敗の月が在るときだけ出す
+- **「ZIP を作る」の結果にも、保存した版の表示にも依らない** (案件を開いた時点の wage report の値。
+  冊ごとに最終取得の時刻を出す)。紙面は値の在る月が 1 つでも在る冊だけ
+- 以前の、テンプレの式を写した front の計算と、それを `POST /api/y-time-export` の応答ヘッダで運ぶ仕組みは消した。
+  保存済みの版の results に残る `kingaku` / `kingakuError` は読まずに無視する
+  (`litigation-output-version.ts` の `parseResult`)
+- Excel の中の式の結果とは一致しないことが在る (Excel に書く行の作り方が別。統一は別の作業)
 
 ## NET780 ビューア (`/net780` ページ)
 
@@ -763,7 +760,7 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
     **案件を開くと** 版の一覧を読み、最新の版の結果を戻す。戻すのは `chunks` の写しが今の区切りと完全に一致するときだけ
     (違えば「案件の期間・乗務員を変えたため…」、形が読めなければ別の文)。**戻した結果は `restoredOutput` に持ち `outputResults` には入れない** —
     `outputResults` はエラータブ (`errorRows`・`chunkWarnings`) が読むので、出力タブの表示 (`shownOutputResults` → 区切りの表・`zipSummary`・
-    `kingakuBooks`・紙面) だけが戻した結果を読む。一覧より先に「ZIP を作る」を押したら読み戻しを捨てる。
+    紙面) だけが戻した結果を読む (「月ごとの時間」の表は版に依らず wage report から作る — 上の Y時間 の節)。一覧より先に「ZIP を作る」を押したら読み戻しを捨てる。
     版の一覧は「この版の ZIP をダウンロード」(ファイルを 1 つずつ取って組む。1 つでも取れなければ作らない。ZIP の組み立ては `zipOutputFiles` を共用)
     と「この版の結果を表示」。**一覧の GET が 403 のときはエラーにせず 1 行** (「出力の保存と履歴は admin / payroll のみ使えます」)。
     テストは `tests/components/litigation-output-versions.test.ts` (直列は応答を手で止める stub で測る)。mount する他のテストの stub は

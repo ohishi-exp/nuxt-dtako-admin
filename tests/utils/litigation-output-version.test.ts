@@ -22,13 +22,8 @@ import {
   parseLitigationOutputVersions,
 } from '~/utils/litigation-output-version'
 import { buildLitigationOutputChunks, type LitigationOutputResult } from '~/utils/litigation-output'
-import type { YKingakuMonth } from '~/utils/y-kingaku'
 
 const CHUNKS = buildLitigationOutputChunks({ fromMonth: '2024-01', toMonth: '2025-01', driverCds: ['1001'] })
-
-const KINGAKU: YKingakuMonth[] = [
-  { from: '2024-01-01', to: '2024-01-31', statutoryIn: 60, statutoryOut: 120, over60: null, holiday: 0, night: 30, total: 9600 },
-]
 
 const OK: LitigationOutputResult = {
   driverCd: '1001',
@@ -41,7 +36,6 @@ const OK: LitigationOutputResult = {
   warnings: ['架空の警告'],
   warningsCount: 3,
   message: '12 行',
-  kingaku: KINGAKU,
 }
 
 const FAILED: LitigationOutputResult = {
@@ -55,7 +49,6 @@ const FAILED: LitigationOutputResult = {
   warnings: [],
   warningsCount: 0,
   message: '500 (架空の理由)',
-  kingakuError: '集計できなかった',
 }
 
 /** relay を通った後の形 (JSON にして読み直す) */
@@ -78,9 +71,24 @@ describe('buildLitigationOutputSnapshot / parseLitigationOutputSnapshot', () => 
     expect(parseLitigationOutputSnapshot(roundTrip(snapshot))).toEqual(snapshot)
   })
 
-  it('失敗の結果 (rows が null・集計できなかった理由つき) と、集計が空の結果も読み戻る', () => {
-    const snapshot = buildLitigationOutputSnapshot(CHUNKS, [{ ...OK, kingaku: [] }, FAILED], { finished: false, rows: 0 })
+  it('失敗の結果 (rows が null) も読み戻る', () => {
+    const snapshot = buildLitigationOutputSnapshot(CHUNKS, [OK, FAILED], { finished: false, rows: 0 })
     expect(parseLitigationOutputSnapshot(roundTrip(snapshot))).toEqual(snapshot)
+  })
+
+  // c1133-31 の頃の版は、結果に時間の集計 (`kingaku` / `kingakuError`) を持つ。時間の表は wage report から
+  // 作るようになった (c1133-36) ので、読まずに無視する — 形が壊れていても版ごと弾かない
+  it.each<[string, Record<string, unknown>]>([
+    ['集計つき', { kingaku: [{ from: '2024-01-01', to: '2024-01-31', statutoryIn: 60, statutoryOut: 120, over60: null, holiday: 0, night: 30, total: 9600 }] }],
+    ['集計できなかった理由つき', { kingakuError: '集計できなかった' }],
+    ['集計が配列でない', { kingaku: {} }],
+    ['集計の行の欄が欠けている', { kingaku: [{ from: '2024-01-01' }] }],
+    ['理由が文字列でない', { kingakuError: 1 }],
+  ])('★ 古い版の結果に残る時間の集計は無視して読める (戻した結果には入れない): %s', (_name, legacy) => {
+    const snapshot = buildLitigationOutputSnapshot(CHUNKS, [OK, FAILED], { finished: true, rows: 4 })
+    const stored = roundTrip(snapshot) as { results: Record<string, unknown>[] }
+    stored.results[0] = { ...stored.results[0], ...legacy }
+    expect(parseLitigationOutputSnapshot(stored)).toEqual(snapshot)
   })
 
   it('組み立ては渡した配列を写す (後から元の配列を書き換えても保存する値は変わらない)', () => {
@@ -117,10 +125,6 @@ describe('buildLitigationOutputSnapshot / parseLitigationOutputSnapshot', () => 
     ['書けなかった日の数が小数', s => ({ ...s, results: [{ ...s.results[0], missingCount: 1.5 }, s.results[1]] })],
     ['警告が配列でない', s => ({ ...s, results: [{ ...s.results[0], warnings: null }, s.results[1]] })],
     ['警告の数が無い', s => ({ ...s, results: [{ ...s.results[0], warningsCount: undefined }, s.results[1]] })],
-    ['集計できなかった理由が文字列でない', s => ({ ...s, results: [s.results[0], { ...s.results[1], kingakuError: 1 }] })],
-    ['集計が配列でない', s => ({ ...s, results: [{ ...s.results[0], kingaku: {} }, s.results[1]] })],
-    ['集計の行がオブジェクトでない', s => ({ ...s, results: [{ ...s.results[0], kingaku: ['x'] }, s.results[1]] })],
-    ['集計の行の欄が欠けている', s => ({ ...s, results: [{ ...s.results[0], kingaku: [{ ...KINGAKU[0], total: undefined }] }, s.results[1]] })],
     ['changes が無い', s => ({ ...s, changes: undefined })],
     ['changes.finished が真偽値でない', s => ({ ...s, changes: { finished: 'yes', rows: 1 } })],
     ['changes.rows が数でない', s => ({ ...s, changes: { finished: true, rows: '1' } })],

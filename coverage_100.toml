@@ -1309,7 +1309,8 @@ branches = true
 
 # 訴訟準備の「出力」タブ (Refs #1133 c1133-2) の pure ロジック — 案件を
 # 「乗務員 1 名 × 最大 12 か月」に区切る・ファイル名/ZIP 名・応答から結果の 4 分類
-# (ok / empty = 運行 0 件 / not_found = alc に未登録 / error)。.vue 側は登録しない。
+# (ok / empty = 運行 0 件 / not_found = alc に未登録 / error)・冊ごとの「月ごとの時間」の表
+# (給与比較と同じ wage report の月の区分を列にする、c1133-36)。.vue 側は登録しない。
 [[files]]
 path = "app/utils/litigation-output.ts"
 branches = true
@@ -1319,13 +1320,6 @@ branches = true
 # .vue 側は登録しない。
 [[files]]
 path = "app/utils/litigation-output-version.ts"
-branches = true
-
-# 訴訟準備の出力タブに出す「Y金額 (時間の行)」(Refs #1133 c1133-31) の pure ロジック —
-# テンプレの Y時間 / Y金額 シートの式を列ごとに写したもの (賃金月度ごとの 法内残業 / 法外残業 /
-# 月60h超 / 休日労働 / 深夜労働 / 総労働時間)、`要素` シートの設定の読み分け、応答ヘッダの形。
-[[files]]
-path = "app/utils/y-kingaku.ts"
 branches = true
 
 # 訴訟準備の「エラー」タブ (Refs #1133 c1133-5) の pure ロジック — 乗務員 × 月へ畳む・
