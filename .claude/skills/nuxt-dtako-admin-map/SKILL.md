@@ -1570,19 +1570,17 @@ alc の運行数が 1130 → 1129 に減った)。
   `parseAlcUploadResponse` で拾い、**WS `result` の構造化フィールド**
   (`upload_id` / `operations_count` / `split_failed`) として front に渡す。
   `status` は `success` のまま — 取り込みと分割は**別建て**で見せる
-- `app/pages/scraper.vue` が `split_failed > 0` を見て
-  **`POST /api/proxy/api/split-csv/{upload_id}` を自動で叩き直す**。この口は
-  **冪等** (R2 から ZIP を取り直して同じ key に PUT 上書き)、**件数上限なし**、
-  **呼び手のテナントで絞られない** (tenant は upload レコードから引く =
-  `repo/dtako_upload.rs` の `get_upload_tenant_and_key` が `WHERE id = $1` のみ)
-- **`split-csv-all` は自動には使わない** — テナント絞り
-  (`list_uploads_needing_split(tenant_id)`) なので `全企業` スクレイプの片方
-  (別 tenant) を掃えず、かつ **1 回 50 件で切る** (`SPLIT_CSV_ALL_LIMIT`)。
-  `/scraper` の「未分割をまとめて分割」ボタン (手動) から呼び、`done` の
+- `app/pages/scraper.vue` は `split_failed > 0` を、取り込み結果の行の中に**別表示**で出す
+  (`initialSplitStatus`。状態は `ok` / `unknown` / `failed` の 3 つ)。**画面からは分割を
+  呼び直さない** (以前の自動リトライは消した。Refs ippoan/rust-alc-api#725)。`failed` の
+  文は「自社の分は『未分割をまとめて分割』、ほかの会社の分はその会社の取り込みをもう一度」
+- **`split-csv-all`** は `/scraper` の「未分割をまとめて分割」ボタン (手動) から呼ぶ。
+  ログイン中のテナントの分だけを見て、**1 回 50 件で切る** (`SPLIT_CSV_ALL_LIMIT`)。
+  実行中は `progress` (`current/total` とファイル名) を 1 行出し、`done` の
   `candidates / success / failed / **skipped**` をそのまま画面に出す
 - **relay DO からは分割を呼べない** — auth-worker `/alc-internal-proxy` の path
   allowlist (`classifyInternalPath`) に `/api/upload` はあるが `/api/split-csv/*`
-  は無い (403)。よって **cron 実行分は自動リトライされない** — cron は
+  は無い (403)。cron は
   `split_failed > 0` を `console.error` で鳴らすだけなので、**診断は Tail Worker の
   Observability を見て、復旧は管理画面から**行う
 - **`split_failed === 0` は「分割済み」の十分条件ではない**。alc の
@@ -1595,11 +1593,6 @@ alc の運行数が 1130 → 1129 に減った)。
   期間上限は alc 側 `MAX_RANGE_DAYS_ETAGS` = **40 日** (超えたら問い合わせず、
   「省略した」と画面に出す)。**この数はログイン中のテナントぶんだけ**なので、
   0 件表示にも必ずその但し書きを付ける (`formatUnsplitTotal`)
-- ⚠️ **自動リトライは「`split-csv/{id}` が呼び手のテナントで絞られない」ことに
-  依存している。** dtako の 2 社は別テナントで、`全企業` スクレイプはログイン中の
-  管理者と無関係な comp も回すため。**将来 alc がこの口をテナント絞りにしたら、
-  別テナントぶんの自動リトライは黙って効かなくなる** — その時は relay DO 側から
-  内部経路で呼ぶ等に作り替えること (#205 監督が別途起票予定、2026-07-31)
 
 ### 関連ファイル
 
