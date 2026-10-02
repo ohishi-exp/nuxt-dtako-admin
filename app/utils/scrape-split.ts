@@ -18,26 +18,11 @@
  * ⇒ **split が失敗すると、その運行は入力からも欠け検知の母集団からも同時に消える。**
  * 2026-07-31 に実際に発生し (乗務員 1652 の運行 `2607011001540000003510`)、alc の
  * 運行数が 1130 → 1129 に減ったまま、人が管理画面の「CSV分割」ボタンを押すまで
- * 気づけなかった。人手の運用では同じことが繰り返されるので自動でやり直す。
+ * 気づけなかった。取り込み結果の行に分割の状態を出し、取り込みの後に未分割の実数で
+ * 答え合わせをする (下記)。
  *
- * ## 叩く口と、その選び分けの根拠 (alc のコードで確認済み)
+ * ## 残った未分割を掃く口
  *
- * - **`POST /api/split-csv/{upload_id}`** — 自動リトライはこちら。
- *   - 冪等: 毎回 R2 から ZIP を取り直して同じ key に PUT 上書きし `has_kudgivt` を
- *     TRUE にするだけ (`dtako_upload.rs` の `split_csv_from_r2`)。2 回走らせて問題ない
- *   - 件数上限なし
- *   - **呼び手のテナントで絞られない** — tenant は upload レコード側から引く
- *     (`repo/dtako_upload.rs` の `get_upload_tenant_and_key` は `WHERE id = $1` のみ)。
- *     管理者のテナントとスクレイプ対象 comp のテナントが違っても効く
- *
- *     ⚠️ **この自動リトライは、その「絞られない」挙動に依存している。** dtako の
- *     2 社 (27324455 / 75700192) は別テナントで、`全企業` スクレイプはログイン中の
- *     管理者と無関係な comp も回すため、テナント絞りだと片方が直せない。
- *     **将来 alc がこの口を呼び手のテナントで絞るようにしたら、別テナントぶんの
- *     自動リトライは黙って効かなくなる** — その時はここも直すこと (relay DO 側から
- *     内部経路で呼ぶ等)。マルチテナント基盤としては「レコード側の tenant で処理する」
- *     方が横断アクセスの余地を残すので、絞る変更が入ること自体はあり得る
- *     (#205 監督から別途起票予定、2026-07-31)。
  * - **`POST /api/split-csv-all`** — 手動の掃除ボタン用。
  *   - **テナント絞り** (`list_uploads_needing_split(tenant_id)`) なので、別テナントの
  *     comp の取り残しは掃えない
@@ -52,28 +37,14 @@
  * 必要条件であって十分条件ではない。
  */
 
-/** リトライ判断に使う、result イベントの必要部分だけの形。 */
-export interface SplitRetryInput {
+/** 分割の状態表示に使う、result イベントの必要部分だけの形。 */
+export interface SplitResultInput {
   upload_id?: string
   split_failed?: number
 }
 
-/**
- * この result に対して CSV 分割をやり直すべきか。やり直すなら upload_id を返す。
- *
- * - `split_failed` が無い (旧 relay / 旧 alc) → **リトライしない**。不明を 0 とも
- *   失敗とも決めつけない (画面には `splitStateLabel` が「不明」として出す)
- * - `split_failed === 0` → リトライしない。取り込み時の split が既に走って成功して
- *   いるので、もう一度回しても ZIP の再ダウンロードと再 PUT を無駄にするだけ
- * - `upload_id` が無い → 狙い撃ちできないのでリトライしない (手動の一括分割が担当)
- */
-export function splitRetryTarget(evt: SplitRetryInput): string | null {
-  if (typeof evt.split_failed !== 'number' || evt.split_failed <= 0) return null
-  return evt.upload_id || null
-}
-
 /** 取り込み結果の行に添える、CSV 分割の状態表示 (取り込みの成否とは別建て)。 */
-export type SplitState = 'ok' | 'unknown' | 'failed' | 'retrying' | 'recovered' | 'unrecovered'
+export type SplitState = 'ok' | 'unknown' | 'failed'
 
 export interface SplitStatus {
   state: SplitState
@@ -81,7 +52,7 @@ export interface SplitStatus {
 }
 
 /**
- * result イベントから、リトライ前の初期表示を作る。**分割の話をする根拠が無いとき
+ * result イベントから、分割の状態表示を作る。**分割の話をする根拠が無いとき
  * は `null`** (行に何も出さない)。
  *
  * 根拠が無い = `upload_id` も `split_failed` も無い、つまり
@@ -92,7 +63,7 @@ export interface SplitStatus {
  * どちらも「分割が失敗した」とは限らないので、ここで警告を出すと毎行が黄色くなり
  * 本物の失敗が埋もれる。
  */
-export function initialSplitStatus(evt: SplitRetryInput): SplitStatus | null {
+export function initialSplitStatus(evt: SplitResultInput): SplitStatus | null {
   if (typeof evt.split_failed !== 'number') {
     if (!evt.upload_id) return null
     return { state: 'unknown', message: 'CSV分割: 状態不明 (alc が split_failed を返していません)' }
@@ -100,24 +71,10 @@ export function initialSplitStatus(evt: SplitRetryInput): SplitStatus | null {
   if (evt.split_failed <= 0) {
     return { state: 'ok', message: 'CSV分割: 失敗 0 件' }
   }
-  const base = `CSV分割: ${evt.split_failed} 件失敗 (この運行は読み取り側から消えます)`
-  return evt.upload_id
-    ? { state: 'retrying', message: `${base} — 自動でやり直しています...` }
-    : { state: 'failed', message: `${base} — upload_id 不明のため自動リトライ不可。「未分割をまとめて分割」を実行してください` }
-}
-
-/** 自動リトライの結果表示。`splitFailed` はリトライ応答の `split_failed`。 */
-export function retriedSplitStatus(
-  splitFailed: number | null,
-  error?: string,
-): SplitStatus {
-  if (error) {
-    return { state: 'unrecovered', message: `CSV分割のやり直しに失敗: ${error}` }
+  return {
+    state: 'failed',
+    message: `CSV分割が未完です (${evt.split_failed} 件。この運行は読み取り側から消えます)。自社の分は「未分割をまとめて分割」を、ほかの会社の分は、その会社の取り込みをもう一度実行してください`,
   }
-  if (splitFailed !== null && splitFailed > 0) {
-    return { state: 'unrecovered', message: `CSV分割をやり直しましたが ${splitFailed} 件失敗したままです` }
-  }
-  return { state: 'recovered', message: 'CSV分割: やり直して成功しました' }
 }
 
 /**
@@ -128,14 +85,10 @@ export function splitLineClass(state: string): string {
   switch (state) {
     case 'ok':
       return 'text-gray-500 dark:text-gray-400'
-    case 'recovered':
-      return 'text-green-700 dark:text-green-400'
-    case 'retrying':
-      return 'text-blue-600 dark:text-blue-400'
     case 'unknown':
       return 'text-amber-600 dark:text-amber-400'
     default:
-      // failed / unrecovered — 運行が消えている状態なので最も強く出す
+      // failed — 運行が消えている状態なので最も強く出す
       return 'font-bold text-red-600 dark:text-red-400'
   }
 }
@@ -197,9 +150,11 @@ export function parseSplitCsvResponse(res: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-/** `split-csv-all` の SSE `done` イベント (alc の `split_csv_all_handler` が送る形)。 */
+/** `split-csv-all` の SSE のイベント (`progress` は `current`・`total`・`filename`、`done` は件数、`error` は `message`)。 */
 export interface SplitAllDoneEvent {
   event?: string
+  current?: number
+  filename?: string
   candidates?: number
   total?: number
   success?: number

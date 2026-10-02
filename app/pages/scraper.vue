@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels, postDriverMasterRun } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels, postDriverMasterRun } from '~/utils/api'
 import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome, type NetprintTargetView } from '~/utils/netprint-run'
 import type { DriverMasterRunOutcome } from '~/utils/driver-master-run'
 import {
@@ -20,10 +20,7 @@ import {
   formatSplitAllDone,
   formatUnsplitTotal,
   initialSplitStatus,
-  parseSplitCsvResponse,
-  retriedSplitStatus,
   splitLineClass,
-  splitRetryTarget,
   unsplitCheckRange,
   type SplitAllDoneEvent,
 } from '~/utils/scrape-split'
@@ -462,51 +459,29 @@ interface DayTask {
 
 const tasks = useState<DayTask[]>('scraper-tasks', () => [])
 
-// --- CSV 分割の自動やり直し (Refs #205-40) ---
+// --- CSV 分割の状態表示 (Refs #205-40) ---
 //
-// スクレイプ = 取り込み (`POST /api/upload`) は成功しても、その直後に alc が走らせる
-// CSV 分割が失敗すると、対象運行は `has_kudgivt = FALSE` のまま残る。読み取り側 3
-// クエリが全部 `has_kudgivt = TRUE` で絞っているため、**入力からも欠け検知の母集団
-// からも同時に消える** (2026-07-31 に実際に 1 運行が消えた)。背景と口の選び分けの
-// 根拠は `app/utils/scrape-split.ts` の冒頭コメント。
+// スクレイプ = 取り込み (`POST /api/upload`) は成功しても、CSV 分割が未完のまま残ると、
+// 対象運行は `has_kudgivt = FALSE` のままで、**入力からも欠け検知の母集団からも同時に
+// 消える** (2026-07-31 に実際に 1 運行が消えた)。背景は `app/utils/scrape-split.ts` の
+// 冒頭コメント。
 //
-// ここでは result を受けた時点で `split_failed > 0` を見て、その upload_id を
-// 狙い撃ちで `POST /api/proxy/api/split-csv/{upload_id}` に投げ直す (冪等・上限なし・
-// テナント跨ぎ可)。**取り込みの成否 (`status`) は書き換えない** — 取り込み自体は
-// 成功しているので、分割の失敗は行内の別表示として出す。
+// ここでは result の `split_failed` を、取り込み結果の行の中に別表示として出すだけ
+// (画面からは分割を呼び直さない)。**取り込みの成否 (`status`) は書き換えない**。
+// 残った未分割は、下の「未分割をまとめて分割」と、取り込み後の答え合わせで拾う。
 
-/** 実行中の自動リトライ。スクレイプ完了時に await してからカレンダーを読み直す。 */
-const pendingSplitRetries: Promise<void>[] = []
-
-/** result イベントを task に積み、必要なら CSV 分割を自動でやり直す。
+/** result イベントを task に積む。
  * (4 箇所のスクレイプ経路 — 実行 / リラン / 全エラーリラン / 履歴リラン — で共用) */
 function pushScrapeResult(task: DayTask, evt: ScrapeProgressEvent) {
-  const result: ScrapeResult = reactive({
+  task.results.push({
     comp_id: evt.comp_id || '',
     status: evt.status || 'error',
     message: evt.message || '',
     zipUrl: evt.zip_url,
-    uploadId: evt.upload_id,
     // 取り込みが失敗している時は分割の話をしても仕方がないので出さない。
     split: (evt.status === 'success' ? initialSplitStatus(evt) : null) ?? undefined,
   })
-  task.results.push(result)
   recordScrapeResult(task.date, evt)
-
-  if (evt.status !== 'success') return
-  const uploadId = splitRetryTarget(evt)
-  if (!uploadId) return
-
-  pendingSplitRetries.push(
-    (async () => {
-      try {
-        result.split = retriedSplitStatus(parseSplitCsvResponse(await splitCsv(uploadId)))
-      }
-      catch (e) {
-        result.split = retriedSplitStatus(null, e instanceof Error ? e.message : '不明なエラー')
-      }
-    })(),
-  )
 }
 
 /** result イベント無しで例外が飛んだとき (接続断・catch) に task へ error 結果を積む。
@@ -517,12 +492,6 @@ function pushErrorResult(task: DayTask, compId: string | undefined, e: unknown) 
     status: 'error',
     message: e instanceof Error ? e.message : 'エラー',
   })
-}
-
-/** 実行中の自動リトライを全部待つ (取りこぼしたまま画面を「完了」にしないため)。 */
-async function drainSplitRetries() {
-  if (pendingSplitRetries.length === 0) return
-  await Promise.all(pendingSplitRetries.splice(0))
 }
 
 // --- 取り込み後の答え合わせ (Refs #205-40) ---
@@ -572,13 +541,15 @@ async function checkUnsplit(dates: string[]) {
 
 // --- 未分割をまとめて分割 (手動、Refs #205-40) ---
 //
-// 自動やり直しが拾えるのは「今回のスクレイプで取り込んだ upload」だけ。過去の
-// 取り残し (旧 relay 経由 / upload_id 不明 / cron 実行分) はここで掃く。
+// 取り込みの後に分割が未完で残ったもの (今回のスクレイプの分・過去の取り残し・
+// cron 実行分) はここで掃く。
 // `split-csv-all` は**ログイン中のテナント**の候補しか見ず、**1 回 50 件で切る**
 // (`SPLIT_CSV_ALL_LIMIT`) ので、`skipped` をそのまま画面に出す。
 
 const splitAllRunning = ref(false)
 const splitAllLog = ref<{ text: string, level: 'info' | 'error' }[]>([])
+/** 実行中の進み具合 (`progress` イベント)。終わったら消す。 */
+const splitAllProgress = ref('')
 
 async function handleSplitAll() {
   if (splitAllRunning.value) return
@@ -586,7 +557,10 @@ async function handleSplitAll() {
   splitAllLog.value = []
   try {
     await splitCsvAllStream((evt: SplitAllDoneEvent) => {
-      if (evt.event === 'done') {
+      if (evt.event === 'progress') {
+        splitAllProgress.value = `分割中 (${evt.current}/${evt.total}) ${evt.filename || ''}`
+      }
+      else if (evt.event === 'done') {
         splitAllLog.value.push({ text: formatSplitAllDone(evt), level: (evt.failed ?? 0) > 0 ? 'error' : 'info' })
       }
       else if (evt.event === 'error') {
@@ -603,6 +577,7 @@ async function handleSplitAll() {
     splitAllLog.value.push({ text: e instanceof Error ? e.message : '分割に失敗しました', level: 'error' })
   }
   finally {
+    splitAllProgress.value = ''
     splitAllRunning.value = false
   }
 }
@@ -664,8 +639,6 @@ async function handleScrape() {
     task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
   }
 
-  // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
-  await drainSplitRetries()
   await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
@@ -723,8 +696,6 @@ async function handleRerun(task: DayTask) {
   )
 
   task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
-  // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
-  await drainSplitRetries()
   await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
@@ -783,8 +754,6 @@ async function handleRerunAllErrors() {
     task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
   }
 
-  // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
-  await drainSplitRetries()
   await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
@@ -924,8 +893,6 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
     task.status = 'error'
   }
 
-  // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
-  await drainSplitRetries()
   await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
@@ -1400,9 +1367,8 @@ onMounted(() => {
         />
       </div>
 
-      <!-- 未分割の掃除 (Refs #205-40)。スクレイプ直後の分割やり直しは自動で走るが、
-           拾えるのは今回の upload だけ。過去の取り残し (cron 実行分・旧 relay 経由で
-           upload_id が取れなかった分) はここで掃く。 -->
+      <!-- 未分割の掃除 (Refs #205-40)。取り込みの後に分割が未完で残ったもの
+           (今回のスクレイプの分・過去の取り残し・cron 実行分) はここで掃く。 -->
       <div class="mt-4 pt-3 border-t dark:border-gray-800">
         <div class="flex flex-wrap items-center gap-2">
           <UButton
@@ -1417,6 +1383,9 @@ onMounted(() => {
           <span class="text-xs text-gray-500 dark:text-gray-400">
             CSV 分割されていない運行は一覧にも欠け検知にも出てきません。1 回あたり最大 50 件。
           </span>
+        </div>
+        <div v-if="splitAllProgress" class="mt-2 text-xs text-gray-600 dark:text-gray-400">
+          {{ splitAllProgress }}
         </div>
         <div v-if="splitAllLog.length" class="mt-2 space-y-1">
           <div

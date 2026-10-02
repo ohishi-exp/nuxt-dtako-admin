@@ -7,31 +7,9 @@ import {
   formatUnsplitTotal,
   initialSplitStatus,
   parseSplitCsvResponse,
-  retriedSplitStatus,
   splitLineClass,
-  splitRetryTarget,
   unsplitCheckRange,
 } from '~/utils/scrape-split'
-
-describe('splitRetryTarget', () => {
-  it('returns the upload_id when split_failed > 0', () => {
-    expect(splitRetryTarget({ upload_id: 'u-1', split_failed: 2 })).toBe('u-1')
-  })
-
-  it('does not retry when split_failed is 0 (取り込み時の分割が既に成功している)', () => {
-    expect(splitRetryTarget({ upload_id: 'u-1', split_failed: 0 })).toBeNull()
-  })
-
-  it('does not retry when split_failed is missing (不明を失敗扱いしない)', () => {
-    expect(splitRetryTarget({ upload_id: 'u-1' })).toBeNull()
-    expect(splitRetryTarget({})).toBeNull()
-  })
-
-  it('does not retry when upload_id is missing (狙い撃ちできない)', () => {
-    expect(splitRetryTarget({ split_failed: 3 })).toBeNull()
-    expect(splitRetryTarget({ upload_id: '', split_failed: 3 })).toBeNull()
-  })
-})
 
 describe('initialSplitStatus', () => {
   it('marks a missing split_failed as unknown, not as success', () => {
@@ -51,36 +29,14 @@ describe('initialSplitStatus', () => {
       .toEqual({ state: 'ok', message: 'CSV分割: 失敗 0 件' })
   })
 
-  it('says a retry is running when the upload_id is known', () => {
-    const s = initialSplitStatus({ upload_id: 'u-1', split_failed: 2 })
-    expect(s?.state).toBe('retrying')
-    expect(s?.message).toContain('2 件失敗')
-    expect(s?.message).toContain('自動でやり直しています')
-  })
-
-  it('points at the manual sweep when the upload_id is unknown', () => {
-    const s = initialSplitStatus({ split_failed: 2 })
-    expect(s?.state).toBe('failed')
-    expect(s?.message).toContain('まとめて分割')
-  })
-})
-
-describe('retriedSplitStatus', () => {
-  it('recovered when the retry reported no failures', () => {
-    expect(retriedSplitStatus(0)).toEqual({ state: 'recovered', message: 'CSV分割: やり直して成功しました' })
-    expect(retriedSplitStatus(null).state).toBe('recovered')
-  })
-
-  it('stays unrecovered when the retry still failed', () => {
-    const s = retriedSplitStatus(1)
-    expect(s.state).toBe('unrecovered')
-    expect(s.message).toContain('1 件失敗したまま')
-  })
-
-  it('surfaces the request error instead of swallowing it', () => {
-    const s = retriedSplitStatus(null, '500 Internal Server Error')
-    expect(s.state).toBe('unrecovered')
-    expect(s.message).toContain('500 Internal Server Error')
+  it('says the split is unfinished and what to do next (自社の分・ほかの会社の分)', () => {
+    const want = {
+      state: 'failed',
+      message: 'CSV分割が未完です (2 件。この運行は読み取り側から消えます)。自社の分は「未分割をまとめて分割」を、ほかの会社の分は、その会社の取り込みをもう一度実行してください',
+    }
+    // upload_id が分かっていても、いなくても同じ表示 (状態は 1 つ)
+    expect(initialSplitStatus({ upload_id: 'u-1', split_failed: 2 })).toEqual(want)
+    expect(initialSplitStatus({ split_failed: 2 })).toEqual(want)
   })
 })
 
@@ -170,11 +126,9 @@ describe('formatUnsplitTotal', () => {
 describe('splitLineClass', () => {
   it('keeps failures visually loud and successes quiet', () => {
     expect(splitLineClass('ok')).toContain('text-gray-500')
-    expect(splitLineClass('recovered')).toContain('text-green-700')
-    expect(splitLineClass('retrying')).toContain('text-blue-600')
     expect(splitLineClass('unknown')).toContain('text-amber-600')
     expect(splitLineClass('failed')).toContain('font-bold')
-    expect(splitLineClass('unrecovered')).toContain('text-red-600')
+    expect(splitLineClass('failed')).toContain('text-red-600')
   })
 })
 

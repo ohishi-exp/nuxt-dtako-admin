@@ -812,7 +812,7 @@ export interface ScrapeProgressEvent {
    * `split_failed > 0` は「**取り込みは成功したが CSV 分割が失敗した**」状態で、
    * alc の読み取り側 3 クエリはいずれも `has_kudgivt = TRUE` で絞るため、
    * その運行は入力からも欠け検知の母集団からも同時に消える。呼び出し側は
-   * `upload_id` を使って `splitCsv()` を叩き直すこと。
+   * 取り込み結果の行に、分割が未完であることを別建てで出すこと。
    *
    * **フィールドが無い = 不明** (旧 relay / 旧 alc)。0 と同一視しないこと。
    */

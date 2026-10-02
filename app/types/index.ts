@@ -258,9 +258,6 @@ export interface ScrapeResult {
   /** SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) 完了時のみ載る、
    * csvdata.zip の1回限りダウンロード path。`buildScraperZipUrl()` で絶対 URL 化する。 */
   zipUrl?: string
-  /** 自動アップロードが成功した時の alc `POST /api/upload` の upload_id。
-   * CSV 分割のやり直し (`POST /api/split-csv/{id}`) の宛先 (Refs #205-40)。 */
-  uploadId?: string
   /** CSV 分割の状態。**取り込み (`status`) とは別建て** — 分割が失敗しても
    * 取り込み自体は成功しているため (Refs #205-40)。詳細は
    * `app/utils/scrape-split.ts`。 */
