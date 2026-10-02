@@ -45,6 +45,7 @@ import {
   postNet780Archive,
   postNetprintRun,
   postDriverMasterRun,
+  getDriverMasterStatus,
   getNetprintTargets,
   putNetprintTargets,
   getNotifyRecipients,
@@ -1526,6 +1527,43 @@ describe('api', () => {
       const result = await postNetprintRun({})
       expect(result.error).toBe('HTTP 401')
       expect(result.results).toEqual([])
+    })
+  })
+
+  // 乗務員マスタ同期が最後に走った記録 (Refs #1186)。読むだけ。失敗は理由を付けて投げる。
+  describe.runIf(!isLive)('getDriverMasterStatus', () => {
+    const body = {
+      results: [
+        { comp_id: '27324455', last: { trigger: 'cron', finished_at: '2026-03-02T03:00:40.000Z', ok: true, error: null }, error: false },
+        { comp_id: '27324456', last: null, error: true },
+      ],
+    }
+
+    it('GET /api/driver-master/status を Bearer つきで呼び、会社ごとの配列を返す', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => body })
+      expect(await getDriverMasterStatus()).toEqual(body.results)
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/driver-master/status')
+      expect(opts.method).toBeUndefined()
+      expect(opts.body).toBeUndefined()
+      expect(opts.headers['authorization']).toBe('Bearer tok-1')
+    })
+
+    it('非 2xx は本文の理由を Error.message にして投げる (本文が読めなければ HTTP 番号)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: async () => ({ statusMessage: 'relay: kintai-relay not configured' }),
+      })
+      await expect(getDriverMasterStatus()).rejects.toThrow('relay: kintai-relay not configured')
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => { throw new Error('not json') } })
+      await expect(getDriverMasterStatus()).rejects.toThrow('HTTP 500')
+    })
+
+    it('2xx で本文が読めなければ空の配列', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
+      expect(await getDriverMasterStatus()).toEqual([])
     })
   })
 

@@ -21,7 +21,12 @@ import { parseViewerComps } from '~/utils/dtako-comps'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
-import { buildDriverMasterRunOutcome, type DriverMasterRunOutcome } from '~/utils/driver-master-run'
+import {
+  buildDriverMasterRunOutcome,
+  normalizeDriverMasterStatus,
+  type DriverMasterRunOutcome,
+  type DriverMasterStatusItem,
+} from '~/utils/driver-master-run'
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
@@ -892,6 +897,19 @@ export async function postDriverMasterRun(compId: string): Promise<DriverMasterR
   const res = await fetchOrDescribe('/api/driver-master/run', { method: 'POST', headers, body: JSON.stringify({ comp_id: compId }) })
   const body = await res.json().catch(() => null) as unknown
   return buildDriverMasterRunOutcome(res.status, res.ok, body, compId)
+}
+
+/**
+ * 乗務員マスタ同期が最後に走った記録を、全社ぶん読む (`server/api/driver-master/status.get.ts`、Refs #1186)。
+ * 読むだけ。非 2xx は本文から理由を拾って (`pickBodyReason`) `Error.message` にして投げる。
+ */
+export async function getDriverMasterStatus(): Promise<DriverMasterStatusItem[]> {
+  const res = await fetchOrDescribe('/api/driver-master/status', { headers: serverRouteHeaders() })
+  const body = await res.json().catch(() => null) as unknown
+  if (!res.ok) {
+    throw new Error(pickBodyReason(body) ?? `HTTP ${res.status}`)
+  }
+  return normalizeDriverMasterStatus(body)
 }
 
 /** front worker の server route (`/api/netprint/*`・`/api/y-time-rows`) 向けヘッダ。同一オリジンなので
