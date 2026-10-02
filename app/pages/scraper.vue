@@ -807,7 +807,7 @@ async function loadPending() {
   }
 }
 
-async function handleUploadRerun(upload: PendingUpload, historyItem?: ScrapeHistoryItem) {
+async function handleUploadRerun(upload: PendingUpload) {
   rerunningId.value = upload.id
   rerunResult.value = null
   try {
@@ -818,9 +818,6 @@ async function handleUploadRerun(upload: PendingUpload, historyItem?: ScrapeHist
       success: true,
       message: `${res.operations_count} 件取り込み完了`,
     }
-    if (historyItem) {
-      historyItem.message = `✅ リラン完了: ${res.operations_count} 件取り込み (upload_id: ${upload.id})`
-    }
     await loadPending()
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'リランに失敗しました'
@@ -828,10 +825,6 @@ async function handleUploadRerun(upload: PendingUpload, historyItem?: ScrapeHist
       id: upload.id,
       success: false,
       message: msg,
-    }
-    if (historyItem) {
-      historyItem.status = 'error'
-      historyItem.message = `❌ リラン失敗: ${msg}`
     }
   } finally {
     rerunningId.value = null
@@ -923,12 +916,6 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
   isRunning.value = false
   await loadCalendar()
   await loadHistory()
-}
-
-function extractUploadId(message: string | null): string | null {
-  if (!message || !message.includes('STORED_FOR_RETRY')) return null
-  const match = message.match(/"upload_id"\s*:\s*"([^"]+)"/)
-  return match ? match[1] ?? null : null
 }
 
 function formatDatetime(iso: string): string {
@@ -1622,39 +1609,8 @@ onMounted(() => {
             {{ item.message }}
           </span>
           <div class="flex-1" />
-          <span
-            v-if="rerunResult && rerunResult.id === extractUploadId(item.message) && rerunResult.success"
-            class="text-xs text-green-600"
-          >
-            {{ rerunResult.message }}
-          </span>
-          <span
-            v-if="rerunResult && rerunResult.id === extractUploadId(item.message) && !rerunResult.success"
-            class="text-xs text-red-600"
-          >
-            {{ rerunResult.message }}
-          </span>
           <UButton
-            v-if="extractUploadId(item.message)"
-            icon="i-lucide-download"
-            variant="soft"
-            color="neutral"
-            size="xs"
-            :to="getUploadDownloadUrl(extractUploadId(item.message)!)"
-            target="_blank"
-          />
-          <UButton
-            v-if="extractUploadId(item.message) && !isRunning"
-            label="リラン"
-            icon="i-lucide-upload"
-            variant="soft"
-            color="warning"
-            size="xs"
-            :loading="rerunningId === extractUploadId(item.message)"
-            @click="handleUploadRerun({ id: extractUploadId(item.message)!, status: 'pending_retry' } as PendingUpload, item)"
-          />
-          <UButton
-            v-else-if="item.status === 'error' && !isRunning"
+            v-if="item.status === 'error' && !isRunning"
             label="リラン"
             icon="i-lucide-refresh-cw"
             variant="soft"
