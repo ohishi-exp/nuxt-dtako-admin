@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels, postDriverMasterRun } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels, postDriverMasterRun, getDriverMasterStatus } from '~/utils/api'
 import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome, type NetprintTargetView } from '~/utils/netprint-run'
-import type { DriverMasterRunOutcome } from '~/utils/driver-master-run'
+import { driverMasterStatusLines, type DriverMasterRunOutcome, type DriverMasterStatusItem } from '~/utils/driver-master-run'
 import {
   emptyNetprintTargetRow,
   netprintDestinationOptions,
@@ -70,6 +70,30 @@ const driverMasterElapsed = ref(0)
 const driverMasterFetchError = ref('')
 const driverMasterOutcome = ref<DriverMasterRunOutcome | null>(null)
 
+// 最後に同期が走った記録 (Refs #1186)。定時の同期が走ったか・成功したかを見るためのもの。
+// 全社ぶんを 1 回で読み、「企業」の選択に合わせて手元で絞る (選択を変えても読み直さない)。
+// 読むのは、画面を開いたときと、同期ボタンの実行が終わったとき。
+const driverMasterStatus = ref<DriverMasterStatusItem[]>([])
+const driverMasterStatusLoaded = ref(false)
+/** 読み込みの失敗 (欄の中に 1 行で出す。ほかの機能は止めない)。 */
+const driverMasterStatusError = ref('')
+const driverMasterStatusRows = computed(() =>
+  driverMasterStatusLines(driverMasterStatus.value, selectedCompId.value, compIdLabels),
+)
+
+async function loadDriverMasterStatus() {
+  try {
+    driverMasterStatus.value = await getDriverMasterStatus()
+    driverMasterStatusError.value = ''
+  }
+  catch (e) {
+    driverMasterStatusError.value = e instanceof Error ? e.message : '取得に失敗しました'
+  }
+  finally {
+    driverMasterStatusLoaded.value = true
+  }
+}
+
 async function handleDriverMasterRun() {
   if (driverMasterRunning.value || !selectedCompId.value) return
   driverMasterRunning.value = true
@@ -86,6 +110,8 @@ async function handleDriverMasterRun() {
   finally {
     clearInterval(timer)
     driverMasterRunning.value = false
+    // 成功でも失敗でも、いまの実行が「最後の記録」になるので読み直す
+    await loadDriverMasterStatus()
   }
 }
 
@@ -928,6 +954,7 @@ onMounted(() => {
   loadCalendar()
   loadHistory()
   loadPending()
+  loadDriverMasterStatus()
 })
 </script>
 
@@ -1211,6 +1238,25 @@ onMounted(() => {
         免許証の交付日・有効期限を alc の乗務員に反映します。1 回数十秒。cron は 7/12/15/17/19 時です。
         会社は上の「企業」選択に従います。
       </p>
+      <!-- 最後に同期が走った記録 (Refs #1186)。日時は日本時間 -->
+      <div class="text-xs mb-3 space-y-0.5">
+        <div v-if="driverMasterStatusError" class="text-red-500 break-all">
+          最終同期を取得できませんでした: {{ driverMasterStatusError }}
+        </div>
+        <template v-else-if="driverMasterStatusLoaded">
+          <div v-if="driverMasterStatusRows.length === 0" class="text-gray-500">
+            最終同期: 記録なし
+          </div>
+          <div v-for="row in driverMasterStatusRows" :key="row.compId">
+            <span :class="row.level === 'ok' ? 'text-green-600 dark:text-green-400' : row.level === 'error' ? 'text-red-500' : 'text-gray-500'">
+              {{ row.text }}
+            </span>
+            <div v-if="row.detail" class="text-red-500 break-all">
+              {{ row.detail }}
+            </div>
+          </div>
+        </template>
+      </div>
       <div class="flex flex-wrap gap-2 items-center mb-2">
         <UButton
           label="乗務員マスタを同期"

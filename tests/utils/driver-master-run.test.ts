@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { buildDriverMasterRunOutcome, normalizeDriverMasterRunRows } from '~/utils/driver-master-run'
+import {
+  buildDriverMasterRunOutcome,
+  driverMasterStatusLines,
+  normalizeDriverMasterRunRows,
+  normalizeDriverMasterStatus,
+  type DriverMasterStatusItem,
+} from '~/utils/driver-master-run'
 
 describe('normalizeDriverMasterRunRows', () => {
   it('単体形 (relay PR #1078 の現行応答) を 1 行にする', () => {
@@ -91,5 +97,104 @@ describe('buildDriverMasterRunOutcome', () => {
     const outcome = buildDriverMasterRunOutcome(503, false, null, '1')
     expect(outcome.rows).toEqual([])
     expect(outcome.error).toBe('HTTP 503')
+  })
+})
+
+describe('normalizeDriverMasterStatus', () => {
+  it('server route の応答を会社ごとの配列にする', () => {
+    const body = {
+      results: [
+        { comp_id: '27324455', last: { trigger: 'cron', finished_at: '2026-03-02T03:00:40.000Z', ok: true, error: null }, error: false },
+        { comp_id: '27324456', last: null, error: true },
+      ],
+    }
+    expect(normalizeDriverMasterStatus(body)).toEqual(body.results)
+  })
+
+  it('読めない要素は捨て、読めない欄は安全側に倒す', () => {
+    const body = {
+      results: [
+        { comp_id: '27324455', last: { trigger: 'other', finished_at: 1, ok: 1, error: '' }, error: 'yes' },
+        { comp_id: '27324456', last: 'x' },
+        { comp_id: '' },
+        { last: null },
+        null,
+      ],
+    }
+    expect(normalizeDriverMasterStatus(body)).toEqual([
+      { comp_id: '27324455', last: { trigger: null, finished_at: '', ok: false, error: null }, error: false },
+      { comp_id: '27324456', last: null, error: false },
+    ])
+  })
+
+  it('results が配列でなければ空', () => {
+    expect(normalizeDriverMasterStatus(null)).toEqual([])
+    expect(normalizeDriverMasterStatus({})).toEqual([])
+    expect(normalizeDriverMasterStatus({ results: 'x' })).toEqual([])
+  })
+})
+
+describe('driverMasterStatusLines', () => {
+  const LABELS = { 27324455: 'テスト運輸A', 27324456: 'テスト運輸B' }
+  const okCron: DriverMasterStatusItem = {
+    comp_id: '27324455',
+    // 03:00 UTC = 日本時間 12:00
+    last: { trigger: 'cron', finished_at: '2026-03-02T03:00:40.000Z', ok: true, error: null },
+    error: false,
+  }
+  const failedManual: DriverMasterStatusItem = {
+    comp_id: '27324456',
+    // 15:30 UTC = 日本時間で翌日の 00:30
+    last: { trigger: 'manual', finished_at: '2026-03-02T15:30:00.000Z', ok: false, error: 'theearth ログインに失敗しました' },
+    error: false,
+  }
+
+  it('会社を選んでいるとき: その会社の 1 行 (頭は「最終同期: 」。日時は日本時間)', () => {
+    expect(driverMasterStatusLines([okCron, failedManual], '27324455', LABELS)).toEqual([
+      { compId: '27324455', level: 'ok', text: '最終同期: 2026-03-02 12:00 成功 (定時)', detail: null },
+    ])
+    expect(driverMasterStatusLines([okCron, failedManual], '27324456', LABELS)).toEqual([
+      { compId: '27324456', level: 'error', text: '最終同期: 2026-03-03 00:30 失敗 (手動)', detail: 'theearth ログインに失敗しました' },
+    ])
+  })
+
+  it('選んだ会社が応答に無ければ「記録なし」', () => {
+    expect(driverMasterStatusLines([okCron], '27324457', LABELS)).toEqual([
+      { compId: '27324457', level: 'muted', text: '最終同期: 記録なし', detail: null },
+    ])
+  })
+
+  it('「全企業」のとき: 会社ごとに 1 行ずつ (頭は社名。無ければ comp_id)', () => {
+    const none: DriverMasterStatusItem = { comp_id: '27324457', last: null, error: false }
+    const unreadable: DriverMasterStatusItem = { comp_id: '27324458', last: null, error: true }
+    expect(driverMasterStatusLines([okCron, failedManual, none, unreadable], '', LABELS)).toEqual([
+      { compId: '27324455', level: 'ok', text: 'テスト運輸A: 2026-03-02 12:00 成功 (定時)', detail: null },
+      { compId: '27324456', level: 'error', text: 'テスト運輸B: 2026-03-03 00:30 失敗 (手動)', detail: 'theearth ログインに失敗しました' },
+      { compId: '27324457', level: 'muted', text: '27324457: 記録なし', detail: null },
+      { compId: '27324458', level: 'error', text: '27324458: 取得できませんでした', detail: null },
+    ])
+    expect(driverMasterStatusLines([], '', LABELS)).toEqual([])
+  })
+
+  it('失敗の理由は 1 行にして、長ければ切る。理由が無い失敗は理由なし。きっかけが読めなければ「不明」', () => {
+    const long: DriverMasterStatusItem = {
+      comp_id: '27324455',
+      last: { trigger: null, finished_at: '2026-03-02T03:00:40.000Z', ok: false, error: `line1\n  line2 ${'x'.repeat(200)}` },
+      error: false,
+    }
+    const [line] = driverMasterStatusLines([long], '27324455', LABELS)
+    expect(line!.text).toBe('最終同期: 2026-03-02 12:00 失敗 (不明)')
+    expect(line!.detail).toBe(`line1 line2 ${'x'.repeat(108)}…`)
+    expect(line!.detail).toHaveLength(121)
+
+    const noReason: DriverMasterStatusItem = { ...long, last: { ...long.last!, error: null } }
+    expect(driverMasterStatusLines([noReason], '27324455', LABELS)[0]).toEqual({
+      compId: '27324455', level: 'error', text: '最終同期: 2026-03-02 12:00 失敗 (不明)', detail: null,
+    })
+  })
+
+  it('終了時刻が日時として読めなければ、元の文字列のまま出す', () => {
+    const odd: DriverMasterStatusItem = { ...okCron, last: { ...okCron.last!, finished_at: '' } }
+    expect(driverMasterStatusLines([odd], '27324455', LABELS)[0]!.text).toBe('最終同期:  成功 (定時)')
   })
 })

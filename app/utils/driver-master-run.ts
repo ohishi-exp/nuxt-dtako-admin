@@ -14,6 +14,7 @@
  * (c125-4 マージ後、実物の応答で測ってから登録する)。
  */
 import { pickBodyReason } from '~/utils/api-error'
+import { fmtJstDateTime } from '~/utils/litigation-changes'
 
 /** relay が返す `skipped` の 1 要素。 */
 export interface DriverMasterSkipRow {
@@ -136,4 +137,104 @@ export function buildDriverMasterRunOutcome(
   const rec = asRecord(body)
   const error = pickBodyReason(rec) ?? `HTTP ${status}`
   return { ok: false, status, rows: normalizeDriverMasterRunRows(rec?.data, fallbackCompId), error }
+}
+
+// --- 最後に同期が走った記録 (`GET /api/driver-master/status`、Refs #1186) ---
+
+/** 直近 1 回の同期の記録のうち、画面が使う欄 (server route が絞って返す形)。 */
+export interface DriverMasterLastRunView {
+  /** きっかけ。`cron` = 定時、`manual` = 手動。読めなければ null。 */
+  trigger: 'cron' | 'manual' | null
+  /** 終了時刻 (UTC の ISO 文字列)。 */
+  finished_at: string
+  ok: boolean
+  /** 失敗の理由 (成功なら null)。 */
+  error: string | null
+}
+
+/** 会社 1 社ぶんの、最後に同期が走った記録。 */
+export interface DriverMasterStatusItem {
+  comp_id: string
+  /** まだ 1 回も走っていなければ null。 */
+  last: DriverMasterLastRunView | null
+  /** その会社の記録を読めなかったか。 */
+  error: boolean
+}
+
+/** 欄に出す 1 行。 */
+export interface DriverMasterStatusLine {
+  compId: string
+  /** 色分け用。`ok` = 成功、`error` = 失敗・取得できない、`muted` = 記録なし。 */
+  level: 'ok' | 'error' | 'muted'
+  text: string
+  /** 失敗の理由 (1 行に収まる長さに切ってある)。無ければ null。 */
+  detail: string | null
+}
+
+/** 失敗の理由を 1 行に収める長さ。 */
+const STATUS_DETAIL_MAX = 120
+
+/** `GET /api/driver-master/status` の応答を、会社ごとの配列にする。読めない要素は捨てる。 */
+export function normalizeDriverMasterStatus(body: unknown): DriverMasterStatusItem[] {
+  const results = asRecord(body)?.results
+  if (!Array.isArray(results)) return []
+  const items: DriverMasterStatusItem[] = []
+  for (const raw of results) {
+    const rec = asRecord(raw)
+    if (rec === null || typeof rec.comp_id !== 'string' || rec.comp_id === '') continue
+    const last = asRecord(rec.last)
+    items.push({
+      comp_id: rec.comp_id,
+      last: last === null
+        ? null
+        : {
+            trigger: last.trigger === 'cron' || last.trigger === 'manual' ? last.trigger : null,
+            finished_at: typeof last.finished_at === 'string' ? last.finished_at : '',
+            ok: last.ok === true,
+            error: typeof last.error === 'string' && last.error !== '' ? last.error : null,
+          },
+      error: rec.error === true,
+    })
+  }
+  return items
+}
+
+/** 会社 1 社ぶんの記録を、欄に出す 1 行にする。`label` は行の頭に付ける社名 (付けないなら空文字)。 */
+function driverMasterStatusLine(item: DriverMasterStatusItem, label: string): DriverMasterStatusLine {
+  const head = label === '' ? '最終同期: ' : `${label}: `
+  if (item.error) {
+    return { compId: item.comp_id, level: 'error', text: `${head}取得できませんでした`, detail: null }
+  }
+  const last = item.last
+  if (last === null) {
+    return { compId: item.comp_id, level: 'muted', text: `${head}記録なし`, detail: null }
+  }
+  const trigger = last.trigger === 'cron' ? '定時' : last.trigger === 'manual' ? '手動' : '不明'
+  const text = `${head}${fmtJstDateTime(last.finished_at)} ${last.ok ? '成功' : '失敗'} (${trigger})`
+  if (last.ok || last.error === null) {
+    return { compId: item.comp_id, level: last.ok ? 'ok' : 'error', text, detail: null }
+  }
+  const oneLine = last.error.replace(/\s+/g, ' ').trim()
+  const detail = oneLine.length > STATUS_DETAIL_MAX ? `${oneLine.slice(0, STATUS_DETAIL_MAX)}…` : oneLine
+  return { compId: item.comp_id, level: 'error', text, detail }
+}
+
+/**
+ * 欄に出す行を組み立てる。
+ *
+ * - 会社を選んでいるとき (`selectedCompId` が空でない): その会社の 1 行 (応答に無ければ「記録なし」)。行の頭は「最終同期: 」
+ * - 「全企業」のとき: 応答の会社ごとに 1 行ずつ。行の頭は社名 (`labels` に無ければ comp_id)
+ *
+ * 日時は日本時間の `YYYY-MM-DD HH:mm` (`fmtJstDateTime`)。
+ */
+export function driverMasterStatusLines(
+  items: DriverMasterStatusItem[],
+  selectedCompId: string,
+  labels: Record<string, string>,
+): DriverMasterStatusLine[] {
+  if (selectedCompId !== '') {
+    const item = items.find(i => i.comp_id === selectedCompId) ?? { comp_id: selectedCompId, last: null, error: false }
+    return [driverMasterStatusLine(item, '')]
+  }
+  return items.map(item => driverMasterStatusLine(item, labels[item.comp_id] || item.comp_id))
 }
