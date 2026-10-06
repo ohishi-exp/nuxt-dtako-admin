@@ -142,10 +142,6 @@ function isStaleOperationResponse(target: DailyReportRow, current: DailyReportRo
   return current?.operationNo !== target.operationNo
 }
 
-function onLogin() {
-  loadList()
-}
-
 watch(session, (s) => {
   if (!s) {
     rows.value = []
@@ -1368,14 +1364,14 @@ async function saveReviseDriver() {
 onMounted(() => {
   restoreSearchForm()
   restoreSession()
-  if (session.value) loadList()
-  else showLoginPanel.value = true
+  // 初期検索はしない (ログイン直後にすぐ検索条件を触れるように)
+  if (!session.value) showLoginPanel.value = true
 })
 </script>
 
 <template>
   <div>
-    <TheearthSessionHeader title="日報編集" api-prefix="/daily-report-api" wide @login="onLogin" />
+    <TheearthSessionHeader title="日報編集" api-prefix="/daily-report-api" wide />
 
     <div v-if="!session" class="px-6 py-12 text-center text-gray-400">
       右上の「ログイン」から theearth (web地球号) にログインしてください。
