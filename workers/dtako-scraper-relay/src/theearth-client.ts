@@ -848,15 +848,14 @@ const EOCD_MAGIC = [0x50, 0x4b, 0x05, 0x06];
 /**
  * **中身が 1 件も無い ZIP** (`PK\x05\x06` の EOCD だけ、ちょうど 22 bytes) か。
  *
- * theearth は「要求した期間に運行が 1 件も無い」時にこれを返す (2026-08-01 実証、
- * Refs #633-22)。`PK\x03\x04` で始まらないので [`zipMagicOk`] は false になり、
- * 従来はページ仕様変更やログイン切れと同じ文言に潰れていた — **実際には
- * 「その読取日にデータが無い」だけで、システムはどこも壊れていない。**
+ * theearth はこの 22 bytes の空 ZIP を返すことがある。要求した期間に運行が無い時 (2026-08-01
+ * 実証、Refs #633-22) だけでなく、運行のある日にも返った実例がある (Refs ippoan/rust-alc-api#725)。
+ * `PK\x03\x04` で始まらないので [`zipMagicOk`] は false になる。
  *
- * これを分けないと何が起きるか (実害): 診断目的で未来日を投入した 3 件が
- * 「ログイン切れ、または theearth-np のページ仕様変更の可能性があります」と表示され、
- * **3 日間「原因不明の日次 cron 故障」として引き継がれ続けた** (#633-22 の調査で
- * 投入者を特定して初めて無害と判明)。
+ * **空 ZIP が返った、という事実だけを書く。** 原因 (データが無い / 作業フォルダの競合 等) は
+ * 確かめていないので文言に並べない。ページ仕様変更やログイン切れと同じ文言に潰さず分けるのは、
+ * 無害な未来日プローブ 3 件が 3 日間「原因不明の日次 cron 故障」として引き継がれた
+ * (#633-22) ように、確かめていない原因が切り分けを誤らせるため。
  */
 export function isEmptyZip(buf: ArrayBuffer): boolean {
   const bytes = new Uint8Array(buf);
@@ -905,7 +904,9 @@ function notZipMessage(buf: ArrayBuffer, ctx?: ZipRequestContext): string {
   const text = new TextDecoder("utf-8").decode(new Uint8Array(buf, 0, Math.min(buf.byteLength, NOT_ZIP_SNIFF_BYTES)));
   const facts: string[] = [];
   const title = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim();
-  if (title) facts.push(`title="${title.slice(0, 80)}"`);
+  // ASP.NET の詳細エラー画面は title が例外の本文になり、作業フォルダのパス (会社 ID 相当) を
+  // 含む。パスらしい文字 (`\` `/`) がある title は出さず、例外の型名だけにする。
+  if (title && !/[\\/]/.test(title)) facts.push(`title="${title.slice(0, 80)}"`);
   const exception = text.match(/\b[A-Za-z_][\w.]*Exception\b/)?.[0];
   if (exception) facts.push(`例外=${exception.slice(0, 120)}`);
   if (hasLoginForm(text)) facts.push("ログインフォームあり");

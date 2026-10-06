@@ -586,6 +586,19 @@ describe('isEmptyZip / 空 ZIP の文言分離 (Refs #633-22)', () => {
     expect(msg).toContain('開始=26/10/05')
   })
 
+  it('title が例外の本文 (作業フォルダのパス入り) のときは title を出さず、例外の型名だけにする', () => {
+    const body = new TextEncoder().encode(
+      "<html><head><title>Could not find a part of the path 'D:\\xxx\\csvdata\\'.</title></head><body>" +
+        "System.IO.DirectoryNotFoundException: Could not find a part of the path 'D:\\xxx\\csvdata\\'.</body></html>",
+    )
+    const msg = messageOf(body)
+    expect(msg).toContain('例外=System.IO.DirectoryNotFoundException')
+    expect(msg).not.toContain('title=')
+    expect(msg).not.toContain('csvdata')
+    expect(msg).not.toContain('xxx')
+    expect(msg).not.toContain('\\')
+  })
+
   it('ログイン画面の HTML: title とログインフォームありが入り、原因は断定しない', () => {
     const body = new TextEncoder().encode(
       '<html><head><title>ログイン</title></head><body><form>' +
