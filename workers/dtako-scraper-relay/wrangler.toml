@@ -295,18 +295,16 @@ enabled = true
 [[env.staging.tail_consumers]]
 service = "nuxt-dtako-admin-scraper-relay-tail-staging"
 
-# ★ 本番 [triggers] の 6 本のうち 2 本を**意図的に外している** —
+# ★ 本番 [triggers] の 6 本のうち 3 本を**意図的に外している** — 日次 (下記) と
 # "0 22,3,6,8,10 * * *" (乗務員マスタ同期、Refs ippoan/alc-app-s3#125) と
 # "*/10 * * * *" (DVR 取り込み、Refs #1094)。理由の本体は top-level [triggers] の
 # 各 cron の項に書いてある (この 2 本だけ「staging には足さない」と明記されている)。
 #
-# ★ **「staging は theearth に自前ログインしない」ではない** (2026-09-03 実測)。
-# ここに残っている "0 16 * * *" (dtako 日次) は staging でも実走する —
-# [env.staging.vars] に SCRAPER_MODE = "http" があり、DTAKO_CONFIG_KV は**本番と同じ
-# namespace** (id 56a36cc6…) なので dtako_accounts も読めるため。
-# **分かれ目はログインの有無ではなく頻度。** 1 日 1 回なら衝突窓が狭く staging で
-# 試験する価値が上回るが、10 分おきは本番と恒常的にセッションを奪い合う
-# (theearth は同一アカウントの同時ログインを許さない、Refs #233)。
+# ★ **dtako 日次 "0 16 * * *" は staging から外した** (Refs ippoan/rust-alc-api#725)。
+# staging は本番と同じ theearth アカウント (DTAKO_CONFIG_KV は本番と同じ namespace) を
+# 読むので、同時刻に回すと本番の取得とセッション・作業フォルダを奪い合い、
+# 「ZIP ではありません」「セッションを蹴られた」の原因になる。staging の日次は回さない。
+# (theearth は同一アカウントの同時ログインを許さない、Refs #233。)
 #
 # 残る 3 本が theearth へ自前ログインしない理由 (コードで確認):
 # "0 21,22,23,0 * * *" (ETC) は別サイト (etc-meisai)。"0 19 * * *" (拘束サマリ) と
@@ -314,7 +312,6 @@ service = "nuxt-dtako-admin-scraper-relay-tail-staging"
 # **DO を呼ぶ前に** cron.ts 側で止まる (judgeFoldScope / KINTAI_COMP_ID 未設定の分岐)。
 [env.staging.triggers]
 crons = [
-  "0 16 * * *",
   "0 21,22,23,0 * * *",
   "0 19 * * *",
   "30 21 * * *",

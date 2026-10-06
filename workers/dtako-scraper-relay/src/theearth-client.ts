@@ -720,6 +720,22 @@ export async function postForm(
 // 和暦/西暦判定・日付分解 (dtako-scraper の detect_wareki/parse_date_parts を移植)
 // ---------------------------------------------------------------------------
 
+/** データ表の最初の日付セル (`YY/MM/DD`、タグ除去後に trim したもの) を返す。無ければ null。
+ * [`detectWareki`] の判定根拠そのもの — 判定結果と一緒にログへ出して、後から
+ * 「何を見て和暦/西暦と決めたか」を切り分けられるようにする。 */
+export function findFirstDateCell(html: string): string | null {
+  const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tdRe.exec(html)) !== null) {
+    const text = m[1]
+      .replace(/<[^>]+>/g, "")
+      .replace(/&nbsp;/gi, " ")
+      .trim();
+    if (/^\d{2}\/\d{2}\/\d{2}$/.test(text)) return text;
+  }
+  return null;
+}
+
 export function detectWareki(html: string, now: Date = new Date()): boolean {
   // 元ソース (dtako-scraper download.rs::detect_wareki) は td.textContent.trim() が
   // ^\d{2}/\d{2}/\d{2}$ のセル (= データ表の日付セル) の最初のものを見る。theearth の
@@ -729,20 +745,8 @@ export function detectWareki(html: string, now: Date = new Date()): boolean {
   //   - 生 HTML の broad regex (`\b\d{2}/\d{2}/\d{2}\b`) は表より前の別日付 (15/11/15 等) を
   //     拾って令和/西暦を取り違える
   // どちらも 27324455 で 08(令和) を送って 270KB HTML (範囲外 0 件) になった。実機確認済み。
-  const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
-  let m: RegExpExecArray | null;
-  let pageYear: number | null = null;
-  while ((m = tdRe.exec(html)) !== null) {
-    const text = m[1]
-      .replace(/<[^>]+>/g, "")
-      .replace(/&nbsp;/gi, " ")
-      .trim();
-    const dm = text.match(/^(\d{2})\/\d{2}\/\d{2}$/);
-    if (dm) {
-      pageYear = parseInt(dm[1], 10);
-      break;
-    }
-  }
+  const cell = findFirstDateCell(html);
+  const pageYear = cell === null ? null : parseInt(cell.slice(0, 2), 10);
   if (pageYear === null) return true; // 日付セルが無ければデフォルトは和暦 (Rust 版に合わせる)
   const nowYear = now.getUTCFullYear();
   const westernYY = nowYear % 100;
@@ -844,15 +848,14 @@ const EOCD_MAGIC = [0x50, 0x4b, 0x05, 0x06];
 /**
  * **中身が 1 件も無い ZIP** (`PK\x05\x06` の EOCD だけ、ちょうど 22 bytes) か。
  *
- * theearth は「要求した期間に運行が 1 件も無い」時にこれを返す (2026-08-01 実証、
- * Refs #633-22)。`PK\x03\x04` で始まらないので [`zipMagicOk`] は false になり、
- * 従来はページ仕様変更やログイン切れと同じ文言に潰れていた — **実際には
- * 「その読取日にデータが無い」だけで、システムはどこも壊れていない。**
+ * theearth はこの 22 bytes の空 ZIP を返すことがある。要求した期間に運行が無い時 (2026-08-01
+ * 実証、Refs #633-22) だけでなく、運行のある日にも返った実例がある (Refs ippoan/rust-alc-api#725)。
+ * `PK\x03\x04` で始まらないので [`zipMagicOk`] は false になる。
  *
- * これを分けないと何が起きるか (実害): 診断目的で未来日を投入した 3 件が
- * 「ログイン切れ、または theearth-np のページ仕様変更の可能性があります」と表示され、
- * **3 日間「原因不明の日次 cron 故障」として引き継がれ続けた** (#633-22 の調査で
- * 投入者を特定して初めて無害と判明)。
+ * **空 ZIP が返った、という事実だけを書く。** 原因 (データが無い / 作業フォルダの競合 等) は
+ * 確かめていないので文言に並べない。ページ仕様変更やログイン切れと同じ文言に潰さず分けるのは、
+ * 無害な未来日プローブ 3 件が 3 日間「原因不明の日次 cron 故障」として引き継がれた
+ * (#633-22) ように、確かめていない原因が切り分けを誤らせるため。
  */
 export function isEmptyZip(buf: ArrayBuffer): boolean {
   const bytes = new Uint8Array(buf);
@@ -865,35 +868,67 @@ export function isEmptyZip(buf: ArrayBuffer): boolean {
   );
 }
 
+/** ZIP でない応答に添える「何を送ってどの段で受けたか」の事実。`downloadCsvZip` だけが渡す。 */
+export interface ZipRequestContext {
+  stage: "stage1" | "stage2";
+  isWareki: boolean;
+  /** 呼び出し側が指定した読取日 (`YYYY-MM-DD`)。 */
+  startDate: string;
+  endDate: string;
+  /** 実際にフォームへ送った年月日 (和暦/西暦変換後の 2 桁)。 */
+  start: JapaneseDateParts;
+  end: JapaneseDateParts;
+}
+
+const NOT_ZIP_SNIFF_BYTES = 65536;
+
+function describeZipRequest(ctx: ZipRequestContext): string {
+  const f = (p: JapaneseDateParts) => `${p.y}/${p.m}/${p.d}`;
+  return (
+    ` [${ctx.stage} / ${ctx.isWareki ? "和暦" : "西暦"} / 送信 開始=${f(ctx.start)} 終了=${f(ctx.end)}` +
+    ` (指定 ${ctx.startDate}〜${ctx.endDate})]`
+  );
+}
+
 /** ZIP でない時の user 向けメッセージ (assertZipMagic / ensureZip で共用)。
  *
- * **空 ZIP は別文言にする** ([`isEmptyZip`] の doc 参照)。原因が確定している
- * ケースに「確かめていない原因の候補」を並べると切り分けを誤らせる。 */
-function notZipMessage(buf: ArrayBuffer): string {
+ * **事実だけを書く。** 確かめていない原因 (「ログイン切れ」「データがありません」
+ * 「ページ仕様変更」) は並べない — 実際の ZIP でない応答は theearth のサーバ例外
+ * (`DirectoryNotFoundException` 等) で、空 ZIP も運行のある日に返った実例がある。
+ * 応答が HTML なら `<title>` と最初の例外名を載せる。 */
+function notZipMessage(buf: ArrayBuffer, ctx?: ZipRequestContext): string {
+  const suffix = ctx ? describeZipRequest(ctx) : "";
   if (isEmptyZip(buf)) {
-    return (
-      `取得したデータが空の ZIP です (${buf.byteLength} bytes) — ` +
-      "その読取日に theearth 側のデータがありません (未来日・休業日など)"
-    );
+    return `取得したデータが空の ZIP です (${buf.byteLength} bytes)${suffix}`;
   }
+  const text = new TextDecoder("utf-8").decode(new Uint8Array(buf, 0, Math.min(buf.byteLength, NOT_ZIP_SNIFF_BYTES)));
+  const facts: string[] = [];
+  const title = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim();
+  // ASP.NET の詳細エラー画面は title が例外の本文になり、作業フォルダのパス (会社 ID 相当) を
+  // 含む。パスらしい文字 (`\` `/`) がある title は出さず、例外の型名だけにする。
+  if (title && !/[\\/]/.test(title)) facts.push(`title="${title.slice(0, 80)}"`);
+  const exception = text.match(/\b[A-Za-z_][\w.]*Exception\b/)?.[0];
+  if (exception) facts.push(`例外=${exception.slice(0, 120)}`);
+  if (hasLoginForm(text)) facts.push("ログインフォームあり");
   return (
-    `取得したデータが ZIP ではありません (${buf.byteLength} bytes) — ` +
-    "ログイン切れ、または theearth-np のページ仕様変更の可能性があります"
+    `取得したデータが ZIP ではありません (${buf.byteLength} bytes)` +
+    (facts.length > 0 ? ` — ${facts.join(" ")}` : "") +
+    suffix
   );
 }
 
 /** ZIP のマジックバイト (`PK\x03\x04`) を検証する。「黙って200」対策の要。 */
-export function assertZipMagic(buf: ArrayBuffer): void {
+export function assertZipMagic(buf: ArrayBuffer, ctx?: ZipRequestContext): void {
   if (!zipMagicOk(buf)) {
-    throw new TheearthClientError(notZipMessage(buf));
+    throw new TheearthClientError(notZipMessage(buf, ctx));
   }
 }
 
 /** ZIP なら buf をそのまま返し、ZIP でなければ **生バイトを載せた** TheearthNotZipError を
  * 投げる (呼び出し側が中身をダウンロードして原因調査できるようにする)。 */
-export function ensureZip(buf: ArrayBuffer, contentType: string): ArrayBuffer {
+export function ensureZip(buf: ArrayBuffer, contentType: string, ctx?: ZipRequestContext): ArrayBuffer {
   if (!zipMagicOk(buf)) {
-    throw new TheearthNotZipError(notZipMessage(buf), buf, contentType);
+    throw new TheearthNotZipError(notZipMessage(buf, ctx), buf, contentType);
   }
   return buf;
 }
@@ -967,6 +1002,27 @@ export async function downloadCsvZip(
   const isWareki = detectWareki(html);
   const start = splitJapaneseDate(range.startDate, isWareki);
   const end = splitJapaneseDate(range.endDate, isWareki);
+  // 後から「何を見て和暦/西暦と決め、何を送ったか」を切り分けられるよう 1 行で残す
+  // (元の Rust 実装 download.rs が判定結果と入力値をログに出しているのに合わせる)。
+  console.log(
+    JSON.stringify({
+      csv_request: "date_range",
+      is_wareki: isWareki,
+      first_date_cell: findFirstDateCell(html),
+      start_date: range.startDate,
+      end_date: range.endDate,
+      start: start,
+      end: end,
+    }),
+  );
+  const zipCtx = (stage: "stage1" | "stage2"): ZipRequestContext => ({
+    stage,
+    isWareki,
+    startDate: range.startDate,
+    endDate: range.endDate,
+    start,
+    end,
+  });
 
   // 日付範囲フィールド (rdoSelect1/rdoDate1 の radio + 開始/終了 年月日)。ASP.NET の
   // field name (`ctl00$MainContent$...`) は GET ページと確認ページで同一なので、
@@ -1019,7 +1075,7 @@ export async function downloadCsvZip(
   // 1段階目で直接 ZIP が返るケース (実装差異に備える)
   if (stage1ContentType.includes("application/octet-stream") || stage1ContentType.includes("zip")) {
     const buf = await stage1Res.arrayBuffer();
-    return ensureZip(buf, stage1ContentType);
+    return ensureZip(buf, stage1ContentType, zipCtx("stage1"));
   }
 
   // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + **日付範囲** + 出力ボタン
@@ -1055,7 +1111,7 @@ export async function downloadCsvZip(
     postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs, "stage2"),
   );
   const buf = await stage2Res.arrayBuffer();
-  return ensureZip(buf, stage2Res.headers.get("content-type") ?? "");
+  return ensureZip(buf, stage2Res.headers.get("content-type") ?? "", zipCtx("stage2"));
 }
 
 // ---------------------------------------------------------------------------

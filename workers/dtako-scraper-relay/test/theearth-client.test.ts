@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   assertZipMagic,
   cookieHeader,
@@ -495,7 +495,7 @@ describe('isEmptyZip / 空 ZIP の文言分離 (Refs #633-22)', () => {
     expect(isEmptyZip(longer.buffer as ArrayBuffer)).toBe(false)
   })
 
-  it('空 ZIP は「データがありません」と言い、**確かめていない原因 (ログイン切れ / ページ仕様変更) を並べない**', () => {
+  it('空 ZIP は事実 (空の ZIP が返った) だけを言い、**確かめていない原因 (ログイン切れ / ページ仕様変更) を並べない**', () => {
     const err = (() => {
       try {
         assertZipMagic(emptyZipBytes().buffer as ArrayBuffer)
@@ -506,15 +506,15 @@ describe('isEmptyZip / 空 ZIP の文言分離 (Refs #633-22)', () => {
     })()
     expect(err).toBeInstanceOf(TheearthClientError)
     expect(err!.message).toContain('空の ZIP')
-    expect(err!.message).toContain('データがありません')
     expect(err!.message).toContain('22 bytes')
+    expect(err!.message).not.toContain('データがありません')
     // ここが本件の主題 — この 2 語が出ていたせいで無害な未来日プローブ 3 件が
     // 3 日間「原因不明の cron 故障」として引き継がれた。
     expect(err!.message).not.toContain('ログイン切れ')
     expect(err!.message).not.toContain('ページ仕様変更')
   })
 
-  it('空 ZIP **以外**の非 ZIP は従来どおり候補を挙げる文言のまま (回帰させない)', () => {
+  it('空 ZIP **以外**の非 ZIP も、確かめていない原因 (ログイン切れ / 仕様変更) は並べない', () => {
     const err = (() => {
       try {
         assertZipMagic(new TextEncoder().encode('<html>error page</html>').buffer as ArrayBuffer)
@@ -524,8 +524,91 @@ describe('isEmptyZip / 空 ZIP の文言分離 (Refs #633-22)', () => {
       }
     })()
     expect(err!.message).toContain('ZIP ではありません')
-    expect(err!.message).toContain('ログイン切れ')
+    expect(err!.message).not.toContain('ログイン切れ')
+    expect(err!.message).not.toContain('ページ仕様変更')
     expect(err!.message).not.toContain('空の ZIP')
+  })
+
+  const ctx = {
+    stage: 'stage2' as const,
+    isWareki: false,
+    startDate: '2026-10-05',
+    endDate: '2026-10-05',
+    start: { y: '26', m: '10', d: '05' },
+    end: { y: '26', m: '10', d: '05' },
+  }
+  const messageOf = (body: Uint8Array) => {
+    try {
+      assertZipMagic(body.buffer as ArrayBuffer, ctx)
+    } catch (e) {
+      return (e as Error).message
+    }
+    throw new Error('should throw')
+  }
+
+  it('空 ZIP: 段・和暦/西暦・送った年月日が文言に入る', () => {
+    const msg = messageOf(emptyZipBytes())
+    expect(msg).toContain('空の ZIP')
+    expect(msg).toContain('stage2')
+    expect(msg).toContain('西暦')
+    expect(msg).toContain('開始=26/10/05')
+    expect(msg).toContain('終了=26/10/05')
+    expect(msg).toContain('2026-10-05')
+  })
+
+  it('和暦のとき「和暦」と送った 2 桁年が入る', () => {
+    try {
+      assertZipMagic(emptyZipBytes().buffer as ArrayBuffer, {
+        ...ctx,
+        isWareki: true,
+        start: { y: '08', m: '10', d: '05' },
+        end: { y: '08', m: '10', d: '05' },
+      })
+    } catch (e) {
+      expect((e as Error).message).toContain('和暦')
+      expect((e as Error).message).toContain('開始=08/10/05')
+      return
+    }
+    throw new Error('should throw')
+  })
+
+  it('サーバ例外の HTML: title と最初の例外名が入る (会社 ID / サーバ名は伏字)', () => {
+    const body = new TextEncoder().encode(
+      '<html><head><title>Runtime Error</title></head><body>' +
+        "System.IO.DirectoryNotFoundException: Could not find a part of the path 'D:\\xxx\\csvdata\\'." +
+        ' at System.IO.__Error.WinIOError / System.IO.IOException</body></html>',
+    )
+    const msg = messageOf(body)
+    expect(msg).toContain('title="Runtime Error"')
+    expect(msg).toContain('例外=System.IO.DirectoryNotFoundException')
+    expect(msg).not.toContain('IOException ')
+    expect(msg).toContain('stage2')
+    expect(msg).toContain('開始=26/10/05')
+  })
+
+  it('title が例外の本文 (作業フォルダのパス入り) のときは title を出さず、例外の型名だけにする', () => {
+    const body = new TextEncoder().encode(
+      "<html><head><title>Could not find a part of the path 'D:\\xxx\\csvdata\\'.</title></head><body>" +
+        "System.IO.DirectoryNotFoundException: Could not find a part of the path 'D:\\xxx\\csvdata\\'.</body></html>",
+    )
+    const msg = messageOf(body)
+    expect(msg).toContain('例外=System.IO.DirectoryNotFoundException')
+    expect(msg).not.toContain('title=')
+    expect(msg).not.toContain('csvdata')
+    expect(msg).not.toContain('xxx')
+    expect(msg).not.toContain('\\')
+  })
+
+  it('ログイン画面の HTML: title とログインフォームありが入り、原因は断定しない', () => {
+    const body = new TextEncoder().encode(
+      '<html><head><title>ログイン</title></head><body><form>' +
+        '<input type="text" name="txtPass" id="txtPass"><input type="password" name="txtPassword">' +
+        '</form></body></html>',
+    )
+    const msg = messageOf(body)
+    expect(msg).toContain('title="ログイン"')
+    expect(msg).toContain('ログインフォームあり')
+    expect(msg).not.toContain('ログイン切れ')
   })
 })
 
@@ -953,6 +1036,32 @@ describe('downloadCsvZip', () => {
     expect(notZip.contentType).toBe('text/html; charset=utf-8')
     expect(new Uint8Array(notZip.responseBytes)).toEqual(new Uint8Array(bodyBytes))
     expect(notZip.message).toContain('ZIP ではありません')
+    expect(notZip.message).toContain('stage2')
+    expect(notZip.message).toContain('指定 ')
+  })
+
+  it('送った日付と和暦/西暦の判定を 1 行の構造化ログに出す', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const fetchImpl = sequenceFetch([
+        html(csvPageHtml()),
+        html(STAGE1_CONFIRM_HTML),
+        new Response(ZIP_BYTES, { status: 200, headers: { 'content-type': 'application/zip' } }),
+      ])
+      await downloadCsvZip(createCookieJar(), range, fetchImpl)
+      const line = spy.mock.calls.map((c) => String(c[0])).find((l) => l.includes('csv_request'))
+      expect(line).toBeDefined()
+      const log = JSON.parse(line!)
+      expect(log.csv_request).toBe('date_range')
+      expect(typeof log.is_wareki).toBe('boolean')
+      expect(log).toHaveProperty('first_date_cell')
+      expect(log.start_date).toBe('2026-07-01')
+      expect(log.end_date).toBe('2026-07-02')
+      expect(log.start).toEqual(expect.objectContaining({ y: expect.any(String), m: '07', d: '01' }))
+      expect(log.end).toEqual(expect.objectContaining({ m: '07', d: '02' }))
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('throws TheearthNotZipError when stage-1 directly returns non-ZIP octet-stream', async () => {
