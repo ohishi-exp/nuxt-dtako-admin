@@ -8,9 +8,13 @@ import { ICHIBAN_PROXY_ALLOWED_PATHS, isAllowedIchibanProxyPath } from '../../se
 
 const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<unknown>)(event)
 
+/** 上流 = Service Binding `ICHIBAN_DB` の Worker だけ (Refs ohishi-exp/rust-ichibanboshi#322)。各 describe はこれを `fetchMock` と呼ぶ。 */
+const bindingFetch = vi.fn()
+const ICHIBAN_DB = { fetch: bindingFetch }
+
 /**
- * `requireAuth` (Refs #988) が通る前提の event。**`INTERNAL_SHARED_SECRET` を既定で
- * 載せる** — CF Access binding の 503 を見るテストが、認証側の 503 で先に落ちて
+ * `requireAuth` (Refs #988) が通る前提の event。**`INTERNAL_SHARED_SECRET` と `ICHIBAN_DB` を
+ * 既定で載せる** — `ICHIBAN_DB` 未設定の 503 を見るテストが、認証側の 503 で先に落ちて
  * 「別の理由の 503」を緑にしてしまわないようにする。認証側だけを見たいテストは
  * `opts.env` で env を丸ごと差し替える。
  */
@@ -21,7 +25,7 @@ function eventWith(env: Record<string, unknown>, opts: { path?: string, url?: st
   const url = opts.url ?? `https://dtako.ippoan.org/api/ichiban/${path}?vehicle=101&from=2026-06-01`
   return {
     context: {
-      cloudflare: { env: opts.env ?? { INTERNAL_SHARED_SECRET: 'secret', ...env } },
+      cloudflare: { env: opts.env ?? { INTERNAL_SHARED_SECRET: 'secret', ICHIBAN_DB, ...env } },
       params: { path },
     },
     __responseHeaders: {} as Record<string, string>,
@@ -50,101 +54,39 @@ vi.mock('h3', async (importOriginal) => {
 })
 
 describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
-  const fetchMock = vi.fn()
+  const fetchMock = bindingFetch
 
   beforeEach(() => {
     fetchMock.mockReset()
-    vi.stubGlobal('fetch', fetchMock)
     requireAuthMock.mockReset()
     requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
-  it('NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID/SECRET が両方あれば upstream に CF-Access ヘッダ付きで転送する', async () => {
+  it('ICHIBAN_DB binding へ同じ path・クエリで GET し、応答をそのまま返す', async () => {
     fetchMock.mockResolvedValue(new Response('{"ok":true}', {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }))
-    const event = eventWith({
-      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
-      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
-    })
+    const event = eventWith({})
 
     const body = await call(event)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    const [url, init] = fetchMock.mock.calls[0]! as [URL, RequestInit]
-    expect(url.toString()).toBe('https://rust-ichiban.mtamaramu.com/api/sales/vehicle-daily?vehicle=101&from=2026-06-01')
-    expect(init.method).toBe('GET')
-    expect((init.headers as Record<string, string>)['CF-Access-Client-Id']).toBe('client-id-x')
-    expect((init.headers as Record<string, string>)['CF-Access-Client-Secret']).toBe('client-secret-x')
+    const [req] = fetchMock.mock.calls[0]! as [Request]
+    expect(req.url).toBe('https://ichibanboshi-ichiban/api/sales/vehicle-daily?vehicle=101&from=2026-06-01')
+    expect(req.method).toBe('GET')
     expect(body).toBe('{"ok":true}')
     expect(event.__statusCode).toBe(200)
     expect(event.__responseHeaders['Content-Type']).toBe('application/json')
   })
 
-  it('NUXT_ICHIBAN_UPSTREAM=worker なら ICHIBAN_DB binding の応答を返し、オンプレを叩かない (Refs ohishi-exp/rust-ichibanboshi#322)', async () => {
-    const bindingFetch = vi.fn(async () => new Response('{"data":[]}', { status: 200, headers: { 'content-type': 'application/json' } }))
-    const event = eventWith({ NUXT_ICHIBAN_UPSTREAM: 'worker', ICHIBAN_DB: { fetch: bindingFetch } })
-
-    const body = await call(event)
-
-    expect(body).toBe('{"data":[]}')
-    expect((bindingFetch.mock.calls[0]! as unknown as [Request])[0].url).toBe('https://ichibanboshi-ichiban/api/sales/vehicle-daily?vehicle=101&from=2026-06-01')
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(event.__statusCode).toBe(200)
-    expect(event.__responseHeaders['Content-Type']).toBe('application/json')
-  })
-
-  it('NUXT_ICHIBAN_API_URL が設定されていればそちらを base に使う', async () => {
-    fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
-    const event = eventWith({
-      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a',
-      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b',
-      NUXT_ICHIBAN_API_URL: 'https://ichiban-staging.example.com',
+  it('ICHIBAN_DB binding 未設定なら 503 で弾く (理由は message、statusMessage は ASCII 固定句)', async () => {
+    const event = eventWith({}, { env: { INTERNAL_SHARED_SECRET: 'secret' } })
+    await expect(call(event)).rejects.toMatchObject({
+      statusCode: 503,
+      statusMessage: 'ichiban upstream request failed',
+      message: 'ICHIBAN_DB binding が未設定です',
     })
-
-    await call(event)
-
-    const [url] = fetchMock.mock.calls[0]! as [URL]
-    expect(url.origin).toBe('https://ichiban-staging.example.com')
-  })
-
-  it('Secrets Store binding (.get()) 形式でも解決する', async () => {
-    fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
-    const event = eventWith({
-      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: { get: async () => 'from-store-id' },
-      ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => 'from-store-secret' },
-    })
-
-    await call(event)
-
-    const [, init] = fetchMock.mock.calls[0]! as [URL, RequestInit]
-    expect((init.headers as Record<string, string>)['CF-Access-Client-Id']).toBe('from-store-id')
-    expect((init.headers as Record<string, string>)['CF-Access-Client-Secret']).toBe('from-store-secret')
-  })
-
-  it('NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID 未設定なら 503 で弾き fetch しない', async () => {
-    const event = eventWith({ ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
-    await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('ICHIBAN_CF_ACCESS_CLIENT_SECRET 未設定なら 503 で弾き fetch しない', async () => {
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a' })
-    await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('Secrets Store binding.get() が reject する場合も未設定として 503', async () => {
-    const event = eventWith({
-      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: { get: async () => { throw new Error('not found') } },
-      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b',
-    })
-    await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -153,7 +95,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
       status: 400,
       headers: { 'content-type': 'application/json' },
     }))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     const body = await call(event)
 
@@ -161,9 +103,9 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect(body).toBe('{"error":"bad request"}')
   })
 
-  it('fetch 自体が失敗 (tunnel down 等) したら 502 を返す', async () => {
+  it('Worker への fetch 自体が失敗したら 502 を返す', async () => {
     fetchMock.mockRejectedValue(new Error('network down'))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     await expect(call(event)).rejects.toMatchObject({ statusCode: 502 })
   })
@@ -175,7 +117,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
    */
   it('fetch が Error でない値で reject しても 502 (理由は message、statusMessage は ASCII 固定句)', async () => {
     fetchMock.mockRejectedValue('connection refused')
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     await expect(call(event)).rejects.toMatchObject({
       statusCode: 502,
@@ -198,22 +140,13 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('Secrets Store binding.get() が空値解決 (undefined) の場合も未設定として 503', async () => {
-    const event = eventWith({
-      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: { get: async () => undefined as unknown as string },
-      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b',
-    })
-    await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
   /** ★ **#1015 で挙動を変えた 1 点。**以前はここが「base の root に転送する」を
    * 固定していた (`url.pathname === '/'`) — path 無しは allowlist の 6 件に無いので、
    * いまは転送せず 403 で止める。**空文字を通す口を残さない。** */
   it('path パラメータが無ければ 403 で止め、root へは転送しない (Refs #1015)', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
     const event = eventWith(
-      { NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' },
+      {},
       { path: undefined as unknown as string, url: 'https://dtako.ippoan.org/api/ichiban' },
     )
     event.context.params = {} as unknown as { path: string }
@@ -226,7 +159,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     // body なし応答は Response が Content-Type を自動付与しない (文字列 body だと
     // text/plain;charset=UTF-8 が自動で付くため、意図的に body なしにする)。
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     await call(event)
 
@@ -244,7 +177,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
    */
   it('本文が空の 503 には日本語の理由を作って返す (status は変えない)', async () => {
     fetchMock.mockResolvedValue(new Response('', { status: 503 }))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     const body = await call(event) as string
 
@@ -261,7 +194,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
   })
 
   it('本文が空の 400 は「リクエストを拒否」、500 は「内部エラー」と書き分ける', async () => {
-    const env = { NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' }
+    const env = {}
 
     fetchMock.mockResolvedValue(new Response('', { status: 400 }))
     const bad = JSON.parse(await call(eventWith(env)) as string) as { error: string }
@@ -274,7 +207,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
 
   it('空白だけの本文も「空」として扱う', async () => {
     fetchMock.mockResolvedValue(new Response('  \n ', { status: 503 }))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     const parsed = JSON.parse(await call(event) as string) as { error: string }
 
@@ -287,7 +220,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
       status: 503,
       headers: { 'content-type': 'application/json' },
     }))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     const body = await call(event)
 
@@ -298,7 +231,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
   /** ★ 陰性対照。**2xx の空本文は正常**なので触らない (204 等)。 */
   it('本文が空でも 2xx なら何も足さない', async () => {
     fetchMock.mockResolvedValue(new Response('', { status: 200 }))
-    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({})
 
     const body = await call(event)
 
@@ -330,11 +263,10 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
  * fail-closed)、こちらは上流へ渡す身元をそもそも持たない。
  */
 describe('ichiban proxy の認可 (Refs #988)', () => {
-  const fetchMock = vi.fn()
+  const fetchMock = bindingFetch
   const ENV = {
     INTERNAL_SHARED_SECRET: 'secret',
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+    ICHIBAN_DB,
   }
   const eventFor = (env: Record<string, unknown>) => ({
     context: { cloudflare: { env }, params: { path: 'api/sales/vehicle-daily' } },
@@ -345,17 +277,12 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
 
   beforeEach(() => {
     fetchMock.mockReset()
-    vi.stubGlobal('fetch', fetchMock)
     requireAuthMock.mockReset()
     requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
   /** ★★ **この PR の本体**。直す前は 200 が返り、upstream が 1 回叩かれていた。 */
-  it('★ 未ログインは 401 で、upstream を 1 回も叩かない (Service Token を貸さない)', async () => {
+  it('★ 未ログインは 401 で、upstream を 1 回も叩かない (Worker への経路を貸さない)', async () => {
     requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
     fetchMock.mockResolvedValue(new Response('{"ok":true}', { status: 200 }))
 
@@ -429,8 +356,8 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
  * ★ **upstream path を allowlist で固定する** (Refs #1015)。
  *
  * #988 で入ったのは **認証**だけで、**どの path を中継してよいか**は 1 か所も見て
- * いなかった。この route は呼び出し元が持っていない CF Access Service Token を
- * こちらで付け足すので、中継先を画面が実際に使う口に固定する。
+ * いなかった。この route は呼び出し元が持っていない到達経路 (当時は CF Access Service Token、
+ * いまは認可なしの Worker への Service Binding) を貸すので、中継先を画面が実際に使う口に固定する。
  *
  * **測るのは両側**:
  * - **陽性対照** — allowlist の 6 件が**全部** upstream に届く。ここを測らずに塞ぐと
@@ -441,11 +368,10 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
  * 叩いたか」を測っている。** 塞げているかの根拠はそこまで。
  */
 describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
-  const fetchMock = vi.fn()
+  const fetchMock = bindingFetch
   const ENV = {
     INTERNAL_SHARED_SECRET: 'secret',
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+    ICHIBAN_DB,
   }
   const eventForPath = (path: string, search = '') => ({
     context: { cloudflare: { env: ENV }, params: { path } },
@@ -456,13 +382,8 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
 
   beforeEach(() => {
     fetchMock.mockReset()
-    vi.stubGlobal('fetch', fetchMock)
     requireAuthMock.mockReset()
     requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
-  })
-
-  afterEach(() => {
-    vi.unstubAllGlobals()
   })
 
   /**
@@ -504,7 +425,7 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     }
 
     expect(fetchMock).toHaveBeenCalledTimes(ICHIBAN_PROXY_ALLOWED_PATHS.length)
-    expect(fetchMock.mock.calls.map(([url]) => (url as URL).pathname)).toEqual(
+    expect(fetchMock.mock.calls.map(([req]) => new URL((req as Request).url).pathname)).toEqual(
       ICHIBAN_PROXY_ALLOWED_PATHS.map(p => `/${p}`),
     )
   })
@@ -582,7 +503,7 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     await call(noSecret).catch((e: { statusMessage?: string }) => {
       collected.push(e.statusMessage ?? '')
     })
-    // 502 — fetchIchiban が throw する経路
+    // 502 — ICHIBAN_DB binding の fetch が reject する経路
     fetchMock.mockRejectedValue(new Error('接続できません'))
     await call(eventForPath('api/employees')).catch((e: { statusMessage?: string }) => {
       collected.push(e.statusMessage ?? '')
@@ -600,7 +521,7 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
 
     await call(eventForPath('api/costs/vehicle-daily', '?vehicle=101&from=2026-06-01&limit=5000'))
 
-    const [url] = fetchMock.mock.calls[0]! as [URL]
+    const url = new URL((fetchMock.mock.calls[0]! as [Request])[0].url)
     expect(url.pathname).toBe('/api/costs/vehicle-daily')
     expect(url.search).toBe('?vehicle=101&from=2026-06-01&limit=5000')
   })
@@ -613,7 +534,7 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  /** 純関数そのもの (`fetchIchiban` 側では照合しない — 照合は ichiban proxy の route だけ)。 */
+  /** 純関数そのもの。 */
   it('isAllowedIchibanProxyPath は完全一致のみ true', () => {
     expect(ICHIBAN_PROXY_ALLOWED_PATHS.every(p => isAllowedIchibanProxyPath(p))).toBe(true)
     expect(isAllowedIchibanProxyPath('health')).toBe(true)

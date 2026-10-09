@@ -123,8 +123,6 @@ NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 # CF Access Service Token の client_id (公開識別子なので secret ではなく var、
 # nuxt-ichibanboshi/wrangler.toml の NUXT_CF_ACCESS_CLIENT_ID と同値・同トークン共用)。
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
-# 一番星の上流。本番は worker (Refs ohishi-exp/rust-ichibanboshi#322)
-NUXT_ICHIBAN_UPSTREAM = "worker"
 
 # secret-verify (frontend-ci) 用の明示宣言。**必ず空 `[]` にする**。
 # `secrets.required` は CI secret-verify の監査対象であると同時に **wrangler が
@@ -203,8 +201,6 @@ NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
 NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
-# 一番星の上流。staging も worker (Refs ohishi-exp/rust-ichibanboshi#322)
-NUXT_ICHIBAN_UPSTREAM = "worker"
 
 # 軽量プレビュー環境 (create-preview skill、main 以外の branch への push ごとに
 # test/typecheck 無しで deploy)。backend は staging をそのまま再利用する
@@ -279,8 +275,6 @@ NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-preview.ippoan.org"
 NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
-# 一番星の上流。preview も worker (Refs ohishi-exp/rust-ichibanboshi#322)
-NUXT_ICHIBAN_UPSTREAM = "worker"
 
 # top-level [secrets] も named environment には継承されない (wrangler が deploy
 # 時に warning を出す、この repo で既出の keep_vars/observability 系と同型の罠)。
@@ -364,8 +358,6 @@ NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
 NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
-# 一番星の上流。dev も worker (Refs ohishi-exp/rust-ichibanboshi#322)
-NUXT_ICHIBAN_UPSTREAM = "worker"
 DEV_LOGIN = "true"
 
 [env.dev.secrets]
