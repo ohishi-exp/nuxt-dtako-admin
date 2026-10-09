@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import handler, { MAX_BODY_BYTES } from '../../server/api/kyuyo/[...path].post'
 
@@ -54,24 +54,19 @@ vi.mock('h3', async (importOriginal) => {
   }
 })
 
+// 上流は Service Binding (`ICHIBAN_KYUYO`) だけ。binding の fetch に渡った Request を見る。
+const fetchMock = vi.fn()
 const ENV = {
-  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
-  ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+  ICHIBAN_KYUYO: { fetch: (req: Request) => fetchMock(req) },
 }
+const sent = (i = 0) => fetchMock.mock.calls[i]![0] as Request
 
 describe('kyuyo POST proxy (Refs #467, #677)', () => {
-  const fetchMock = vi.fn()
-
   beforeEach(() => {
     fetchMock.mockReset()
-    vi.stubGlobal('fetch', fetchMock)
   })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
-  it('CF-Access ヘッダと body を付けて POST し、応答をそのまま返す', async () => {
+  it('body と content-type を付けて Worker へ POST し、応答をそのまま返す', async () => {
     fetchMock.mockResolvedValue(new Response('{"saved":112}', {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -83,13 +78,11 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     expect(out).toBe('{"saved":112}')
     expect(event.__statusCode).toBe(200)
     expect(event.__responseHeaders['Content-Type']).toBe('application/json')
-    const [url, init] = fetchMock.mock.calls[0]!
-    expect(String(url)).toBe('https://rust-ichiban.mtamaramu.com/api/kyuyo/sync')
-    expect(init.method).toBe('POST')
-    expect(init.body).toBe('{"month":"2026-01","rows":[]}')
-    expect(init.headers['CF-Access-Client-Id']).toBe('client-id-x')
-    expect(init.headers['CF-Access-Client-Secret']).toBe('client-secret-x')
-    expect(init.headers['Content-Type']).toBe('application/json')
+    const req = sent()
+    expect(req.url).toBe('https://ichibanboshi-kyuyo/kyuyo/sync')
+    expect(req.method).toBe('POST')
+    expect(await req.text()).toBe('{"month":"2026-01","rows":[]}')
+    expect(req.headers.get('content-type')).toBe('application/json')
   })
 
   /** 認可は upstream (introspect + email allowlist) が担うので、JWT はそのまま渡す。
@@ -98,8 +91,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
     await call(eventWith(ENV, { cookies: { logi_auth_token: 'jwt-cookie' } }))
 
-    const [, init] = fetchMock.mock.calls[0]!
-    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
+    expect(sent().headers.get('authorization')).toBe('Bearer jwt-cookie')
   })
 
   /** デプロイ skew 用の後方互換 (古いバンドルのタブが残っている間だけ効く)。 */
@@ -107,8 +99,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
     await call(eventWith(ENV, { authorization: 'Bearer jwt-x' }))
 
-    const [, init] = fetchMock.mock.calls[0]!
-    expect(init.headers.Authorization).toBe('Bearer jwt-x')
+    expect(sent().headers.get('authorization')).toBe('Bearer jwt-x')
   })
 
   it('cookie とヘッダが両方あれば cookie を優先する', async () => {
@@ -118,8 +109,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
       authorization: 'Bearer jwt-header',
     }))
 
-    const [, init] = fetchMock.mock.calls[0]!
-    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
+    expect(sent().headers.get('authorization')).toBe('Bearer jwt-cookie')
   })
 
   /** ★ **陽性対照 3 本目** — dev cookie は `DEV_LOGIN === 'true'` のときだけ見る。 */
@@ -127,7 +117,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
     await call(eventWith(ENV, { devLogin: true, cookies: { logi_auth_token_dev: 'jwt-dev' } }))
 
-    expect(fetchMock.mock.calls[0]![1].headers.Authorization).toBe('Bearer jwt-dev')
+    expect(sent().headers.get('authorization')).toBe('Bearer jwt-dev')
   })
 
   /**
@@ -168,18 +158,17 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     const event = eventWith(ENV, { cookies: { logi_auth_token: 'jwt-cookie' } })
     await call(event)
 
-    expect(fetchMock.mock.calls[0]![1].headers.Authorization).toBe('Bearer jwt-cookie')
+    expect(sent().headers.get('authorization')).toBe('Bearer jwt-cookie')
     expect(event.__statusCode).toBe(401)
   })
 
-  /** **upstream パスは `api/kyuyo/` 配下に固定** — ここが自由だと、CF Access Service
-   * Token を持つ server 経由で rust 側の任意の POST 口を叩けてしまう。 */
-  it('upstream パスは api/kyuyo/ 配下に固定される', async () => {
+  /** **upstream パスは Worker の `/kyuyo/` 配下に固定** — ここが自由だと、同じ Worker の
+   * 認可なしの口 (`POST /probe`) に届き得る。 */
+  it('upstream パスは Worker の kyuyo/ 配下に固定される', async () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
     await call(eventWith(ENV, { path: 'sync', cookies: { logi_auth_token: 'jwt-cookie' } }))
 
-    expect(String(fetchMock.mock.calls[0]![0]))
-      .toBe('https://rust-ichiban.mtamaramu.com/api/kyuyo/sync')
+    expect(sent().url).toBe('https://ichibanboshi-kyuyo/kyuyo/sync')
   })
 
   it('query string も転送する', async () => {
@@ -190,8 +179,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
       cookies: { logi_auth_token: 'jwt-cookie' },
     }))
 
-    expect(String(fetchMock.mock.calls[0]![0]))
-      .toBe('https://rust-ichiban.mtamaramu.com/api/kyuyo/sync?company=0100')
+    expect(sent().url).toBe('https://ichibanboshi-kyuyo/kyuyo/sync?company=0100')
   })
 
   it('upstream の非 2xx はそのまま passthrough する (400 を 500 に丸めない)', async () => {
@@ -234,7 +222,7 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
       cookies: { logi_auth_token: 'jwt-cookie' },
     }))
 
-    expect(fetchMock.mock.calls[0]![1].body).toBe('')
+    expect(await sent().text()).toBe('')
   })
 
   it('upstream が Content-Type を返さなければこちらも付けない', async () => {

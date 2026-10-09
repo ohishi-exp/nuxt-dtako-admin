@@ -600,7 +600,7 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  /** 純関数そのもの (`fetchIchiban` 側では照合しない — kyuyo と共有部品のため)。 */
+  /** 純関数そのもの (`fetchIchiban` 側では照合しない — 照合は ichiban proxy の route だけ)。 */
   it('isAllowedIchibanProxyPath は完全一致のみ true', () => {
     expect(ICHIBAN_PROXY_ALLOWED_PATHS.every(p => isAllowedIchibanProxyPath(p))).toBe(true)
     expect(isAllowedIchibanProxyPath('health')).toBe(true)

@@ -58,15 +58,15 @@
  *
  * ## なぜ必要だったか
  *
- * `fetchIchiban` は長らく `method: 'GET'` 固定で、書き込み系の口 (`POST /kyuyo/sync`)
- * は rust 側に在るのに**画面から叩けなかった** (#467 の調査)。
+ * 上流 fetch は長らく `method: 'GET'` 固定 (`fetchIchiban`) で、書き込み系の口 (`POST /kyuyo/sync`)
+ * は上流に在るのに**画面から叩けなかった** (#467 の調査)。
  *
  * **★ 賃金スナップショットの保存はこの route を通らない (Refs #556)。**以前ここには
  * 「保存 (`POST /api/kyuyo/wage-snapshot`) も同じ口が要る」と書いてあったが、上流の
  * 登録は `POST /api/kintai/wage-snapshot` (`src/server.rs`) で、画面が叩くのは relay の
  * `/restraint-api/wage-snapshot`。**この route (nuxt の thin proxy) は通らない**が、
  * **allowlist が掛からないわけではない** (Refs #951 で変わった) — relay が
- * `GET /api/kyuyo/access` で上流に可否を聞いてから通す。
+ * auth-worker の `KyuyoAuthEntrypoint.authorize` (RPC、#1195) に可否を聞いてから通す。
  * `app/utils/wage-snapshot-client.ts` の同名の節も参照。
  * いまこの route を実際に通るのは `POST /api/kyuyo/sync` だけ。
  *
