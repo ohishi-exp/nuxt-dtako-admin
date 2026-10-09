@@ -186,6 +186,7 @@ binding = "ICHIBAN_KYUYO"
 service = "ichibanboshi-kyuyo"
 
 [env.staging.vars]
+NUXT_KYUYO_UPSTREAM = "worker"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
@@ -256,6 +257,7 @@ binding = "ICHIBAN_KYUYO"
 service = "ichibanboshi-kyuyo"
 
 [env.preview.vars]
+NUXT_KYUYO_UPSTREAM = "worker"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
@@ -335,6 +337,7 @@ binding = "ICHIBAN_KYUYO"
 service = "ichibanboshi-kyuyo"
 
 [env.dev.vars]
+NUXT_KYUYO_UPSTREAM = "worker"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
