@@ -9,6 +9,8 @@ import {
   deleteOperation,
   getOperationCsv,
   uploadZip,
+  recalculatePending,
+  RECALC_PENDING_MAX_ROUNDS,
   getPendingUploads,
   rerunUpload,
   getUploadDownloadUrl,
@@ -551,6 +553,56 @@ describe('api', () => {
         const [url, opts] = mockFetch.mock.calls[0]
         expect(url).toBe(`${API_BASE}/api/upload`)
         expect(opts.method).toBe('POST')
+      })
+    })
+
+    // 取り込みの一区切りで流す「要再計算」(Refs ippoan/alc-dtako-worker#23)。
+    // live では本物の再計算が走ってしまうので mock のときだけ測る。
+    describe('recalculatePending', () => {
+      const body = (processed: number, failed: number, remaining: number) =>
+        stubOk({ processed, failed, remaining })
+
+      it('POST /api/recalculate-pending を 1 回叩き、remaining が 0 なら止まる', async () => {
+        if (isLive) return
+        body(3, 1, 0)
+        const result = await recalculatePending()
+        const [url, opts] = mockFetch.mock.calls[0]
+        expect(url).toBe(`${API_BASE}/api/recalculate-pending`)
+        expect(opts.method).toBe('POST')
+        expect(mockFetch).toHaveBeenCalledTimes(1)
+        expect(result).toEqual({ processed: 3, failed: 1, remaining: 0, rounds: 1 })
+      })
+
+      it('remaining が 0 になるまで繰り返し、件数を合算する', async () => {
+        if (isLive) return
+        body(10, 1, 5)
+        body(4, 0, 1)
+        body(1, 0, 0)
+        const result = await recalculatePending()
+        expect(mockFetch).toHaveBeenCalledTimes(3)
+        expect(result).toEqual({ processed: 15, failed: 1, remaining: 0, rounds: 3 })
+      })
+
+      it('failed が残っているだけでは繰り返さない', async () => {
+        if (isLive) return
+        body(0, 7, 0)
+        await recalculatePending()
+        expect(mockFetch).toHaveBeenCalledTimes(1)
+      })
+
+      it('上限回数で止まり、remaining > 0 のまま返す', async () => {
+        if (isLive) return
+        for (let i = 0; i < RECALC_PENDING_MAX_ROUNDS + 5; i++) body(1, 0, 9)
+        const result = await recalculatePending()
+        expect(mockFetch).toHaveBeenCalledTimes(RECALC_PENDING_MAX_ROUNDS)
+        expect(result).toMatchObject({ rounds: RECALC_PENDING_MAX_ROUNDS, remaining: 9 })
+      })
+
+      it('途中で失敗したら投げる (呼び手が取り込みの成功とは別枠で出す)', async () => {
+        if (isLive) return
+        body(2, 0, 3)
+        stubResponse(failRes(502, { message: 'bad gateway' }))
+        await expect(recalculatePending()).rejects.toThrow('502')
       })
     })
 

@@ -50,8 +50,10 @@ import {
 } from "./theearth-client";
 import {
   parseAlcUploadResponse,
+  recalcPendingViaAlcInternalProxy,
   uploadDtakoZipViaAlcInternalProxy,
   type AlcUploadOutcome,
+  type RecalcPendingResult,
 } from "./alc-internal-upload";
 import {
   EtcMeisaiClientError,
@@ -1590,6 +1592,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // `foldAfterIngest` が想定外に throw すると、下の catch が取り込みの
       // 成否を "failed" で上書きしてしまう (条件3 違反)。それを避けるための
       // 保険。
+      //
+      // fold の**前**に「要再計算」を 1 回流す (upload はここまでで成功済み)。
+      // `recalcPendingAfterIngest` は throw しないので取り込みの記録は動かない。
+      await this.recalcPendingAfterIngest(account, sharedSecret, logBase);
       try {
         await this.foldAfterIngest(account, range, jobKey, outcome);
       } catch (foldErr) {
@@ -1937,6 +1943,41 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }),
       );
     }
+  }
+
+  /**
+   * 取り込み (upload) の一区切りの後に **1 回だけ** 呼ぶ「要再計算」の一括処理
+   * (`POST /api/recalculate-pending`、Refs ippoan/alc-dtako-worker#23)。取り込みは日別を
+   * 書かず印だけを付けるので、呼ばないと取り込んだ日の日別が空のまま残る。
+   *
+   * **呼ぶのは upload が 1 件でも成功したときだけ**で、`foldAfterIngest` の前 (fold の
+   * 入力は alc の events だが、日別が確定してから畳む順に揃える)。**throw しない** —
+   * 失敗は結果とログに載せるだけで、取り込み・fold は止めない。件数だけをログに出し、
+   * 識別子 (乗務員・運行) は出さない。
+   */
+  private async recalcPendingAfterIngest(
+    account: DtakoAccountRaw,
+    sharedSecret: string,
+    logBase: Record<string, unknown>,
+  ): Promise<RecalcPendingResult> {
+    const result = await recalcPendingViaAlcInternalProxy(
+      { sharedSecret, tenantId: account.tenant_id },
+      this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+    );
+    const line = {
+      ...logBase,
+      recalculate_pending: result.error ? "error" : result.remaining > 0 ? "truncated" : "ok",
+      processed: result.processed,
+      failed: result.failed,
+      remaining: result.remaining,
+      rounds: result.rounds,
+    };
+    if (result.error || result.remaining > 0 || result.failed > 0) {
+      console.error(JSON.stringify({ ...line, ...(result.error ? { error: result.error } : {}) }));
+    } else {
+      console.log(JSON.stringify(line));
+    }
+    return result;
   }
 
   /**
@@ -3043,10 +3084,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
       const outcome = parseAlcUploadResponse(uploadBody);
       console.log(JSON.stringify({ ...logBase, status: "ok", bytes: zip.byteLength, ...timer.report() }));
+      // 取り込みが終わったので「要再計算」を 1 回流す (失敗しても取り込みの成功は変えない)。
+      const recalculatePending = await this.recalcPendingAfterIngest(account, sharedSecret, logBase);
       return Response.json({
         ok: true,
         comp_id: account.comp_id,
         driver_cd: input.driverCd,
+        recalculate_pending: recalculatePending,
         from: input.startDate,
         to: input.endDate,
         bytes: zip.byteLength,
@@ -3146,8 +3190,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       } else {
         console.log(JSON.stringify({ ...line, status: "success" }));
       }
+      // 取り込みが終わったので「要再計算」を 1 回流す (失敗しても取り込みの成功は変えない)。
+      const recalculatePending = await this.recalcPendingAfterIngest(account, sharedSecret, {
+        dtako_alc_upload: "recalculate_pending",
+        comp_id: account.comp_id,
+      });
       return Response.json({
         ...report,
+        recalculate_pending: recalculatePending,
         theearth_logins: jobState.logins.length,
         theearth_kicked: jobState.logins.some((l) => l.kicked),
         theearth_unlocked: unlockInfo.unlocked,
@@ -3268,6 +3318,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     });
 
     const successCount = batch.results.filter((r) => r.ok).length;
+    // item ごとではなくループの**後に 1 回**、upload が 1 件でも成功したときだけ
+    // 「要再計算」を流す。
+    const recalculatePending =
+      successCount > 0
+        ? await this.recalcPendingAfterIngest(account, sharedSecret, {
+            dtako_alc_upload_batch: "recalculate_pending",
+            comp_id: account.comp_id,
+          })
+        : null;
     console.log(
       JSON.stringify({
         dtako_alc_upload_batch: "done",
@@ -3289,6 +3348,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       failure_count: batch.results.length - successCount,
       truncated: batch.truncated,
       remaining: batch.remaining,
+      recalculate_pending: recalculatePending,
       theearth_logins: jobState.logins.length,
       theearth_kicked: jobState.logins.some((l) => l.kicked),
     });
@@ -3711,8 +3771,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // fold は別の ctx.waitUntil で独立して走らせる (ブラウザの接続を fold の
       // 所要時間 [ページング込みで数分かかりうる] だけ引き延ばさないため)。
       const jobKey = scrapeJobKey(params.startDate, params.endDate);
+      //
+      // **fold の前に「要再計算」を 1 回流す** (upload が成功したときだけ)。fold と同じ
+      // waitUntil の中で直列にするので、WS の応答は待たせない。
+      const recalcPending =
+        uploadOutcome && sharedSecret
+          ? () =>
+              this.recalcPendingAfterIngest(account, sharedSecret, {
+                scraper_ws: "dtako",
+                comp_id: params.compId,
+              })
+          : async () => null;
       this.ctx.waitUntil(
-        this.foldAfterIngest(account, params, jobKey, uploadOutcome).catch(() => {}),
+        recalcPending()
+          .then(() => this.foldAfterIngest(account, params, jobKey, uploadOutcome))
+          .catch(() => {}),
       );
 
       this.sendSafely(server, {

@@ -184,3 +184,104 @@ export function parseAlcUploadResponse(body: string): AlcUploadOutcome {
       : null;
   return { uploadId, operationsCount, splitFailed };
 }
+
+/**
+ * `POST /api/recalculate-pending` (Refs ippoan/alc-dtako-worker#23)。
+ *
+ * 取り込み (`/api/upload`) は日別を書かず、新しい運行・変わった運行の 乗務員 × 月 に
+ * 「要再計算」の印だけを付ける。印の分をまとめて計算し直して印を消すのがこの口で、
+ * 取り込みの一区切り (cron 1 読取日 / バッチの終わり …) ごとに 1 回呼ぶ。呼ばないと
+ * 取り込んだ日の日別が空のまま残る。
+ *
+ * 応答は件数だけ `{"processed": n, "failed": n, "remaining": n}`。alc は 1 回に R2 GET
+ * 4000 件で止まり、残りがあれば `remaining > 0` を返すので、**`remaining` が 0 に
+ * なるまで繰り返す**。`failed` は残っても繰り返さない (繰り返しても直らない)。
+ *
+ * **throw しない。** 呼び手は取り込み・fold を止めたくないので、失敗 (HTTP エラー・
+ * JSON が読めない・通信) は `error` に種類を積んで、それまでに数えた件数と一緒に返す。
+ */
+export const RECALC_PENDING_PATH = "/alc-internal-proxy/api/recalculate-pending";
+
+/** 1 回の呼び出しで繰り返す上限。alc が 1 回 4000 件で止まるので 20 回で 8 万件。
+ * `remaining` が減らない異常のときに無限に叩かないための天井。 */
+export const RECALC_PENDING_MAX_ROUNDS = 20;
+
+export type RecalcPendingErrorKind = "http" | "parse" | "network";
+
+export interface RecalcPendingResult {
+  processed: number;
+  failed: number;
+  /** 最後に見た `remaining`。上限回数で止まったときは 0 より大きい。 */
+  remaining: number;
+  /** 実際に叩いた回数。 */
+  rounds: number;
+  error: { kind: RecalcPendingErrorKind; message: string } | null;
+}
+
+function parseRecalcPendingResponse(
+  body: string,
+): { processed: number; failed: number; remaining: number } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { processed, failed, remaining } = parsed as Record<string, unknown>;
+  if (
+    typeof processed !== "number" ||
+    typeof failed !== "number" ||
+    typeof remaining !== "number" ||
+    !Number.isFinite(processed + failed + remaining)
+  ) {
+    return null;
+  }
+  return { processed, failed, remaining };
+}
+
+export async function recalcPendingViaAlcInternalProxy(
+  input: { sharedSecret: string; tenantId: string },
+  fetchImpl: FetchLike,
+  maxRounds: number = RECALC_PENDING_MAX_ROUNDS,
+): Promise<RecalcPendingResult> {
+  const result: RecalcPendingResult = {
+    processed: 0,
+    failed: 0,
+    remaining: 0,
+    rounds: 0,
+    error: null,
+  };
+  while (result.rounds < maxRounds) {
+    result.rounds += 1;
+    let body: string;
+    try {
+      body = await sendViaAlcInternalProxy(
+        {
+          path: RECALC_PENDING_PATH,
+          sharedSecret: input.sharedSecret,
+          tenantId: input.tenantId,
+          contentType: "application/json",
+          body: "{}",
+        },
+        fetchImpl,
+      );
+    } catch (err) {
+      result.error = {
+        kind: err instanceof AlcInternalUploadError ? "http" : "network",
+        message: err instanceof Error ? err.message : String(err),
+      };
+      return result;
+    }
+    const counts = parseRecalcPendingResponse(body);
+    if (!counts) {
+      result.error = { kind: "parse", message: `応答を読めません: ${body.slice(0, 200)}` };
+      return result;
+    }
+    result.processed += counts.processed;
+    result.failed += counts.failed;
+    result.remaining = counts.remaining;
+    if (counts.remaining <= 0) return result;
+  }
+  return result;
+}
