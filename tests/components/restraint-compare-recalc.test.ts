@@ -22,7 +22,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
+import { ref } from 'vue'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import type { RecalcProgressEvent, BatchRecalcEvent } from '~/utils/api'
+
+// ログイン欄 (useRestraintSession → useState) は Nuxt app instance が要り mount できない。
+// 比較の画面が使う口だけ差し替え、ヘッダ部品は stub する。
+mockNuxtImport('useRestraintSession', () => () => ({
+  session: ref({ token: 't' }),
+  authHeaders: () => ({}),
+  restoreSession: () => {},
+  expireSession: () => {},
+  showLoginPanel: ref(false),
+}))
 
 const compareRestraintCsv = vi.fn()
 const recalculateDriverStream = vi.fn()
@@ -58,7 +70,7 @@ function matched() {
 }
 
 function mountPage() {
-  return mount(Page, { global: { stubs: NUXT_UI_PAGE_STUBS } })
+  return mount(Page, { global: { stubs: { ...NUXT_UI_PAGE_STUBS, TheearthSessionHeader: true } } })
 }
 
 async function selectCsv(w: VueWrapper) {
