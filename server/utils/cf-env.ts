@@ -3,12 +3,10 @@
  * server route ごとに同じ定義がコピーされていたのを 1 本に集約する
  * (Refs ohishi-exp/nuxt-dtako-admin#999)。
  *
- * server/utils/ichiban-upstream.ts にも同名の cfEnv / resolveSecret があるが、
- * 意図的に統合していない:
- *   - あちらの resolveSecret は try/catch で .get() の reject を null に握り潰す。
- *     こちら (と他 7 箇所) は例外を伝播させる。揃えるとどちらかの挙動が変わる
+ * server/utils/ichiban-upstream.ts にも同名の cfEnv があるが、意図的に統合していない:
  *   - あちらの cfEnv は引数型が { context: unknown } で h3 に依存しない (テスト都合)
- * 重複を消すために挙動を変えるのは本末転倒なので、差分が解消されるまで別物として残す。
+ * (あちらに在った、.get() の reject を null に握り潰す resolveSecret は、オンプレ経路の
+ *  fetchIchiban ごと撤去した。Refs ohishi-exp/rust-ichibanboshi#322)
  *
  * ## auto-import は **`ichiban-upstream.ts` 版の `cfEnv` を採用している** (別の話)
  *
@@ -20,11 +18,8 @@
  *   const cfEnv: typeof import('../../server/utils/ichiban-upstream').cfEnv
  *   const resolveSecret: typeof import('../../server/utils/cf-env').resolveSecret
  *
- * **`resolveSecret` は競合していない** — `ichiban-upstream.ts` 側の同名関数は
- * `export` されていない module private なので、auto-import の候補はこちらだけ。
- * つまり **2 本セットで片側に寄っているのではなく、`cfEnv` だけが影になっている**。
- * `ichiban-upstream.ts` の `resolveSecret` を `export` すると `resolveSecret` も
- * 同じ状態になり、**握り潰す方が勝つ**ので export しないこと。
+ * **`resolveSecret` は競合していない** — 定義はこのファイルだけ。
+ * **`cfEnv` だけが影になっている**。
  *
  * **現時点の実害は 0**: `cfEnv` を使う **34 ファイルすべてが明示 import** で、
  * auto-import に頼っているファイルは **0**。内訳は `ichiban-upstream.ts` から **5**、

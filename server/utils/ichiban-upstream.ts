@@ -1,28 +1,9 @@
 /**
- * rust-ichibanboshi (一番星売上 API、CAPE#01 経由) への upstream fetch 共通処理
- * (Refs #330 PR4)。CF Access Service Token 付与ロジックが
- * `server/api/ichiban/[...path].get.ts` (thin proxy) と `server/api/profit/monthly.get.ts`
- * (月次集計) の両方で重複していたため抽出した。**後者は #859 で廃止したので、いまの
- * 呼び出し元は thin proxy だけ。**
+ * 一番星 (rust-ichibanboshi) proxy の共通部品 (Refs #330 PR4)。上流 fetch 本体は
+ * `ichiban-worker-upstream.ts` (Service Binding の Worker だけ。オンプレ経路の `fetchIchiban` は
+ * Refs ohishi-exp/rust-ichibanboshi#322 で撤去)。`cfEnv` / `IchibanUpstreamError` は給与大臣の
+ * `kyuyo-upstream.ts` と route も使う。
  */
-
-interface SecretBinding { get(): Promise<string> }
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as SecretBinding).get === 'function') {
-    try {
-      return (await (binding as SecretBinding).get()) ?? null
-    }
-    catch {
-      return null
-    }
-  }
-  return null
-}
-
-const DEFAULT_ICHIBAN_API_URL = 'https://rust-ichiban.mtamaramu.com'
 
 /** binding未設定 (503相当) / fetch失敗 (502相当) を呼び出し元に伝える。
  * h3 の `createError` に依存しないのは、このモジュールが server route 外
@@ -36,8 +17,9 @@ export class IchibanUpstreamError extends Error {
 /**
  * **`/api/ichiban/**` proxy が中継してよい upstream path (完全一致、Refs #1015)。**
  *
- * あの route は呼び出し元 (ブラウザ) が持っていない CF Access Service Token を
- * **こちらで付け足して**上流へ渡す。#988 で入れた `requireAuth` が見ているのは
+ * あの route は呼び出し元 (ブラウザ) が持っていない到達経路 (当時は CF Access Service Token、
+ * いまは認可なしの Worker への Service Binding) を**こちらで貸して**上流へ渡す。
+ * #988 で入れた `requireAuth` が見ているのは
  * 「**誰が**呼んでいるか」までで、「**どの path を中継してよいか**」は 1 か所も
  * 見ていなかった (= 認証は在るが認可が無い)。ここで中継先を固定する。
  *
@@ -66,9 +48,8 @@ export class IchibanUpstreamError extends Error {
  * (`app/pages/kyuyo-fetch.vue:209`) を拾うことを確認してある — 「0 件」は探索の失敗
  * ではない。**front に呼び出しを足すときは、この一覧にも足す** (足し忘れると 403)。
  *
- * ★ **`fetchIchiban` の側では照合しない。** 照合するのは ichiban proxy の route だけ
- * (kyuyo は #322 で上流が Service Binding の Worker だけになり、`fetchIchiban` を使わなくなった。
- * kyuyo 側の allowlist は `kyuyo-upstream.ts`)。
+ * ★ 照合するのは ichiban proxy の route と `ichiban-worker-upstream.ts` の 2 か所
+ * (kyuyo 側の allowlist は `kyuyo-upstream.ts`)。
  *
  * ★ **query string は照合しない** — 判定するのは path 部分だけで、`?` 以降は
  * 今までどおり素通しする。
@@ -88,42 +69,6 @@ export const ICHIBAN_PROXY_ALLOWED_PATHS: readonly string[] = [
  */
 export function isAllowedIchibanProxyPath(path: string): boolean {
   return ICHIBAN_PROXY_ALLOWED_PATHS.includes(path)
-}
-
-/**
- * `<NUXT_ICHIBAN_API_URL>/{path}{search}` に CF Access Service Token 付きで転送する。
- * upstream の応答 (2xx/非2xx問わず) はそのまま `Response` として返す — 意味づけ
- * (passthrough か JSON parse して検証するか) は呼び出し元の責務。
- *
- * GET 固定 (一番星の `/api/ichiban/*` proxy 専用)。kyuyo は #322 で Service Binding の Worker
- * だけになり、追加ヘッダ・POST の口 (Refs #369 / #467 / #677) は不要になって撤去した。
- */
-export async function fetchIchiban(env: Record<string, unknown>, path: string, search: string): Promise<Response> {
-  const [clientId, clientSecret] = await Promise.all([
-    resolveSecret(env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID),
-    resolveSecret(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
-  ])
-  if (!clientId || !clientSecret) {
-    throw new IchibanUpstreamError(503, 'NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID/ICHIBAN_CF_ACCESS_CLIENT_SECRET binding が未設定です')
-  }
-
-  const baseUrl = (env.NUXT_ICHIBAN_API_URL as string | undefined) || DEFAULT_ICHIBAN_API_URL
-  const upstreamUrl = new URL(`/${path}`, baseUrl)
-  upstreamUrl.search = search
-
-  try {
-    return await fetch(upstreamUrl, {
-      method: 'GET',
-      headers: {
-        'CF-Access-Client-Id': clientId,
-        'CF-Access-Client-Secret': clientSecret,
-        Accept: 'application/json',
-      },
-    })
-  }
-  catch (e: unknown) {
-    throw new IchibanUpstreamError(502, `rust-ichibanboshi への接続に失敗しました: ${e instanceof Error ? e.message : String(e)}`)
-  }
 }
 
 /** `event.context.cloudflare.env` を取り出す (未設定なら空オブジェクト)。 */

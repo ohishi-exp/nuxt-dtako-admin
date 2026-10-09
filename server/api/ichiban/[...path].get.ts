@@ -1,13 +1,8 @@
 /**
- * rust-ichibanboshi (一番星売上 API、CAPE#01 経由) への thin proxy (Refs #330)。
+ * rust-ichibanboshi (一番星売上 API) への thin proxy (Refs #330)。
  *
- * GET /api/ichiban/** → <NUXT_ICHIBAN_API_URL>/** (CF Tunnel rust-ichiban.mtamaramu.com)
- * に CF Access Service Token (CF-Access-Client-Id/Secret ヘッダ) を付与して転送する。
- * Service Token は nuxt-ichibanboshi/nuxt-ichibanboshi-seikyu と共有する既存のもの
- * (`824a8b3c...`) を再利用する (新規発行しない)。client_id は公開識別子なので
- * `NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID` var、client_secret は Secrets Store binding
- * (`ICHIBAN_CF_ACCESS_CLIENT_SECRET`、secret_name="CF_ACCESS_CLIENT_SECRET" を
- * 物理共有) から解決する。追加の secrets-inventory 投入作業は不要 (wrangler.toml 参照)。
+ * GET /api/ichiban/** → Service Binding `ICHIBAN_DB` の Worker `ichibanboshi-ichiban` の `/**`
+ * (Refs ohishi-exp/rust-ichibanboshi#322。オンプレ (CF Tunnel + CF Access Service Token) の経路は撤去済み)。
  *
  * upstream の応答は **status を変えず、本文があればそのまま passthrough** する —
  * 400 等の API 側エラーも呼び出し元がそのまま受け取れるようにするための thin proxy
@@ -60,13 +55,12 @@
  *
  * #988 で入ったのは **認証**であって **認可**ではない。`requireAuth` が見ているのは
  * 「**誰が**呼んでいるか」までで、**この route が中継してよい path** は 1 か所も
- * 見ていなかった (`getRouterParam(event, 'path')` を素通しで `fetchIchiban` へ渡していた)。
- * この route は**呼び出し元が持っていない資格情報 (CF Access Service Token) を
- * こちらで付け足す**ので、中継先は画面が実際に使う口に固定する。
+ * 見ていなかった (`getRouterParam(event, 'path')` を素通しで上流へ渡していた)。
+ * この route は**呼び出し元が持っていない到達経路 (当時は CF Access Service Token、
+ * いまは認可なしの Worker への Service Binding) を貸す**ので、中継先は画面が実際に使う口に固定する。
  *
  * 許す path は `ICHIBAN_PROXY_ALLOWED_PATHS` (`server/utils/ichiban-upstream.ts`) の
- * **完全一致 6 件**。前方一致にしない理由・front を数えた手順・「なぜ `fetchIchiban`
- * 側で照合しないか」は全部そちらの JSDoc に書いてある。**照合するのは path 部分だけで、
+ * **完全一致 6 件**。前方一致にしない理由・front を数えた手順は全部そちらの JSDoc に書いてある。**照合するのは path 部分だけで、
  * query string は今までどおり素通し。**
  *
  * ★ **範囲はこのファイル = GET だけ。**`.get.ts` なので書き込み系は元から通らない。
@@ -78,24 +72,17 @@
  *
  * 401 — 未ログイン (`requireAuth`)。**空本文の非 2xx に理由を作る下の分岐より手前で
  * 投げる**ので、passthrough の契約 (Refs #900) には触れていない。
- * binding 未設定は 503 (`INTERNAL_SHARED_SECRET` / CF Access の 2 つ)、
- * fetch 自体の失敗 (tunnel down 等) は 502 で弾く。
+ * binding 未設定は 503 (`INTERNAL_SHARED_SECRET` / `ICHIBAN_DB` の 2 つ)、
+ * Worker への fetch 自体の失敗は 502 で弾く。
  *
- * CF Access トークン付与ロジック本体は `server/utils/ichiban-upstream.ts` に集約
- * (もとは server/api/profit/monthly.get.ts と共有していたが、そちらは #859 で廃止。
- * Refs #330 PR4)。
+ * 上流 fetch 本体は `server/utils/ichiban-worker-upstream.ts`。
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
 import { cfEnv, ichibanEmptyErrorReason, isAllowedIchibanProxyPath, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
-// 上流 (オンプレ / shadow / Worker) の切替は NUXT_ICHIBAN_UPSTREAM で決まる (Refs ohishi-exp/rust-ichibanboshi#322)。
 import { fetchIchibanUpstream } from '../../utils/ichiban-worker-upstream'
 import { requireAuth } from '@ippoan/auth-client/server'
 import { assertAllowedRole } from '../../utils/require-role'
-// ★ **`resolveSecret` だけ `cf-env.ts` から取っているのは意図的** (Refs #999/#1015)。
-// `ichiban-upstream.ts` にも同名があるが、あちらは `.get()` の reject を
-// `catch { return null }` で握り潰す (= binding 故障が「未設定」と同じ 503 に化ける)。
-// こちらは例外を伝播させる版で、理由は `cf-env.ts` の JSDoc。**片方に寄せない。**
 import { resolveSecret } from '../../utils/cf-env'
 
 export default defineEventHandler(async (event: H3Event) => {
@@ -171,17 +158,17 @@ export default defineEventHandler(async (event: H3Event) => {
 
   let upstreamRes: Response
   try {
-    upstreamRes = await fetchIchibanUpstream(event, env, pathParam, getRequestURL(event).search)
+    upstreamRes = await fetchIchibanUpstream(env, pathParam, getRequestURL(event).search)
   }
   // fetchIchibanUpstream は IchibanUpstreamError (403/503/502) のみを throw する契約 (同ファイルの JSDoc 参照)。
   catch (e: unknown) {
     const err = e as IchibanUpstreamError
     // ★ **`err.message` を `statusMessage` に載せない** (Refs #1032/#886)。
-    // 中身は `server/utils/ichiban-upstream.ts` / `ichiban-worker-upstream.ts` の日本語
+    // 中身は `server/utils/ichiban-worker-upstream.ts` の日本語
     // (binding 未設定 = 503 / 接続失敗 = 502) で、**日本語のまま
     // reason phrase に流すと本番 (workerd) で断片だけが残る**。`statusMessage` は
     // **502/503 のどちらにも当てはまる ASCII の固定句**にし、上流の日本語は
-    // `message` (= JSON 本文) にそのまま載せる。**`ichiban-upstream.ts` 側の文言は
+    // `message` (= JSON 本文) にそのまま載せる。**`ichiban-worker-upstream.ts` 側の文言は
     // 触らない** — 本文に載るので無傷でよい。
     throw createError({
       statusCode: err.statusCode,

@@ -65,7 +65,7 @@ export default defineNuxtConfig({
       // 起動は setup-dev-env.sh --hybrid (skill 同梱) が全自動で行う。
       '/api/proxy': { target: `http://127.0.0.1:${frontPort}/api/proxy` },
       '/__dev': { target: `http://127.0.0.1:${frontPort}/__dev` },
-      // 給与大臣読み取り (Refs #367) も ICHIBAN_CF_ACCESS_* (Secrets Store binding)
+      // 給与大臣読み取り (Refs #367) も ICHIBAN_KYUYO (Service Binding)
       // 依存なので front worker 経由でないと 503 になる。
       '/api/kyuyo': { target: `http://127.0.0.1:${frontPort}/api/kyuyo` },
     },
