@@ -1101,134 +1101,97 @@ describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#6
   });
 });
 
-describe("checkKyuyoAccess — 給与 allowlist の関門 (Refs #951)", () => {
-  const ACCESS = "/api/kyuyo/access";
-
-  it("**`onprem()` を叩く。`gcp()` ではない** — allowlist はオンプレ側にしか無い", async () => {
-    const { deps: d, calls } = deps({ onprem: { [ACCESS]: { allowed: true, email: "k@example.com" } } });
-    expect(await checkKyuyoAccess(d, "jwt")).toBeNull();
-    expect(calls).toEqual([{ side: "onprem", path: ACCESS, body: undefined }]);
-    // gcp を 1 度も触っていない (揃えて `gcp()` にすると全員 503 になる経路)
-    expect(calls.some((c) => c.side === "gcp")).toBe(false);
+describe("checkKyuyoAccess — 給与 allowlist の関門 (auth-worker RPC、Refs #951 / ohishi-exp/rust-ichibanboshi#322)", () => {
+  type Res = { status: number; body: string; contentType: string | null };
+  const res = (status: number, body: unknown = {}): Res => ({
+    status,
+    body: JSON.stringify(body),
+    contentType: "application/json",
   });
+  const binding = (fn: (token: string) => Promise<unknown>) => ({ authorize: fn as (t: string) => Promise<Res> });
+  const reply = (r: Res) => binding(async () => r);
+  const unreachable = { status: 503, message: "給与の認可 (auth-worker) に届きません" };
 
-  it("**リクエスト自身の Bearer をそのまま転送する** (record.token ではない)", async () => {
-    let seen: HeadersInit | undefined;
-    const { deps: d } = deps({
-      onprem: {
-        [ACCESS]: (init?: RequestInit) => {
-          seen = init?.headers;
-          return json({ allowed: true, email: "k@example.com" });
-        },
-      },
+  it("200 は通る。Bearer を付けず token だけ渡し、onprem / gcp (fetch) は 1 回も呼ばれない", async () => {
+    const { calls } = deps({ onprem: { "/api/kyuyo/access": { allowed: true } } });
+    const seen: string[] = [];
+    const b = binding(async (token) => {
+      seen.push(token);
+      return res(200, { allowed: true });
     });
-    expect(await checkKyuyoAccess(d, "browser-jwt")).toBeNull();
-    expect(seen).toEqual({ Authorization: "Bearer browser-jwt" });
-  });
-
-  it("Bearer が無ければ**上流に聞かずに** 503 (必ず 401 が返るので往復を省く)", async () => {
-    const { deps: d, calls } = deps({ onprem: { [ACCESS]: { allowed: true } } });
-    expect(await checkKyuyoAccess(d, null)).toEqual({
-      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
-      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
-    });
+    expect(await checkKyuyoAccess(b, "browser-jwt")).toBeNull();
+    expect(seen).toEqual(["browser-jwt"]);
     expect(calls).toEqual([]);
   });
 
-  it("**403 は status も本文もそのまま passthrough** — 画面が理由をそのまま出せる", async () => {
-    const { deps: d } = deps({
-      onprem: {
-        [ACCESS]: () =>
-          json({ error: "このユーザーには給与データへのアクセス権がありません" }, 403),
-      },
+  it("Bearer が無ければ auth-worker に聞かずに 503", async () => {
+    let called = false;
+    const b = binding(async () => {
+      called = true;
+      return res(200);
     });
-    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
-      status: 403,
-      message: "このユーザーには給与データへのアクセス権がありません",
+    expect(await checkKyuyoAccess(b, null)).toEqual({
+      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
     });
+    expect(called).toBe(false);
   });
 
-  it("**503 も丸めない** — 権限の話 (403) と設定・障害の話 (503) を撃ち分けられるように", async () => {
-    const { deps: d } = deps({
-      onprem: { [ACCESS]: () => json({ error: "kyuyo 認可が未設定です" }, 503) },
-    });
-    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
-      status: 503,
-      message: "kyuyo 認可が未設定です",
-    });
-  });
-
-  it("★ **401 は 401 のまま返さない** — 画面で「ログインし直せ」になり処方が食い違う", async () => {
-    const { deps: d } = deps({
-      onprem: { [ACCESS]: () => json({ error: "token が無効です" }, 401) },
-    });
-    const denial = await checkKyuyoAccess(d, "theearth-session-token");
+  it("★ 401 は 401 のまま返さない — onprem 時代と同じ 503 の文", async () => {
+    const denial = await checkKyuyoAccess(reply(res(401, { error: "unauthorized" })), "jwt");
     expect(denial).toEqual({
       status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
       message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
     });
-    // 403 (権限の話) にも倒さない — 利用者の権限ではなく経路の問題なので
-    expect(denial!.status).toBe(503);
     expect(denial!.message).not.toContain("権限がありません");
   });
 
-  it("JSON でない応答 (CF Access のログイン HTML 等) は本文の頭を見せる", async () => {
-    const { deps: d } = deps({
-      onprem: { [ACCESS]: () => new Response("  <html>Access login</html>  ", { status: 403 }) },
-    });
-    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+  it("403 は日本語の理由 (英語コードを出さない)", async () => {
+    expect(await checkKyuyoAccess(reply(res(403, { error: "forbidden" })), "jwt")).toEqual({
       status: 403,
-      message: "<html>Access login</html>",
+      message: "給与の閲覧許可リストに無いアカウントです",
     });
   });
 
-  it("本文が空でも黙らない (status を文にする)", async () => {
-    const { deps: d } = deps({
-      onprem: { [ACCESS]: () => new Response("   ", { status: 403 }) },
-    });
-    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
-      status: 403,
-      message: "上流が status 403 を返しました",
+  it("503 kyuyo_allowlist_unset は未設定の文", async () => {
+    expect(await checkKyuyoAccess(reply(res(503, { error: "kyuyo_allowlist_unset" })), "jwt")).toEqual({
+      status: 503,
+      message: "給与の閲覧許可リストが未設定です",
     });
   });
 
-  it("`{error}` が文字列でない JSON も本文の頭に落とす (握り潰さない)", async () => {
-    const { deps: d } = deps({
-      onprem: { [ACCESS]: () => json({ error: true }, 403) },
-    });
-    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
-      status: 403,
-      message: '{"error":true}',
-    });
+  it("503 その他 / 非 JSON の 500 / 404 は届かない文 (fail-closed、許可に倒さない)", async () => {
+    expect(await checkKyuyoAccess(reply(res(503, { error: "boom" })), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(reply({ status: 500, body: "x", contentType: null }), "jwt")).toEqual(
+      unreachable,
+    );
+    expect(await checkKyuyoAccess(reply(res(404)), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(reply(res(201)), "jwt")).toEqual(unreachable); // 許可は 200 だけ
   });
 
-  it("`{error: \"\"}` (空文字) でも黙らない", async () => {
-    const { deps: d } = deps({
-      onprem: { [ACCESS]: () => json({ error: "" }, 403) },
-    });
-    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
-      status: 403,
-      message: '{"error":""}',
-    });
+  it("戻りが null / undefined / status が文字列 / body 無しでも 503 (許可にも未設定の文にも倒れない)", async () => {
+    const bad = (v: unknown) => binding(async () => v);
+    expect(await checkKyuyoAccess(bad(null), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(bad(undefined), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(bad({ status: "200", body: "" }), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(bad({ status: 503 }), "jwt")).toEqual(unreachable);
   });
 
-  it("★ 404 (上流がまだデプロイされていない) は 503 に倒す — 404 を素通しすると原因を取り違える", async () => {
-    const { deps: d } = deps({ onprem: {} }); // stub 無し = 404
-    const denial = await checkKyuyoAccess(d, "jwt");
-    expect(denial!.status).toBe(503);
-    expect(denial!.message).toContain("上流のデプロイが先に必要です");
-    // **通してはいけない** — 口が無いことを「許可」と読むと穴が開いたまま出る
-    expect(denial).not.toBeNull();
+  it("binding 未設定 / reject は 503", async () => {
+    expect(await checkKyuyoAccess(undefined, "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(null, "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(binding(() => Promise.reject(new TypeError("rpc failed"))), "jwt")).toEqual(
+      unreachable,
+    );
   });
 
-  it("**上流に届かなければ fail-closed** (判定が取れないなら通さない)", async () => {
-    const d: KintaiRelayDeps = {
-      onprem: () => Promise.reject(new TypeError("fetch failed")),
-      gcp: () => Promise.resolve(json({})),
-    };
-    const denial = await checkKyuyoAccess(d, "jwt");
-    expect(denial!.status).toBe(503);
-    expect(denial!.message).toContain("TypeError: fetch failed");
+  it("JSON でない 503 本文 / 空本文でも未設定の文にならない", async () => {
+    expect(await checkKyuyoAccess(reply({ status: 503, body: "  <html>x</html> ", contentType: null }), "jwt")).toEqual(
+      unreachable,
+    );
+    expect(await checkKyuyoAccess(reply({ status: 503, body: "   ", contentType: null }), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(reply(res(503, { error: true })), "jwt")).toEqual(unreachable);
+    expect(await checkKyuyoAccess(reply(res(503, { error: "" })), "jwt")).toEqual(unreachable);
   });
 });
 
