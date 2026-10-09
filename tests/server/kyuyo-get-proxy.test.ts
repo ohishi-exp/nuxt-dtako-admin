@@ -17,19 +17,21 @@
  * このテストが固定するのは **「この proxy が、身元が無いと分かっているリクエストを
  * 上流へ投げない」**という**こちら側の性質だけ**。
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import handler from '../../server/api/kyuyo/[...path].get'
 
 const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<unknown>)(event)
+
+// 上流は Service Binding (`ICHIBAN_KYUYO`) だけ。binding の fetch に渡った Request を見る。
+const bindingFetch = vi.fn()
 
 function eventWith(opts: { authorization?: string, cookies?: Record<string, string>, devLogin?: boolean } = {}) {
   return {
     context: {
       cloudflare: {
         env: {
-          NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
-          ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+          ICHIBAN_KYUYO: { fetch: (req: Request) => bindingFetch(req) },
           ...(opts.devLogin ? { DEV_LOGIN: 'true' } : {}),
         },
       },
@@ -63,36 +65,29 @@ vi.mock('h3', async (importOriginal) => {
 })
 
 describe('kyuyo GET proxy の JWT 解決 (Refs #369, #375)', () => {
-  const fetchMock = vi.fn()
+  const fetchMock = bindingFetch
 
   beforeEach(() => {
     fetchMock.mockReset()
-    vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(new Response('{"rows":[]}', {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }))
   })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
   it('cookie (logi_auth_token) を Bearer に組んで upstream へ渡す', async () => {
     await call(eventWith({ cookies: { logi_auth_token: 'jwt-cookie' } }))
 
-    const [url, init] = fetchMock.mock.calls[0]!
-    expect(String(url)).toBe('https://rust-ichiban.mtamaramu.com/api/kyuyo/payroll?company=0100&month=2026-07')
-    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
-    expect(init.headers['CF-Access-Client-Id']).toBe('client-id-x')
+    const req = fetchMock.mock.calls[0]![0] as Request
+    expect(req.url).toBe('https://ichibanboshi-kyuyo/kyuyo/payroll?company=0100&month=2026-07')
+    expect(req.headers.get('authorization')).toBe('Bearer jwt-cookie')
   })
 
   /** デプロイ skew 用の後方互換 (古いバンドルのタブが残っている間だけ効く)。 */
   it('cookie が無ければ受領した Authorization を素通し転送する', async () => {
     await call(eventWith({ authorization: 'Bearer jwt-header' }))
 
-    const [, init] = fetchMock.mock.calls[0]!
-    expect(init.headers.Authorization).toBe('Bearer jwt-header')
+    expect((fetchMock.mock.calls[0]![0] as Request).headers.get('authorization')).toBe('Bearer jwt-header')
   })
 
   it('cookie とヘッダが両方あれば cookie を優先する', async () => {
@@ -101,15 +96,14 @@ describe('kyuyo GET proxy の JWT 解決 (Refs #369, #375)', () => {
       authorization: 'Bearer jwt-header',
     }))
 
-    const [, init] = fetchMock.mock.calls[0]!
-    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
+    expect((fetchMock.mock.calls[0]![0] as Request).headers.get('authorization')).toBe('Bearer jwt-cookie')
   })
 
   /** ★ **陽性対照 3 本目** — dev cookie は `DEV_LOGIN === 'true'` のときだけ見る
    * (`browser-jwt.ts`)。#988 の 401 がこの経路を巻き込んでいないことを固定する。 */
   it('dev cookie (logi_auth_token_dev) は DEV_LOGIN=true のときだけ Bearer に組む', async () => {
     await call(eventWith({ devLogin: true, cookies: { logi_auth_token_dev: 'jwt-dev' } }))
-    expect(fetchMock.mock.calls[0]![1].headers.Authorization).toBe('Bearer jwt-dev')
+    expect((fetchMock.mock.calls[0]![0] as Request).headers.get('authorization')).toBe('Bearer jwt-dev')
   })
 
   /**
@@ -148,7 +142,7 @@ describe('kyuyo GET proxy の JWT 解決 (Refs #369, #375)', () => {
    * upstream 失敗 / path 欠落 / Content-Type 無しの 3 arm が未通過だった。
    * **本番コードは 1 行も足していない** — 既に在る枝を通しただけ。
    */
-  it('upstream への接続失敗は 502 (fetchIchiban の IchibanUpstreamError を写す)', async () => {
+  it('upstream への接続失敗は 502 (fetchKyuyo の IchibanUpstreamError を写す)', async () => {
     fetchMock.mockRejectedValue(new Error('tunnel down'))
     await expect(call(eventWith({ cookies: { logi_auth_token: 'jwt-cookie' } })))
       .rejects.toMatchObject({ statusCode: 502 })

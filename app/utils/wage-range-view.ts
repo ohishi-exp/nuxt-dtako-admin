@@ -17,10 +17,10 @@
  * 絞られているのに、**画面が保存した瞬間に tenant 全員の読める場所へ移っていた**
  * (「漏れ」ではなく「洗浄」)。
  *
- * **いまは tenant AND email** — relay が `GET /api/kyuyo/access` (上流の
- * `kyuyo::introspect::authorize()` そのもの) にブラウザ JWT を転送して可否を聞き、
- * **通ったときだけ**この口を通す。allowlist の正は上流の `KYUYO_ALLOWED_EMAILS`
- * 1 か所のままで、この repo は写しを持たない。
+ * **いまは tenant AND email** — relay が auth-worker の
+ * `KyuyoAuthEntrypoint.authorize` (RPC、#1195) にブラウザ JWT を渡して可否を聞き、
+ * **通ったときだけ**この口を通す。allowlist の正は auth-worker の KV
+ * `kyuyo-allowed-emails` 1 か所のままで、この repo は写しを持たない。
  *
  * ⇒ **allowlist 外の人には 403 が返り、この表は出ない** (列が空欄になるのではなく
  * 表ごと出ない)。理由は `rangeError` に `describeApiError` でそのまま出る。

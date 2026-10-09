@@ -11,8 +11,8 @@
  *
  * 以前ここには `POST /api/kyuyo/wage-snapshot` と書いてあったが**どちらの経路とも違う**。
  * **#951 までは認可が relay の tenant 単位だけ**で、`/api/kyuyo/*` の email allowlist を
- * 通っていなかった。いまは relay が `GET /api/kyuyo/access` に**ブラウザ JWT を転送して**
- * 可否を聞き、通ったときだけ上流へ中継する。
+ * 通っていなかった。いまは relay が auth-worker の `KyuyoAuthEntrypoint.authorize` (RPC、#1195) に
+ * **ブラウザ JWT を渡して**可否を聞き、通ったときだけ上流へ中継する。
  *
  * **★ 読み (`wage-range`) だけでなく保存にも掛かっている**のが要点 — 読みだけ塞ぐと
  * 「見えないが汚せる」が残り、allowlist 外の人が `paid` に任意の値を書き込めてしまう。

@@ -119,8 +119,6 @@ NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 # CF Access Service Token の client_id (公開識別子なので secret ではなく var、
 # nuxt-ichibanboshi/wrangler.toml の NUXT_CF_ACCESS_CLIENT_ID と同値・同トークン共用)。
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
-# 給与大臣の上流: onprem / shadow / worker (server/utils/kyuyo-upstream.ts)。本番は worker で運用中。戻すときはこの行を shadow / onprem に戻す (戻した後も /kyuyo-fetch の引き直しが要る)
-NUXT_KYUYO_UPSTREAM = "worker"
 
 # secret-verify (frontend-ci) 用の明示宣言。**必ず空 `[]` にする**。
 # `secrets.required` は CI secret-verify の監査対象であると同時に **wrangler が
@@ -186,7 +184,6 @@ binding = "ICHIBAN_KYUYO"
 service = "ichibanboshi-kyuyo"
 
 [env.staging.vars]
-NUXT_KYUYO_UPSTREAM = "worker"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
@@ -257,7 +254,6 @@ binding = "ICHIBAN_KYUYO"
 service = "ichibanboshi-kyuyo"
 
 [env.preview.vars]
-NUXT_KYUYO_UPSTREAM = "worker"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
@@ -337,7 +333,6 @@ binding = "ICHIBAN_KYUYO"
 service = "ichibanboshi-kyuyo"
 
 [env.dev.vars]
-NUXT_KYUYO_UPSTREAM = "worker"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"

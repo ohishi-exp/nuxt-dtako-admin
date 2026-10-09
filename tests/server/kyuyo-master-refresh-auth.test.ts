@@ -6,7 +6,7 @@
  * ときの 401) を落ちるテストで固定する。D1 の突き合わせロジックは本 PR の対象外なので
  * ここでは踏み込まない (companies を空にして auth の道だけ通す)。
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const listKyuyoCompanies = vi.fn()
 const upsertKyuyoCompany = vi.fn()
@@ -35,13 +35,15 @@ const { default: refreshFull } = await import('../../server/api/kyuyo-master/ref
 const call = (handler: unknown, event: unknown) =>
   (handler as (e: unknown) => Promise<unknown>)(event)
 
+// 上流は Service Binding (`ICHIBAN_KYUYO`) だけ。binding の fetch に渡った Request を見る。
+const bindingFetch = vi.fn()
+
 function eventWith(opts: { authorization?: string, cookies?: Record<string, string> } = {}) {
   return {
     context: {
       cloudflare: {
         env: {
-          NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
-          ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+          ICHIBAN_KYUYO: { fetch: (req: Request) => bindingFetch(req) },
         },
       },
     },
@@ -55,46 +57,40 @@ const ROUTES: Array<{ label: string, handler: unknown, upstream: string, payload
   {
     label: 'refresh (差分)',
     handler: refresh,
-    upstream: 'https://rust-ichiban.mtamaramu.com/api/kyuyo/databases',
+    upstream: 'https://ichibanboshi-kyuyo/kyuyo/databases',
     payload: '{"databases":[]}',
   },
   {
     label: 'refresh-full (フル)',
     handler: refreshFull,
-    upstream: 'https://rust-ichiban.mtamaramu.com/api/kyuyo/companies',
+    upstream: 'https://ichibanboshi-kyuyo/kyuyo/companies',
     payload: '{"companies":[],"warnings":[]}',
   },
 ]
 
 describe.each(ROUTES)('kyuyo-master $label の JWT 解決 (Refs #375)', ({ handler, upstream, payload }) => {
-  const fetchMock = vi.fn()
+  const fetchMock = bindingFetch
 
   beforeEach(() => {
     fetchMock.mockReset()
     listKyuyoCompanies.mockReset().mockResolvedValue([])
     upsertKyuyoCompany.mockReset()
-    vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(new Response(payload, { status: 200 }))
-  })
-
-  afterEach(() => {
-    vi.unstubAllGlobals()
   })
 
   it('cookie (logi_auth_token) を Bearer に組んで upstream へ渡す', async () => {
     await call(handler, eventWith({ cookies: { logi_auth_token: 'jwt-cookie' } }))
 
-    const [url, init] = fetchMock.mock.calls[0]!
-    expect(String(url)).toBe(upstream)
-    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
+    const req = fetchMock.mock.calls[0]![0] as Request
+    expect(req.url).toBe(upstream)
+    expect(req.headers.get('authorization')).toBe('Bearer jwt-cookie')
   })
 
   /** デプロイ skew 用の後方互換 (古いバンドルのタブが残っている間だけ効く)。 */
   it('cookie が無ければ受領した Authorization を素通し転送する', async () => {
     await call(handler, eventWith({ authorization: 'Bearer jwt-header' }))
 
-    const [, init] = fetchMock.mock.calls[0]!
-    expect(init.headers.Authorization).toBe('Bearer jwt-header')
+    expect((fetchMock.mock.calls[0]![0] as Request).headers.get('authorization')).toBe('Bearer jwt-header')
   })
 
   /** **文言も直す**: client がヘッダを組まなくなったので「Authorization: Bearer が

@@ -66,9 +66,9 @@ export class IchibanUpstreamError extends Error {
  * (`app/pages/kyuyo-fetch.vue:209`) を拾うことを確認してある — 「0 件」は探索の失敗
  * ではない。**front に呼び出しを足すときは、この一覧にも足す** (足し忘れると 403)。
  *
- * ★ **`fetchIchiban` の側では照合しない。** あちらは `/api/kyuyo/**` と
- * `/api/kyuyo-master/**` の 4 route も使う共有部品で、そちらは上流委任設計。
- * ここに混ぜると kyuyo 側が全部落ちる。**照合するのは ichiban proxy の route だけ。**
+ * ★ **`fetchIchiban` の側では照合しない。** 照合するのは ichiban proxy の route だけ
+ * (kyuyo は #322 で上流が Service Binding の Worker だけになり、`fetchIchiban` を使わなくなった。
+ * kyuyo 側の allowlist は `kyuyo-upstream.ts`)。
  *
  * ★ **query string は照合しない** — 判定するのは path 部分だけで、`?` 以降は
  * 今までどおり素通しする。
