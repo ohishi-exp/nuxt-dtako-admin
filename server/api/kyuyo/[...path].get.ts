@@ -1,9 +1,9 @@
 /**
  * rust-ichibanboshi の給与大臣読み取り API (`/api/kyuyo/*`) への thin proxy (Refs #369)。
  *
- * GET /api/kyuyo/** → <NUXT_ICHIBAN_API_URL>/api/kyuyo/** に
- * ① CF Access Service Token (トンネル通過用、server だけが持つ) と
- * ② ブラウザの JWT を `Authorization: Bearer <JWT>` として付けて転送する。
+ * GET /api/kyuyo/** → Service Binding `ICHIBAN_KYUYO` の Worker `ichibanboshi-kyuyo` の `/kyuyo/**` に
+ * ② ブラウザの JWT を `Authorization: Bearer <JWT>` として付けて転送する
+ * (① の CF Access Service Token はオンプレ経路の撤去で不要になった。Refs ohishi-exp/rust-ichibanboshi#322)。
  *
  * **② の JWT は cookie (`logi_auth_token`) から組む** (Refs #375) — client がヘッダを
  * 手で載せる必要は無い。優先順と後方互換の扱いは `server/utils/browser-jwt.ts` 参照。

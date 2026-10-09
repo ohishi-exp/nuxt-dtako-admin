@@ -2,9 +2,9 @@
  * rust-ichibanboshi の給与系 API (`/api/kyuyo/*`) への **書き込み** thin proxy
  * (Refs #467, #677)。
  *
- * POST /api/kyuyo/** → <NUXT_ICHIBAN_API_URL>/api/kyuyo/** に
- * ① CF Access Service Token (トンネル通過用、server だけが持つ) と
- * ② ブラウザの JWT を `Authorization: Bearer <JWT>` として付けて転送する。
+ * POST /api/kyuyo/** → Service Binding `ICHIBAN_KYUYO` の Worker `ichibanboshi-kyuyo` の `/kyuyo/**` に
+ * ② ブラウザの JWT を `Authorization: Bearer <JWT>` として付けて転送する
+ * (① の CF Access Service Token はオンプレ経路の撤去で不要になった。Refs ohishi-exp/rust-ichibanboshi#322)。
  *
  * **② の JWT は cookie (`logi_auth_token`) から組む** (Refs #375、GET 版と同じ)。
  *
