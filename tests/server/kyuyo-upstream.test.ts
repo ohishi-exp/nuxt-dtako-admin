@@ -178,6 +178,110 @@ describe('shadow', () => {
   })
 })
 
+describe('shadow 診断 (不一致のとき違うフィールド名だけ 2 行目)', () => {
+  const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status })
+  const run = async (onprem: Response, worker: Response) => {
+    fetchMock.mockImplementation(async () => onprem)
+    bindingFetch.mockImplementation(async () => worker)
+    await fetchKyuyo(withBinding('shadow'), 'GET', 'employees', '', AUTH)
+    await waitUntil.mock.calls[0]![0]
+    // 直前のテストで flush されなかった payroll の比較が遅れてログを出すので、この path (employees) のものだけ見る。
+    return infoSpy.mock.calls.map(c => String(c[0])).filter(l => l.startsWith('[kyuyo-shadow] employees '))
+  }
+  const base = () => ({
+    source: 'cache', synced_at: '2026-10-09T00:00:00.123456789Z', company_name: '架空商事', warnings: [],
+    employees: [{ code: 'X1', name: '架空太郎', amount: 111 }, { code: 'X2', name: '架空花子', amount: 222 }],
+  })
+
+  it('1. 一致のときは 2 行目が出ない', async () => {
+    const lines = await run(json(base()), json(base()))
+    expect(lines).toHaveLength(1)
+  })
+
+  it('2. synced_at だけ違う: norm=true で top に synced_at が出ない', async () => {
+    const lines = await run(json(base()), json({ ...base(), synced_at: '2026-10-09T00:00:00.123Z' }))
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toBe('[kyuyo-shadow] employees diff: norm=true source=cache/cache top= warnings=0/0 employees=2/2 rows_diff=0 fields=')
+    expect(lines[1]).not.toContain('synced_at')
+  })
+
+  it('3 & 4. company_name と employees の 1 行の 1 フィールドが違う: 名前だけ出て値は出ない', async () => {
+    const w = { ...base(), company_name: '別の架空商事', employees: [{ code: 'X1', name: '架空太郎', amount: 111 }, { code: 'X2', name: '架空花子', amount: 999 }] }
+    const lines = await run(json(base()), json(w))
+    expect(lines[1]).toBe('[kyuyo-shadow] employees diff: norm=false source=cache/cache top=company_name,employees warnings=0/0 employees=2/2 rows_diff=1 fields=amount')
+    for (const v of ['架空商事', '架空太郎', '架空花子', 'X1', '111', '999', '2026-10-09']) expect(lines.join('\n')).not.toContain(v)
+  })
+
+  it('5. JSON でない / object でない body は parse 失敗の 1 行', async () => {
+    expect((await run(new Response('onprem-body'), new Response('other')))[1]).toBe('[kyuyo-shadow] employees diff: parse 失敗')
+    infoSpy.mockClear(); waitUntil.mockClear()
+    expect((await run(json([1]), json({})))[1]).toContain('parse 失敗')
+    infoSpy.mockClear(); waitUntil.mockClear()
+    expect((await run(json({}), json([1])))[1]).toContain('parse 失敗')
+  })
+
+  it('6. どちらかが 200 でなければ 2 行目は出ない', async () => {
+    expect(await run(json(base()), json({ error: 'x' }, 403))).toHaveLength(1)
+    infoSpy.mockClear(); waitUntil.mockClear()
+    expect(await run(json({ error: 'x' }, 500), json(base()))).toHaveLength(1)
+  })
+
+  it('7a. fields が 20 個を超えたら … で打ち切る', async () => {
+    const wide = (v: number) => Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`f${i}`, v]))
+    const lines = await run(json({ rows: [wide(1)] }), json({ rows: [wide(2)] }))
+    const fields = lines[1]!.split('fields=')[1]!.split(',')
+    expect(fields).toHaveLength(21)
+    expect(fields[19]).toBe('f19')
+    expect(fields[20]).toBe('…')
+  })
+
+  it('7b. source は cache / live 以外を ? に置き換える (値は出さない)', async () => {
+    const lines = await run(json({ ...base(), source: 'live' }), json({ ...base(), source: '秘密の文字列' }))
+    expect(lines[1]).toContain('source=live/?')
+    expect(lines[1]).not.toContain('秘密')
+  })
+
+  it('7c. 件数が違うときは短い方まで比べる / 追加フィールドは和集合', async () => {
+    const lines = await run(json({ rows: [{ a: 1 }, { a: 2 }, { a: 3 }] }), json({ rows: [{ a: 1, b: 1 }] }))
+    expect(lines[1]).toContain('rows=3/1 rows_diff=1 fields=b')
+  })
+
+  it('7d. 片側が配列でない / 要素が object でない配列は件数だけ', async () => {
+    const lines = await run(json({ rows: [1, 2], other: [{ a: 1 }] }), json({ rows: [3], other: 'x' }))
+    expect(lines[1]).toContain('rows=2/1')
+    expect(lines[1]).toContain('other=1/-')
+    expect(lines[1]).not.toContain('rows_diff')
+  })
+
+  it('7e. warnings は配列キーに入らず件数だけ (文言は出ない)', async () => {
+    const lines = await run(json({ ...base(), warnings: ['警告A', '警告B'] }), json(base()))
+    expect(lines[1]).toContain('warnings=2/0')
+    expect(lines[1]).toContain('top=warnings ')
+    expect(lines[1]).not.toMatch(/ warnings=\d+\/\d+ .*warnings=/)
+    expect(lines[1]).not.toContain('警告')
+  })
+
+  it('7f. warnings が配列でない側は - と出す', async () => {
+    const lines = await run(json({ warnings: 'x' }), json({ warnings: [] }))
+    expect(lines[1]).toContain('warnings=-/0')
+  })
+
+  it('7g. 入れ子 (payments) の中のキーが違っても fields には payments しか出ない', async () => {
+    const lines = await run(json({ rows: [{ payments: { 基本給: 1 } }] }), json({ rows: [{ payments: { 基本給: 2, 手当: 3 } }] }))
+    expect(lines[1]).toContain('fields=payments')
+    expect(lines[1]).not.toContain('基本給')
+    expect(lines[1]).not.toContain('手当')
+  })
+
+  it('不一致でも応答は onprem のまま変わらない', async () => {
+    fetchMock.mockImplementation(async () => json(base()))
+    bindingFetch.mockImplementation(async () => json({ ...base(), company_name: 'z' }))
+    const res = await fetchKyuyo(withBinding('shadow'), 'GET', 'employees', '', AUTH)
+    expect(await res.json()).toEqual(base())
+    await waitUntil.mock.calls[0]![0]
+  })
+})
+
 describe('worker', () => {
   it('GET は binding へ URL・Authorization (Bearer 付き) で送り、CF Access ヘッダ無し・onprem 無し', async () => {
     bindingFetch.mockImplementation(async () => new Response('w', { status: 200 }))
