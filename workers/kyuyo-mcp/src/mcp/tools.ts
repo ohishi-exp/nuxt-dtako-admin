@@ -500,29 +500,63 @@ async function fetchIchibanJson(env: Env, pathWithQuery: string, tag: string): P
         "ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
     );
   }
+  return readUpstreamJson(
+    () =>
+      fetch(`${apiUrl}${pathWithQuery}`, {
+        headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+      }),
+    "rust-ichibanboshi",
+  );
+}
+
+/**
+ * 上流への fetch を実行し、例外・非 2xx・非 JSON をそれぞれ原因の分かるメッセージにして
+ * throw する (握り潰さない)。`label` は文言の主語 (「<label> へ接続できません」等)。
+ */
+async function readUpstreamJson(doFetch: () => Promise<Response>, label: string): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetch(`${apiUrl}${pathWithQuery}`, {
-      headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
-    });
+    res = await doFetch();
   } catch (err) {
     // 握り潰さず原因を返す (社内 LAN が落ちている / Tunnel 断)
-    throw new Error(`rust-ichibanboshi へ接続できません: ${describeError(err)}`);
+    throw new Error(`${label} へ接続できません: ${describeError(err)}`);
   }
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(
-      `rust-ichibanboshi が ${res.status} を返しました: ${text.slice(0, UPSTREAM_EXCERPT)}`,
-    );
+    throw new Error(`${label} が ${res.status} を返しました: ${text.slice(0, UPSTREAM_EXCERPT)}`);
   }
   try {
     return JSON.parse(text);
   } catch {
     // CF Access の認証画面 HTML が返るケース (Service Token 失効時に踏む)
-    throw new Error(
-      `rust-ichibanboshi の応答が JSON ではありません: ${text.slice(0, UPSTREAM_EXCERPT)}`,
-    );
+    throw new Error(`${label} の応答が JSON ではありません: ${text.slice(0, UPSTREAM_EXCERPT)}`);
   }
+}
+
+/**
+ * 一番星 (rust-ichibanboshi) の Worker `ichibanboshi-ichiban` を Service Binding
+ * (`ICHIBAN_DB`) で叩いて JSON を返す。CF Access ヘッダ・Authorization は付けない
+ * (Service Binding 専用 Worker で認可なし)。
+ *
+ * 一番星 6 本 (health / employees / vehicles / sales/departments / sales・costs の
+ * vehicle-daily) は Worker (Refs ohishi-exp/rust-ichibanboshi#322)、勤怠は
+ * `fetchIchibanJson` でオンプレ。
+ */
+async function fetchIchibanWorkerJson(env: Env, pathWithQuery: string): Promise<unknown> {
+  const binding = env.ICHIBAN_DB;
+  if (!binding || typeof binding.fetch !== "function") {
+    throw new Error("一番星 Worker の Service Binding (ICHIBAN_DB) が未設定です");
+  }
+  return readUpstreamJson(
+    () =>
+      binding.fetch(
+        new Request(`https://ichibanboshi-ichiban${pathWithQuery}`, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+        }),
+      ),
+    "一番星 Worker",
+  );
 }
 
 export const getKosokuEventsTool = {
@@ -2630,14 +2664,13 @@ export const getIchibanCostsTool = {
   inputSchema: getIchibanCostsArgs,
   execute: async (env: Env, args) => {
     requireVehicleOrDriver(args);
-    const parsed = await fetchIchibanJson(
+    const parsed = await fetchIchibanWorkerJson(
       env,
       ichibanRangeQuery("/api/costs/vehicle-daily", args.from, args.to, {
         vehicle: args.vehicle,
         driver: args.driver,
         kind: args.kind,
       }),
-      "ichiban_costs",
     );
     const rows = ichibanRows(parsed);
 
@@ -2748,13 +2781,12 @@ export const getIchibanSalesTool = {
   inputSchema: getIchibanSalesArgs,
   execute: async (env: Env, args) => {
     requireVehicleOrDriver(args);
-    const parsed = await fetchIchibanJson(
+    const parsed = await fetchIchibanWorkerJson(
       env,
       ichibanRangeQuery("/api/sales/vehicle-daily", args.from, args.to, {
         vehicle: args.vehicle,
         driver: args.driver,
       }),
-      "ichiban_sales",
     );
     const rows = ichibanRows(parsed);
 
@@ -3212,10 +3244,9 @@ export const getKushiroBranchEstimateTool = {
     if (args.sales_cross_check !== false) {
       const rows = await Promise.all(
         drivers.map(async (driverCd) => {
-          const body = await fetchIchibanJson(
+          const body = await fetchIchibanWorkerJson(
             env,
             ichibanRangeQuery("/api/sales/vehicle-daily", args.from, args.to, { driver: driverCd }),
-            "kushiro_estimate_sales",
           );
           const list = ichibanRows(body);
           return {
@@ -3242,13 +3273,12 @@ export const getKushiroBranchEstimateTool = {
         // **運行手当とは別立ての実績**。1 名あたりに均して人件費の前提に使う。
         const costs = await Promise.all(
           drivers.map(async (driverCd) => {
-            const body = await fetchIchibanJson(
+            const body = await fetchIchibanWorkerJson(
               env,
               ichibanRangeQuery("/api/costs/vehicle-daily", args.from, args.to, {
                 driver: driverCd,
                 kind: ICHIBAN_LABOR_COST_KIND,
               }),
-              "kushiro_estimate_labor",
             );
             return ichibanRows(body).reduce((acc: number, row) => acc + numField(row, "amount"), 0);
           }),
