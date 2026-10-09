@@ -87,7 +87,9 @@
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
-import { fetchIchiban, cfEnv, ichibanEmptyErrorReason, isAllowedIchibanProxyPath, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { cfEnv, ichibanEmptyErrorReason, isAllowedIchibanProxyPath, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+// 上流 (オンプレ / shadow / Worker) の切替は NUXT_ICHIBAN_UPSTREAM で決まる (Refs ohishi-exp/rust-ichibanboshi#322)。
+import { fetchIchibanUpstream } from '../../utils/ichiban-worker-upstream'
 import { requireAuth } from '@ippoan/auth-client/server'
 import { assertAllowedRole } from '../../utils/require-role'
 // ★ **`resolveSecret` だけ `cf-env.ts` から取っているのは意図的** (Refs #999/#1015)。
@@ -169,14 +171,14 @@ export default defineEventHandler(async (event: H3Event) => {
 
   let upstreamRes: Response
   try {
-    upstreamRes = await fetchIchiban(env, pathParam, getRequestURL(event).search)
+    upstreamRes = await fetchIchibanUpstream(event, env, pathParam, getRequestURL(event).search)
   }
-  // fetchIchiban は IchibanUpstreamError (503/502) のみを throw する契約 (同ファイルの JSDoc 参照)。
+  // fetchIchibanUpstream は IchibanUpstreamError (403/503/502) のみを throw する契約 (同ファイルの JSDoc 参照)。
   catch (e: unknown) {
     const err = e as IchibanUpstreamError
     // ★ **`err.message` を `statusMessage` に載せない** (Refs #1032/#886)。
-    // 中身は `server/utils/ichiban-upstream.ts` の日本語 2 本
-    // (`:118` の binding 未設定 = 503 / `:139` の接続失敗 = 502) で、**日本語のまま
+    // 中身は `server/utils/ichiban-upstream.ts` / `ichiban-worker-upstream.ts` の日本語
+    // (binding 未設定 = 503 / 接続失敗 = 502) で、**日本語のまま
     // reason phrase に流すと本番 (workerd) で断片だけが残る**。`statusMessage` は
     // **502/503 のどちらにも当てはまる ASCII の固定句**にし、上流の日本語は
     // `message` (= JSON 本文) にそのまま載せる。**`ichiban-upstream.ts` 側の文言は
