@@ -155,6 +155,7 @@ import {
   relayKintaiWindow,
   type FoldTriggerDecision,
   type KintaiRelayDeps,
+  type KyuyoAuthorizer,
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
@@ -849,6 +850,8 @@ export interface RelayEnv {
   /** auth-worker の RPC entrypoint (`InternalEntrypoint`)。履歴の読み書きはこちら
    * (Refs #950 / ippoan/auth-worker#483)。**binding が無ければ黙らず鳴らす。** */
   AUTH_WORKER_RPC?: AlcTenantDataForwarder;
+  /** auth-worker の RPC entrypoint (`KyuyoAuthEntrypoint`)。給与閲覧の認可確認 (`checkKyuyoAccess`) の聞き先。 */
+  AUTH_KYUYO?: KyuyoAuthorizer;
   /**
    * Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS
    * 127.0.0.1:8081) に到達する Fetcher。VPC Service `dtako-scraper-relay`
@@ -9942,12 +9945,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (top-level / staging / preview のいずれにも無い)、`wrangler dev --var` で
    * しか入らないので、**本番系では発火しない**。
    */
-  private async kyuyoAccessGate(
-    deps: KintaiRelayDeps,
-    request: Request,
-  ): Promise<Response | null> {
+  private async kyuyoAccessGate(request: Request): Promise<Response | null> {
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) return null;
-    const denial = await checkKyuyoAccess(deps, extractBearerToken(request.headers));
+    const denial = await checkKyuyoAccess(this.env.AUTH_KYUYO, extractBearerToken(request.headers));
     return denial ? dvrJsonError(denial.status, denial.message) : null;
   }
 
@@ -9966,7 +9966,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (ctx instanceof Response) return ctx;
     // **上流へ POST する前に**関門を通す — allowlist 外が Supabase に 1 行も
     // 書けないようにする (読み側だけ塞ぐと「見えないが汚せる」が残る、#951)
-    const gate = await this.kyuyoAccessGate(ctx.deps, request);
+    const gate = await this.kyuyoAccessGate(request);
     if (gate) return gate;
     let body: unknown;
     try {
@@ -9998,7 +9998,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const ctx = await this.buildKintaiRelayContext(record.compId, "wage_range");
     if (ctx instanceof Response) return ctx;
     // tenant を通した後に email allowlist を AND する (#951)
-    const gate = await this.kyuyoAccessGate(ctx.deps, request);
+    const gate = await this.kyuyoAccessGate(request);
     if (gate) return gate;
     try {
       return Response.json(await relayWageRangeGet(ctx.deps, record.compId, url.searchParams));

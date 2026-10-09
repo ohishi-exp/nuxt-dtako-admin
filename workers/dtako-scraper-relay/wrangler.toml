@@ -61,6 +61,13 @@ binding = "AUTH_WORKER_RPC"
 service = "auth-worker"
 entrypoint = "InternalEntrypoint"
 
+# 給与閲覧の認可確認 (Refs ohishi-exp/rust-ichibanboshi#322)。auth-worker の給与用 RPC entrypoint (authorize)
+# に聞く (給与閲覧の認可確認で常に使う)。許可リストの正は auth-worker の KV `kyuyo-allowed-emails`。
+[[services]]
+binding = "AUTH_KYUYO"
+service = "auth-worker"
+entrypoint = "KyuyoAuthEntrypoint"
+
 # Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS
 # 127.0.0.1:8081) に到達する VPC Service `dtako-scraper-relay`。
 [[vpc_services]]
@@ -280,6 +287,11 @@ binding = "AUTH_WORKER_RPC"
 service = "auth-worker-staging"
 entrypoint = "InternalEntrypoint"
 
+[[env.staging.services]]
+binding = "AUTH_KYUYO"
+service = "auth-worker-staging"
+entrypoint = "KyuyoAuthEntrypoint"
+
 [[env.staging.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
@@ -415,6 +427,11 @@ service = "auth-worker-staging"
 binding = "AUTH_WORKER_RPC"
 service = "auth-worker-staging"
 entrypoint = "InternalEntrypoint"
+
+[[env.preview.services]]
+binding = "AUTH_KYUYO"
+service = "auth-worker-staging"
+entrypoint = "KyuyoAuthEntrypoint"
 
 [[env.preview.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"

@@ -38,11 +38,10 @@
  * rust-ichibanboshi、全社閲覧 allowlist は auth-worker。**別物**で効き先も違う
  * (下の「email allowlist は 2 つある」)。
  *
- * **給与 allowlist** の実体は rust-ichibanboshi の `kyuyo::introspect::authorize()`
- * (`#82`) で、auth-worker introspect の `email` をオンプレ設定
- * (`KYUYO_ALLOWED_EMAILS`) と突き合わせる。**この repo は給与 allowlist の写しを
- * 持っていない**し、持たせると二重管理になる (片方だけ更新されて食い違う)。
- * 3 段目もこの正を**聞きに行く**だけ (`kintai-relay.ts` の `checkKyuyoAccess`)。
+ * **給与 allowlist** の正は auth-worker の KV `kyuyo-allowed-emails`。**この repo は
+ * 給与 allowlist の写しを持っていない**し、持たせると二重管理になる (片方だけ更新されて
+ * 食い違う)。3 段目もこの正を**聞きに行く**だけ (`kintai-relay.ts` の `checkKyuyoAccess` が
+ * auth-worker の `KyuyoAuthEntrypoint.authorize` を呼ぶ)。
  *
  * **全社閲覧 allowlist** の実体は **auth-worker の `USER_ACL`** (Refs #1049)。
  * この relay は写しを持たず、**`/auth/introspect` の応答 `org_wide` (boolean) を
@@ -52,7 +51,7 @@
  * 持つ単価マスタから計算した労務管理値**で、最低賃金チェックはテナント内の総務が回す
  * 業務だから。**★ ただしこの線でよいかは依然として未決** — 誰が金額を見てよいかは
  * 実装側で決められることではない。**寄せる場合の道具はもう在る** — #951 で足した
- * `GET /api/kyuyo/access` と `checkKyuyoAccess` を同じように AND するだけ。
+ * `checkKyuyoAccess` を同じように AND するだけ。
  * ⇒ **残っているのは「寄せるかどうか」の判断だけで、実装の障壁ではない** (#556)。
  *
  * **★ 3 段目 (確定値スナップショット) は上の論拠が当てはまらない**ので、
@@ -62,24 +61,22 @@
  * 読める場所へ移っていた** —「漏れ」ではなく**「洗浄」**。
  *
  * いまは `handleWageRange` / `handleWageSnapshotPut` が、この関数の tenant 判定を
- * 通した**後**に `checkKyuyoAccess` (上流 `GET /api/kyuyo/access`) を AND する。
+ * 通した**後**に `checkKyuyoAccess` (auth-worker の給与認可) を AND する。
  * **読みだけでなく保存にも掛ける** — 読みだけ塞ぐと「見えないが汚せる」が残る。
  *
- * **★ ブラウザ JWT を転送する経路は `deps.onprem()`** (`kintai-relay.ts` に理由の表)。
- * wage-* 本体が `deps.gcp()` なのに合わせて `gcp()` へ揃えると、GCP 側には
- * 給与 allowlist が無いので**全員 503** になる。
+ * **★ ブラウザ JWT を渡す先は auth-worker の RPC** (`deps.gcp()` / `deps.onprem()` ではない)。
  *
  * **2 段目 (単価マスタ × 拘束時間の計算賃金) は tenant のまま**で、これは**据え置き**
  * (#951 の対象外)。上の「なぜ 2 段目が tenant のままか」の論拠がそのまま生きている。
  *
  * ## ★ email allowlist は **2 つある** — 混同しない (Refs #1049)
  *
- * #1049 より前は「email allowlist」といえば上流の給与 allowlist 1 つだけだった。
+ * #1049 より前は「email allowlist」といえば給与 allowlist 1 つだけだった。
  * いまは 2 つあり、**名前も置き場も効き先も違う**:
  *
  * | 呼び名 | 実体 | 決めること |
  * | --- | --- | --- |
- * | **給与 allowlist** | **上流** rust-ichibanboshi の `KYUYO_ALLOWED_EMAILS` (`kyuyo::introspect::authorize()`) | 給与大臣の**実支給額**を見てよいか |
+ * | **給与 allowlist** | **auth-worker** の KV `kyuyo-allowed-emails` (`KyuyoAuthEntrypoint.authorize`) | 給与大臣の**実支給額**を見てよいか |
  * | **全社閲覧 allowlist** | **auth-worker** の `USER_ACL` → introspect の `org_wide` (`isAllCompsViewer`) | **どの会社**を見てよいか |
  *
  * **無冠で「email allowlist」と書かないこと** — どちらの話か読み手が決められない。
@@ -91,7 +88,7 @@
  *
  * どちらかがもう一方を上書きすることは無い。
  *
- * 上流の `authorize()` は **`role` を一切見ない** (`src/kyuyo/introspect.rs` 実読、
+ * 給与の `authorize()` は **`role` を一切見ない** (旧オンプレ実装 `src/kyuyo/introspect.rs` 実読、
  * 2026-08-26)。したがって **`role === 'admin'` でも給与 allowlist に居なければ 403**
  * で、これは決めごとではなく**既に本番がそうなっている**。
  *
