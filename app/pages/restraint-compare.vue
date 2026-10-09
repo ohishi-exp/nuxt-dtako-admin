@@ -27,7 +27,10 @@ const recalcStates = ref<Record<string, { loading: boolean; result: string; erro
 const flashDrivers = ref<Set<string>>(new Set())
 
 /** web地球号から取得する年月 (`YYYY-MM`)。既定は先月。 */
-const fetchYm = ref(prevYm(new Date().toISOString().slice(0, 7)))
+const fetchYm = ref(prevYm((() => {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+})()))
 /** 取得する乗務員CD (1 つ)。空 = 全員。 */
 const fetchDriverCd = ref('')
 /** 取得経路で比較しているときの年月。ファイル選択に戻ったら null。 */
