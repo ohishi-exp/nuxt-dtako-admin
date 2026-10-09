@@ -86,6 +86,19 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect(event.__responseHeaders['Content-Type']).toBe('application/json')
   })
 
+  it('NUXT_ICHIBAN_UPSTREAM=worker なら ICHIBAN_DB binding の応答を返し、オンプレを叩かない (Refs ohishi-exp/rust-ichibanboshi#322)', async () => {
+    const bindingFetch = vi.fn(async () => new Response('{"data":[]}', { status: 200, headers: { 'content-type': 'application/json' } }))
+    const event = eventWith({ NUXT_ICHIBAN_UPSTREAM: 'worker', ICHIBAN_DB: { fetch: bindingFetch } })
+
+    const body = await call(event)
+
+    expect(body).toBe('{"data":[]}')
+    expect((bindingFetch.mock.calls[0]! as unknown as [Request])[0].url).toBe('https://ichibanboshi-ichiban/api/sales/vehicle-daily?vehicle=101&from=2026-06-01')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(event.__statusCode).toBe(200)
+    expect(event.__responseHeaders['Content-Type']).toBe('application/json')
+  })
+
   it('NUXT_ICHIBAN_API_URL が設定されていればそちらを base に使う', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
     const event = eventWith({

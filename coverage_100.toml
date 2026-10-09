@@ -112,6 +112,10 @@ branches = true
 path = "server/utils/kyuyo-upstream.ts"
 branches = true
 
+[[files]]
+path = "server/utils/ichiban-worker-upstream.ts"
+branches = true
+
 # ブラウザ JWT の解決 (cookie `logi_auth_token` → dev cookie → 受領 `Authorization`)。
 # **client が `Authorization: Bearer` を組むのをやめた** (#375、ippoan/auth-worker#416 の
 # 子) ぶんの受け皿で、`/api/kyuyo/**` と `/api/kyuyo-master/**` の 4 route が使う。
