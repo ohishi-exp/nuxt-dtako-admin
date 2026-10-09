@@ -39,6 +39,9 @@ export interface Env {
    *  `GET /kintai-relay/day-summaries` (同 #205 の 23) を叩く。
    *  **運ぶ/畳むロジックは relay 側の 1 実装のまま** — こちらは認証付きの入口を出すだけ。 */
   SCRAPER_RELAY?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** 一番星 Worker `ichibanboshi-ichiban` への service binding。sales/costs の
+   *  vehicle-daily をこちらで取る (認可なし・Service Binding 専用、Refs ohishi-exp/rust-ichibanboshi#322)。 */
+  ICHIBAN_DB?: { fetch(req: Request): Promise<Response> };
   /** relay が要求する consumer proof (`X-Alc-Proxy-Secret`)。 */
   INTERNAL_SHARED_SECRET?: unknown;
 }

@@ -1148,18 +1148,32 @@ describe("get_timecard_diff (mode=summary)", () => {
 
 // ===== get_ichiban_costs / get_ichiban_sales =================================
 //
-// `fetchIchibanJson` の失敗系 (未設定・接続不能・非 2xx・非 JSON) は
-// get_kosoku_events で見ているので、ここは **この 2 本に固有のもの**に絞る:
-// 引数の必須判定・クエリの組み立て・集計・行の pass-through。
+// この 2 本は一番星 Worker (Service Binding `ICHIBAN_DB`) を叩く
+// (Refs ohishi-exp/rust-ichibanboshi#322)。勤怠 (`fetchIchibanJson`、オンプレ) の失敗系は
+// get_kosoku_events、`fetchIchibanWorkerJson` の失敗系は get_ichiban_sales で見る。
+// ここは: 引数の必須判定・クエリの組み立て・集計・行の pass-through。
 
-/** 上流 (rust-ichibanboshi) の応答を返す fetch を立て、叩かれた URL を集める。 */
-function stubIchibanJson(body: unknown, status = 200): string[] {
+/** binding に渡った Request (URL・method・ヘッダの検証用)。 */
+let workerRequests: Request[] = [];
+
+/** `ICHIBAN_DB` の fetch を差し替えた env (勤怠側の CF Access 設定は残したまま)。 */
+function ichibanEnv(fetchImpl: (req: Request) => Promise<Response>, over: Partial<Env> = {}): Env {
+  return kosokuEnv({ ICHIBAN_DB: { fetch: fetchImpl }, ...over });
+}
+
+/** Worker の応答を返す binding を立てる。global fetch は呼ばれたら落とす。 */
+function stubIchibanJson(body: unknown, status = 200): { env: Env; urls: string[] } {
+  workerRequests = [];
   const urls: string[] = [];
-  vi.stubGlobal("fetch", async (url: string) => {
-    urls.push(url);
+  vi.stubGlobal("fetch", async () => {
+    throw new Error("global fetch は呼ばれないはず (一番星は binding で取る)");
+  });
+  const env = ichibanEnv(async (req) => {
+    workerRequests.push(req);
+    urls.push(req.url);
     return new Response(JSON.stringify(body), { status });
   });
-  return urls;
+  return { env, urls };
 }
 
 const COST_ROW = {
@@ -1223,53 +1237,63 @@ describe("get_ichiban_costs", () => {
   it("requires vehicle or driver before touching upstream", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
+    const bindingSpy = vi.fn();
+    const env = ichibanEnv(bindingSpy);
     await expect(
-      getIchibanCostsTool.execute(kosokuEnv(), { from: "2026-07-01", to: "2026-08-01" }),
+      getIchibanCostsTool.execute(env, { from: "2026-07-01", to: "2026-08-01" }),
     ).rejects.toThrow("どちらかは必須");
     // kind だけでは通さない (上流は許すが、全社ぶんは重い)
     await expect(
-      getIchibanCostsTool.execute(kosokuEnv(), {
+      getIchibanCostsTool.execute(env, {
         from: "2026-07-01",
         to: "2026-08-01",
         kind: "03",
       }),
     ).rejects.toThrow("どちらかは必須");
     expect(fetchSpy).not.toHaveBeenCalled();
+    expect(bindingSpy).not.toHaveBeenCalled();
   });
 
   it("builds the query with only the filters that were given (vehicle)", async () => {
-    const urls = stubIchibanJson({ source_table: "経費明細", data: [] });
-    await getIchibanCostsTool.execute(kosokuEnv(), {
+    const { env, urls } = stubIchibanJson({ source_table: "経費明細", data: [] });
+    await getIchibanCostsTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       vehicle: "1420",
     });
     expect(urls[0]).toBe(
-      "https://rust-ichiban.example.com/api/costs/vehicle-daily" +
+      "https://ichibanboshi-ichiban/api/costs/vehicle-daily" +
         "?from=2026-07-01&to=2026-08-01&vehicle=1420",
     );
+    // Service Binding 専用・認可なし: CF Access / Authorization は付けない
+    const req = workerRequests[0];
+    expect(req.method).toBe("GET");
+    expect(req.headers.get("Accept")).toBe("application/json");
+    expect(req.headers.get("CF-Access-Client-Id")).toBeNull();
+    expect(req.headers.get("CF-Access-Client-Secret")).toBeNull();
+    expect(req.headers.get("Authorization")).toBeNull();
   });
 
   it("builds the query with driver and kind when those are given", async () => {
-    const urls = stubIchibanJson({ source_table: "経費明細", data: [] });
-    await getIchibanCostsTool.execute(kosokuEnv(), {
+    const { env, urls } = stubIchibanJson({ source_table: "経費明細", data: [] });
+    await getIchibanCostsTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       driver: "1656",
       kind: "03",
     });
     expect(urls[0]).toBe(
-      "https://rust-ichiban.example.com/api/costs/vehicle-daily" +
+      "https://ichibanboshi-ichiban/api/costs/vehicle-daily" +
         "?from=2026-07-01&to=2026-08-01&driver=1656&kind=03",
     );
   });
 
   it("passes rows through untouched and aggregates by kind and by date", async () => {
-    stubIchibanJson({
+    const { env } = stubIchibanJson({
       source_table: "経費明細 + 経費ﾏｽﾀ + 経費種別ﾏｽﾀ",
       data: [COST_ROW, FUEL_ROW, FIXED_ROW],
     });
-    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+    const res = (await getIchibanCostsTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       vehicle: "1420",
@@ -1321,11 +1345,11 @@ describe("get_ichiban_costs", () => {
   });
 
   it("survives rows that are not objects or miss fields instead of returning NaN", async () => {
-    stubIchibanJson({
+    const { env } = stubIchibanJson({
       // source_table が無い応答 (形が変わっても集計は続ける)
       data: [null, "oops", { amount: "1000", cost_kind: 3, is_fixed: "1" }],
     });
-    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+    const res = (await getIchibanCostsTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       driver: "1656",
@@ -1344,8 +1368,8 @@ describe("get_ichiban_costs", () => {
   });
 
   it("returns empty aggregates when upstream data is not an array", async () => {
-    stubIchibanJson({ source_table: "経費明細", data: { unexpected: true } });
-    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+    const { env } = stubIchibanJson({ source_table: "経費明細", data: { unexpected: true } });
+    const res = (await getIchibanCostsTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       vehicle: "1420",
@@ -1355,11 +1379,11 @@ describe("get_ichiban_costs", () => {
   });
 
   it("flags truncation when upstream returns its default limit (500 rows)", async () => {
-    stubIchibanJson({
+    const { env } = stubIchibanJson({
       source_table: "経費明細",
       data: Array.from({ length: 500 }, (_, i) => ({ ...COST_ROW, row_id: `20260703-${i}` })),
     });
-    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+    const res = (await getIchibanCostsTool.execute(env, {
       from: "2026-01-01",
       to: "2026-08-01",
       vehicle: "1420",
@@ -1368,14 +1392,14 @@ describe("get_ichiban_costs", () => {
   });
 
   it("surfaces an upstream failure (non-2xx) as a throw", async () => {
-    stubIchibanJson({ error: "bad request" }, 400);
+    const { env } = stubIchibanJson({ error: "bad request" }, 400);
     await expect(
-      getIchibanCostsTool.execute(kosokuEnv(), {
+      getIchibanCostsTool.execute(env, {
         from: "2026-07-01",
         to: "2026-08-01",
         vehicle: "1420",
       }),
-    ).rejects.toThrow("rust-ichibanboshi が 400 を返しました");
+    ).rejects.toThrow("一番星 Worker が 400 を返しました");
   });
 });
 
@@ -1411,40 +1435,43 @@ describe("get_ichiban_sales", () => {
   it("requires vehicle or driver before touching upstream", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
+    const bindingSpy = vi.fn();
+    const env = ichibanEnv(bindingSpy);
     await expect(
-      getIchibanSalesTool.execute(kosokuEnv(), { from: "2026-07-01", to: "2026-08-01" }),
+      getIchibanSalesTool.execute(env, { from: "2026-07-01", to: "2026-08-01" }),
     ).rejects.toThrow("どちらかは必須");
     expect(fetchSpy).not.toHaveBeenCalled();
+    expect(bindingSpy).not.toHaveBeenCalled();
   });
 
   it("builds the query with only the filters that were given (vehicle)", async () => {
-    const urls = stubIchibanJson({ source_table: "運行日報明細", data: [] });
-    await getIchibanSalesTool.execute(kosokuEnv(), {
+    const { env, urls } = stubIchibanJson({ source_table: "運行日報明細", data: [] });
+    await getIchibanSalesTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       vehicle: "1420",
     });
     expect(urls[0]).toBe(
-      "https://rust-ichiban.example.com/api/sales/vehicle-daily" +
+      "https://ichibanboshi-ichiban/api/sales/vehicle-daily" +
         "?from=2026-07-01&to=2026-08-01&vehicle=1420",
     );
   });
 
   it("builds the query with driver when that is given", async () => {
-    const urls = stubIchibanJson({ source_table: "運行日報明細", data: [] });
-    await getIchibanSalesTool.execute(kosokuEnv(), {
+    const { env, urls } = stubIchibanJson({ source_table: "運行日報明細", data: [] });
+    await getIchibanSalesTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       driver: "1656",
     });
     expect(urls[0]).toBe(
-      "https://rust-ichiban.example.com/api/sales/vehicle-daily" +
+      "https://ichibanboshi-ichiban/api/sales/vehicle-daily" +
         "?from=2026-07-01&to=2026-08-01&driver=1656",
     );
   });
 
   it("passes rows through and aggregates by date and by request kind", async () => {
-    stubIchibanJson({
+    const { env } = stubIchibanJson({
       source_table: "運行日報明細",
       data: [
         SALE_ROW,
@@ -1452,7 +1479,7 @@ describe("get_ichiban_sales", () => {
         { ...SALE_ROW, sale_date: "2026-07-04", row_id: "20260704-000001", amount: 22000 },
       ],
     });
-    const res = (await getIchibanSalesTool.execute(kosokuEnv(), {
+    const res = (await getIchibanSalesTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       driver: "1656",
@@ -1488,11 +1515,11 @@ describe("get_ichiban_sales", () => {
 
   it("omits by_request_kind when no row carries 請求K", async () => {
     // source_table も無い応答 (形が変わっても集計は続ける)
-    stubIchibanJson({
+    const { env } = stubIchibanJson({
       // 上流から request_kind が消えた / 空文字の行しか無い場合
       data: [{ sale_date: "2026-07-03", amount: 1000 }, null],
     });
-    const res = (await getIchibanSalesTool.execute(kosokuEnv(), {
+    const res = (await getIchibanSalesTool.execute(env, {
       from: "2026-07-01",
       to: "2026-08-01",
       vehicle: "1420",
@@ -1507,11 +1534,11 @@ describe("get_ichiban_sales", () => {
   });
 
   it("flags truncation when upstream returns its default limit (500 rows)", async () => {
-    stubIchibanJson({
+    const { env } = stubIchibanJson({
       source_table: "運行日報明細",
       data: Array.from({ length: 500 }, (_, i) => ({ ...SALE_ROW, row_id: `x-${i}` })),
     });
-    const res = (await getIchibanSalesTool.execute(kosokuEnv(), {
+    const res = (await getIchibanSalesTool.execute(env, {
       from: "2026-01-01",
       to: "2026-08-01",
       driver: "1656",
@@ -1519,18 +1546,39 @@ describe("get_ichiban_sales", () => {
     expect(res.summary.truncated).toBe(true);
   });
 
-  it("surfaces a non-JSON upstream body as a throw", async () => {
-    vi.stubGlobal(
-      "fetch",
+  it("fails loudly when the ICHIBAN_DB binding is missing", async () => {
+    const args = { from: "2026-07-01", to: "2026-08-01", vehicle: "1420" };
+    // binding 無し / fetch が関数でない、のどちらも未設定扱い
+    for (const env of [kosokuEnv(), kosokuEnv({ ICHIBAN_DB: {} as Env["ICHIBAN_DB"] })]) {
+      await expect(getIchibanSalesTool.execute(env, args)).rejects.toThrow(
+        "一番星 Worker の Service Binding (ICHIBAN_DB) が未設定です",
+      );
+    }
+  });
+
+  it("surfaces a binding.fetch exception as a throw", async () => {
+    const env = ichibanEnv(async () => {
+      throw new Error("Network connection lost");
+    });
+    await expect(
+      getIchibanSalesTool.execute(env, { from: "2026-07-01", to: "2026-08-01", vehicle: "1420" }),
+    ).rejects.toThrow("一番星 Worker へ接続できません: Network connection lost");
+  });
+
+  it("surfaces a non-2xx Worker response as a throw", async () => {
+    const env = ichibanEnv(async () => new Response("upstream down", { status: 502 }));
+    await expect(
+      getIchibanSalesTool.execute(env, { from: "2026-07-01", to: "2026-08-01", vehicle: "1420" }),
+    ).rejects.toThrow("一番星 Worker が 502 を返しました: upstream down");
+  });
+
+  it("surfaces a non-JSON Worker body as a throw", async () => {
+    const env = ichibanEnv(
       async () => new Response("<!DOCTYPE html><html>Access denied</html>", { status: 200 }),
     );
     await expect(
-      getIchibanSalesTool.execute(kosokuEnv(), {
-        from: "2026-07-01",
-        to: "2026-08-01",
-        vehicle: "1420",
-      }),
-    ).rejects.toThrow("応答が JSON ではありません");
+      getIchibanSalesTool.execute(env, { from: "2026-07-01", to: "2026-08-01", vehicle: "1420" }),
+    ).rejects.toThrow("一番星 Worker の応答が JSON ではありません");
   });
 });
 

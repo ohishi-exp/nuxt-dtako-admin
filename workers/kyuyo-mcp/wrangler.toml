@@ -46,6 +46,12 @@ service = "auth-worker-staging"
 binding = "SCRAPER_RELAY"
 service = "nuxt-dtako-admin-scraper-relay"
 
+# 一番星 Worker (sales/costs の vehicle-daily、Refs ohishi-exp/rust-ichibanboshi#322)。
+# Service Binding 専用・認可なし。勤怠 (/api/kintai/*) はオンプレのまま NUXT_ICHIBAN_API_URL。
+[[services]]
+binding = "ICHIBAN_DB"
+service = "ichibanboshi-ichiban"
+
 # relay が要求する consumer proof (X-Alc-Proxy-Secret)。**既存 entry を binding するだけ**。
 [[secrets_store_secrets]]
 binding = "INTERNAL_SHARED_SECRET"

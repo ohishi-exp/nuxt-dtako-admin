@@ -50,9 +50,23 @@ function env(over: Partial<Env> = {}, master: unknown = MIN_WAGE_MASTER): Env {
     NUXT_ICHIBAN_API_URL: "https://rust-ichiban.example.com",
     NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid.access",
     ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => "csecret" },
+    // 一番星の sales/costs は Worker の Service Binding で取る (Refs ohishi-exp/rust-ichibanboshi#322)
+    ICHIBAN_DB: {
+      fetch: async (req: Request) => {
+        if (!ichibanImpl) throw new Error("ICHIBAN_DB が呼ばれたが応答が未設定");
+        return ichibanImpl(req);
+      },
+    },
     ...over,
   } as Env;
 }
+
+/** `ICHIBAN_DB.fetch` の応答。テストごとに mockIchiban / mockIchibanBy が差し替える。 */
+let ichibanImpl: ((req: Request) => Promise<Response>) | null = null;
+
+afterEach(() => {
+  ichibanImpl = null;
+});
 
 function baseArgs(over: Partial<Args> = {}): Args {
   return {
@@ -73,16 +87,21 @@ function salesBody(amount: number, rows = 1) {
   };
 }
 
+/** binding の応答を差し替え、global fetch が呼ばれたら落とす。 */
+function mockIchibanBy(impl: (req: Request) => Promise<Response> | Response): void {
+  ichibanImpl = async (req) => impl(req);
+  vi.stubGlobal("fetch", async () => {
+    throw new Error("global fetch は呼ばれないはず (一番星は binding で取る)");
+  });
+}
+
 function mockIchiban(bodies: unknown[] | (() => Response)): void {
   if (typeof bodies === "function") {
-    vi.stubGlobal("fetch", vi.fn(async () => bodies()));
+    mockIchibanBy(() => bodies());
     return;
   }
   let i = 0;
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => new Response(JSON.stringify(bodies[i++ % bodies.length]), { status: 200 })),
-  );
+  mockIchibanBy(() => new Response(JSON.stringify(bodies[i++ % bodies.length]), { status: 200 }));
 }
 
 type Result = Awaited<ReturnType<typeof getKushiroBranchEstimateTool.execute>> & {
@@ -517,18 +536,16 @@ describe("人件費と損益分岐", () => {
   it("引数が無ければ一番星の経費区分 08 (給与) を実績から引く", async () => {
     // 売上 5 本 → 経費 5 本 の順で返す
     let call = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        call += 1;
-        const isCost = String(url).includes("/api/costs/");
-        expect(String(url).includes("kind=08")).toBe(isCost);
-        return new Response(
-          JSON.stringify(isCost ? { data: [{ amount: 500000 }] } : salesBody(1000000)),
-          { status: 200 },
-        );
-      }),
-    );
+    mockIchibanBy((req) => {
+      call += 1;
+      const isCost = req.url.includes("/api/costs/");
+      expect(req.url.startsWith("https://ichibanboshi-ichiban/")).toBe(true);
+      expect(req.url.includes("kind=08")).toBe(isCost);
+      return new Response(
+        JSON.stringify(isCost ? { data: [{ amount: 500000 }] } : salesBody(1000000)),
+        { status: 200 },
+      );
+    });
     const res = await run(env(), baseArgs({
       sales_cross_check: undefined,
       km_per_liter: 3,
@@ -692,14 +709,16 @@ describe("一番星の売上との突合", () => {
   it("上流の失敗はそのまま投げる (握り潰さない)", async () => {
     mockIchiban(() => new Response("boom", { status: 502 }));
     await expect(run(env(), baseArgs({ sales_cross_check: undefined, driver: ["1412"] })))
-      .rejects.toThrow("rust-ichibanboshi が 502 を返しました");
+      .rejects.toThrow("一番星 Worker が 502 を返しました");
   });
 
   it("false にすると上流を 1 回も叩かない (完全オフライン)", async () => {
     const spy = vi.fn();
     vi.stubGlobal("fetch", spy);
-    const res = await run(env(), baseArgs({ sales_cross_check: false }));
+    const bindingSpy = vi.fn();
+    const res = await run(env({ ICHIBAN_DB: { fetch: bindingSpy } }), baseArgs({ sales_cross_check: false }));
     expect(spy).not.toHaveBeenCalled();
+    expect(bindingSpy).not.toHaveBeenCalled();
     expect(res.sales_cross_check).toBeNull();
   });
 });
