@@ -171,8 +171,9 @@ describe('recalcPendingViaAlcInternalProxy', () => {
     ])
     const result = await recalcPendingViaAlcInternalProxy(input, fetchImpl)
     expect(result).toMatchObject({ processed: 2, remaining: 3, rounds: 2 })
-    expect(result.error?.kind).toBe('http')
-    expect(result.error?.message).toContain('502')
+    expect(result.error).toEqual({ kind: 'http', status: 502 })
+    // 本文 ('boom') は結果に持たない (呼び手がそのままログ・応答に出すため)
+    expect(JSON.stringify(result)).not.toContain('boom')
   })
 
   it('returns a network error (Error and non-Error rejections)', async () => {
@@ -180,13 +181,20 @@ describe('recalcPendingViaAlcInternalProxy', () => {
       throw new Error('connection reset')
     }) as FetchLike
     const r1 = await recalcPendingViaAlcInternalProxy(input, asError)
-    expect(r1.error).toEqual({ kind: 'network', message: 'connection reset' })
+    expect(r1.error).toEqual({ kind: 'network', status: null })
+    expect(JSON.stringify(r1)).not.toContain('connection reset')
 
     const asString = (async () => {
       throw 'plain'
     }) as unknown as FetchLike
     const r2 = await recalcPendingViaAlcInternalProxy(input, asString)
-    expect(r2.error).toEqual({ kind: 'network', message: 'plain' })
+    expect(r2.error).toEqual({ kind: 'network', status: null })
+  })
+
+  it('does not carry the unreadable response body in the result', async () => {
+    const fetchImpl = sequenceFetch([new Response('SECRET-BODY-MARKER', { status: 200 })])
+    const result = await recalcPendingViaAlcInternalProxy(input, fetchImpl)
+    expect(JSON.stringify(result)).not.toContain('SECRET-BODY-MARKER')
   })
 
   it.each([
@@ -198,7 +206,7 @@ describe('recalcPendingViaAlcInternalProxy', () => {
   ])('returns a parse error when the response is %s', async (_name, body) => {
     const fetchImpl = sequenceFetch([new Response(body, { status: 200 })])
     const result = await recalcPendingViaAlcInternalProxy(input, fetchImpl)
-    expect(result.error?.kind).toBe('parse')
+    expect(result.error).toEqual({ kind: 'parse', status: null })
     expect(result.rounds).toBe(1)
   })
 })

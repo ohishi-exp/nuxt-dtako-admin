@@ -27,9 +27,12 @@
 export const INTERNAL_PROXY_BASE = "https://auth-worker.internal";
 
 export class AlcInternalUploadError extends Error {
-  constructor(message: string) {
+  /** 非 2xx の HTTP status (呼び手が本文を持たずに種別だけ記録するため)。 */
+  readonly status: number;
+  constructor(message: string, status = 0) {
     super(message);
     this.name = "AlcInternalUploadError";
+    this.status = status;
   }
 }
 
@@ -110,6 +113,7 @@ export async function sendViaAlcInternalProxy(
   if (!res.ok) {
     throw new AlcInternalUploadError(
       `alc-internal-proxy ${req.path} failed (${res.status}): ${text.slice(0, 300)}`,
+      res.status,
     );
   }
   return text;
@@ -215,7 +219,10 @@ export interface RecalcPendingResult {
   remaining: number;
   /** 実際に叩いた回数。 */
   rounds: number;
-  error: { kind: RecalcPendingErrorKind; message: string } | null;
+  /** 失敗の**種別だけ**を持つ。応答本文・例外の message は持たない (呼び手がログと応答に
+   * そのまま出すため、alc / auth-worker の本文が漏れない形にしておく)。`status` は
+   * `http` のときだけ HTTP status、他は `null`。 */
+  error: { kind: RecalcPendingErrorKind; status: number | null } | null;
 }
 
 function parseRecalcPendingResponse(
@@ -267,15 +274,15 @@ export async function recalcPendingViaAlcInternalProxy(
         fetchImpl,
       );
     } catch (err) {
-      result.error = {
-        kind: err instanceof AlcInternalUploadError ? "http" : "network",
-        message: err instanceof Error ? err.message : String(err),
-      };
+      result.error =
+        err instanceof AlcInternalUploadError
+          ? { kind: "http", status: err.status }
+          : { kind: "network", status: null };
       return result;
     }
     const counts = parseRecalcPendingResponse(body);
     if (!counts) {
-      result.error = { kind: "parse", message: `応答を読めません: ${body.slice(0, 200)}` };
+      result.error = { kind: "parse", status: null };
       return result;
     }
     result.processed += counts.processed;

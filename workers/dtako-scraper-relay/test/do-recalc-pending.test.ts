@@ -44,6 +44,8 @@ interface Opts {
   uploadStatus?: number;
   pendingStatus?: number;
   pendingBody?: unknown;
+  /** pending の応答本文を丸ごと差し替える (本文がログに漏れないことの確認用)。 */
+  pendingText?: string;
 }
 
 function makeDO(opts: Opts = {}) {
@@ -59,7 +61,7 @@ function makeDO(opts: Opts = {}) {
           order.push("pending");
           pendingHeaders.push(Object.fromEntries(new Headers(init?.headers).entries()));
           return new Response(
-            JSON.stringify(opts.pendingBody ?? { processed: 2, failed: 0, remaining: 0 }),
+            opts.pendingText ?? JSON.stringify(opts.pendingBody ?? { processed: 2, failed: 0, remaining: 0 }),
             { status: opts.pendingStatus ?? 200 },
           );
         }
@@ -94,7 +96,7 @@ function makeDO(opts: Opts = {}) {
     order.push("fold");
   });
   vi.spyOn(spyable, "resolveAccount").mockResolvedValue(ACCOUNT);
-  return { order, pendingHeaders, stored, waits, priv };
+  return { order, pendingHeaders, stored, waits, priv, spyable };
 }
 
 function quiet() {
@@ -130,7 +132,7 @@ describe("取り込みの一区切りで要再計算を流す (Refs ippoan/alc-d
     });
 
     it("★ pending が失敗しても取り込みは done のまま、fold も走る (識別子はログに出ない)", async () => {
-      const { order, stored, priv } = makeDO({ pendingStatus: 502 });
+      const { order, stored, priv } = makeDO({ pendingStatus: 502, pendingText: "UPSTREAM-BODY-MARKER" });
       scrapeViaHttp.mockResolvedValue(ZIP);
       const q = quiet();
       await priv.runCronDtakoScrape(ACCOUNT, RANGE, "job-2");
@@ -139,7 +141,12 @@ describe("取り込みの一区切りで要再計算を流す (Refs ippoan/alc-d
       expect(order).toEqual(["upload", "pending", "fold"]);
       expect(stored.get(SCRAPE_JOB_KEY_PREFIX + "job-2")).toMatchObject({ state: "done" });
       const line = q.logs.find((l) => l.includes('"recalculate_pending"'));
-      expect(JSON.parse(line!)).toMatchObject({ recalculate_pending: "error", error: { kind: "http" } });
+      expect(JSON.parse(line!)).toMatchObject({
+        recalculate_pending: "error",
+        error: { kind: "http", status: 502 },
+      });
+      // 応答本文はログに出ない (種別と件数だけ)
+      expect(q.logs.join("\n")).not.toContain("UPSTREAM-BODY-MARKER");
     });
 
     it("★ upload が失敗したら pending も fold も呼ばない", async () => {
@@ -176,6 +183,18 @@ describe("取り込みの一区切りで要再計算を流す (Refs ippoan/alc-d
       q.restore();
 
       expect(order).toEqual(["upload", "pending", "fold"]);
+    });
+
+    it("★ pending が万一 throw しても fold は走る", async () => {
+      const { order, waits, priv, spyable } = makeDO();
+      scrapeViaHttp.mockResolvedValue(ZIP);
+      vi.spyOn(spyable, "recalcPendingAfterIngest").mockRejectedValue(new Error("unexpected"));
+      const q = quiet();
+      await priv.executeScrape(server, params);
+      await Promise.all(waits);
+      q.restore();
+
+      expect(order).toEqual(["upload", "fold"]);
     });
 
     it("★ upload が失敗したら pending は呼ばない (fold は従来どおり)", async () => {

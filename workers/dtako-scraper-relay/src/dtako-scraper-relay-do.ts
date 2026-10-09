@@ -3783,7 +3783,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
               })
           : async () => null;
       this.ctx.waitUntil(
+        // pending が万一 throw しても fold は必ず走らせる (先に `.catch` で受ける)。
         recalcPending()
+          .catch(() => {})
           .then(() => this.foldAfterIngest(account, params, jobKey, uploadOutcome))
           .catch(() => {}),
       );
