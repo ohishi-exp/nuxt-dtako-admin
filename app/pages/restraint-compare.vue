@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { compareRestraintCsv, recalculateDriverStream, recalculateDriversBatch } from '~/utils/api'
 import type { RecalcProgressEvent, BatchRecalcEvent } from '~/utils/api'
+import { prevYm } from '~/utils/restraint-wage-view'
+
+const { session, authHeaders, restoreSession, expireSession, showLoginPanel } = useRestraintSession()
+
+onMounted(() => {
+  restoreSession()
+  if (!session.value) showLoginPanel.value = true
+})
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const loading = ref(false)
@@ -18,11 +26,53 @@ const filterMode = ref<'all' | 'diff' | 'unknown'>('unknown')
 const recalcStates = ref<Record<string, { loading: boolean; result: string; error?: boolean }>>({})
 const flashDrivers = ref<Set<string>>(new Set())
 
+/** web地球号から取得する年月 (`YYYY-MM`)。既定は先月。 */
+const fetchYm = ref(prevYm((() => {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+})()))
+/** 取得する乗務員CD (1 つ)。空 = 全員。 */
+const fetchDriverCd = ref('')
+/** 取得経路で比較しているときの年月。ファイル選択に戻ったら null。 */
+const fetchedYm = ref<{ year: number; month: number } | null>(null)
+
 async function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
   selectedFile.value = file
+  fetchedYm.value = null
+  await runCompare()
+}
+
+/** web地球号から生 CSV を 1 回だけ取得し、ファイルと同じ経路で比較する。 */
+async function fetchAndCompare() {
+  const [year, month] = fetchYm.value.split('-').map(Number) as [number, number]
+  const cd = fetchDriverCd.value.trim()
+  loading.value = true
+  error.value = ''
+  results.value = []
+  try {
+    const blob = await $fetch<Blob>('/restraint-api/csv', {
+      headers: authHeaders(),
+      query: { year, month, driverFrom: cd, driverTo: cd },
+      responseType: 'blob',
+    })
+    selectedFile.value = new File([blob], `web地球号_${fetchYm.value}${cd ? '_' + cd : ''}.csv`, { type: 'text/csv' })
+    fetchedYm.value = { year, month }
+    if (fileInput.value) fileInput.value.value = ''
+  } catch (e) {
+    loading.value = false
+    const status = restraintErrorStatus(e)
+    if (status === 401) {
+      expireSession(restraintErrorMessage(e))
+    } else if (status === 404) {
+      error.value = `${year}年${month}月${cd ? ' 乗務員 ' + cd : ''} の拘束時間管理表は web地球号にありません (集計前の月は出ません)`
+    } else {
+      error.value = restraintErrorMessage(e)
+    }
+    return
+  }
   await runCompare()
 }
 
@@ -96,18 +146,27 @@ function recalcStreamFailure(e: unknown, gotAnyEvent: boolean): string {
     : `再計算を開始できませんでした (${reason})`
 }
 
+/**
+ * 再計算に渡す年月。取得経路なら選んだ年月。ファイル経路は先頭結果の日付から月を
+ * 推定する (年はファイルから取れないので 2026 据え置き)。推定できなければ null。
+ */
+function recalcYearMonth(): { year: number; month: number } | null {
+  if (fetchedYm.value) return fetchedYm.value
+  const firstResult = results.value[0]
+  if (!firstResult?.csv?.days?.length) return null
+  const dateStr = firstResult.csv.days.find((d: any) => !d.is_holiday)?.date || ''
+  const mMatch = dateStr.match(/(\d+)月/)
+  if (!mMatch) return null
+  return { year: 2026 /* TODO: CSVヘッダーから取得 */, month: parseInt(mMatch[1]) }
+}
+
 async function recalcDiffsOnly() {
   const driversWithDiffs = results.value.filter((r: any) => r.diffs.length > 0 && r.driver_id)
   if (driversWithDiffs.length === 0) return
 
-  // 年月推定
-  const firstResult = results.value[0]
-  if (!firstResult?.csv?.days?.length) return
-  const dateStr = firstResult.csv.days.find((d: any) => !d.is_holiday)?.date || ''
-  const mMatch = dateStr.match(/(\d+)月/)
-  if (!mMatch) return
-  const month = parseInt(mMatch[1])
-  const year = 2026
+  const ym = recalcYearMonth()
+  if (!ym) return
+  const { year, month } = ym
 
   batchRecalcRunning.value = true
   batchRecalcError.value = ''
@@ -164,14 +223,9 @@ async function recalcDiffsOnly() {
 }
 
 async function recalcDriver(driverId: string, driverName: string, driverCd: string) {
-  // 年月をCSVの日付から推定
-  const firstResult = results.value[0]
-  if (!firstResult?.csv?.days?.length) return
-  const dateStr = firstResult.csv.days.find((d: any) => !d.is_holiday)?.date || ''
-  const mMatch = dateStr.match(/(\d+)月/)
-  if (!mMatch) return
-  const month = parseInt(mMatch[1])
-  const year = 2026 // TODO: CSVヘッダーから取得
+  const ym = recalcYearMonth()
+  if (!ym) return
+  const { year, month } = ym
 
   const key = driverCd
   recalcStates.value[key] = { loading: true, result: '再計算中...' }
@@ -240,13 +294,23 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
 
 <template>
   <div class="space-y-4">
-    <h2 class="text-xl font-bold">拘束時間管理表 CSV比較</h2>
+    <TheearthSessionHeader title="拘束時間管理表 CSV比較" api-prefix="/restraint-api" wide />
 
     <div class="flex flex-wrap gap-3 items-end">
       <div>
         <label class="text-xs text-gray-500 block mb-1">CSV選択</label>
         <input ref="fileInput" type="file" accept=".csv" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700" @change="onFileChange">
       </div>
+      <div>
+        <label class="text-xs text-gray-500 block mb-1">年月</label>
+        <input v-model="fetchYm" type="month" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
+      </div>
+      <div>
+        <label class="text-xs text-gray-500 block mb-1">乗務員CD (空=全員)</label>
+        <input v-model="fetchDriverCd" type="text" class="border rounded-lg px-3 py-1.5 text-sm w-28 dark:bg-gray-900 dark:border-gray-700">
+      </div>
+      <UButton label="web地球号から取得して比較" icon="i-lucide-download" size="sm" :loading="loading" :disabled="!session || loading" @click="fetchAndCompare" />
+      <span class="text-xs text-gray-400 self-center">全員だと数十秒かかります</span>
       <UButton label="再比較" icon="i-lucide-refresh-cw" size="sm" :loading="loading" :disabled="!selectedFile" @click="runCompare" />
       <div class="flex gap-1">
         <UButton :label="`未知差分 (${summary.withUnknownDiffs})`" size="xs" :color="filterMode === 'unknown' ? 'primary' : 'neutral'" variant="outline" @click="filterMode = 'unknown'" />
