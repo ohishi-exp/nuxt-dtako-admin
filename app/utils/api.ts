@@ -2,7 +2,7 @@ import type {
   Driver, Vehicle,
   OperationsResponse, OperationFilter, Operation,
   CsvJsonResponse, CsvType,
-  UploadResponse, PendingUpload,
+  UploadResponse, PendingUpload, RecalculatePendingResult,
   DailyHoursResponse, DailyHoursFilter,
   EventClassification,
   WorkTimesResponse,
@@ -253,6 +253,33 @@ export async function uploadZip(file: File): Promise<UploadResponse> {
     method: 'POST',
     body: formData,
   })
+}
+
+/** `POST /api/recalculate-pending` を繰り返す上限。alc は 1 回で R2 GET 4000 件で止まり
+ * `remaining > 0` を返すので `remaining` が 0 になるまで呼ぶが、減らない異常のときに
+ * 無限に叩かないための天井 (relay の `RECALC_PENDING_MAX_ROUNDS` と同じ 20)。 */
+export const RECALC_PENDING_MAX_ROUNDS = 20
+
+/**
+ * 取り込み (`/api/upload`) は日別を書かず、新しい運行・変わった運行の 乗務員 × 月 に
+ * 「要再計算」の印だけを付ける (Refs ippoan/alc-dtako-worker#23)。印の分をまとめて計算し直して
+ * 印を消すのがこの口で、**アップロードの一区切りごとに 1 回**呼ぶ (呼ばないと取り込んだ日の
+ * 日別が空のまま残る)。応答は件数だけ。`remaining` が 0 になるまで繰り返し、`failed` は
+ * 残っても繰り返さない。途中で失敗したら投げる (呼び手がアップロードの成功表示とは別に出す)。
+ */
+export async function recalculatePending(): Promise<RecalculatePendingResult> {
+  const total: RecalculatePendingResult = { processed: 0, failed: 0, remaining: 0, rounds: 0 }
+  while (total.rounds < RECALC_PENDING_MAX_ROUNDS) {
+    const res = await request<Omit<RecalculatePendingResult, 'rounds'>>('/api/recalculate-pending', {
+      method: 'POST',
+    })
+    total.rounds += 1
+    total.processed += res.processed
+    total.failed += res.failed
+    total.remaining = res.remaining
+    if (res.remaining <= 0) break
+  }
+  return total
 }
 
 export async function getPendingUploads(): Promise<PendingUpload[]> {

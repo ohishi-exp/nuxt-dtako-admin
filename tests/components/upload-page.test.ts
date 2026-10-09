@@ -27,6 +27,7 @@ import { nextStepCases, expectExactlyOneNextStep } from '../helpers/next-step'
 const { api } = vi.hoisted(() => ({
   api: {
     uploadZip: vi.fn(),
+    recalculatePending: vi.fn(),
     getPendingUploads: vi.fn(),
     rerunUpload: vi.fn(),
     getUploads: vi.fn(),
@@ -37,6 +38,7 @@ const { api } = vi.hoisted(() => ({
 vi.mock('~/utils/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('~/utils/api')>()),
   uploadZip: api.uploadZip,
+  recalculatePending: api.recalculatePending,
   getPendingUploads: api.getPendingUploads,
   rerunUpload: api.rerunUpload,
   getUploads: api.getUploads,
@@ -101,6 +103,7 @@ describe('/upload デジタコ CSV アップロード', () => {
     api.getPendingUploads.mockResolvedValue([])
     api.getUploads.mockResolvedValue([])
     api.uploadZip.mockResolvedValue(result())
+    api.recalculatePending.mockResolvedValue({ processed: 4, failed: 0, remaining: 0, rounds: 1 })
     api.rerunUpload.mockResolvedValue(result())
     api.splitCsv.mockResolvedValue({ split_failed: 0 })
   })
@@ -127,6 +130,66 @@ describe('/upload デジタコ CSV アップロード', () => {
       expect(w.text()).toContain('91 件の運行データを取り込みました')
       // ドロップし終わったら枠の色は戻す
       expect(dropZone(w).classes()).toContain('border-gray-300')
+    })
+
+    describe('取り込みの後の要再計算 (Refs ippoan/alc-dtako-worker#23)', () => {
+      it('★ 取り込みが成功したら 1 回だけ流し、件数を取り込みの表示とは別枠で出す', async () => {
+        const w = mountPage()
+        await flushPromises()
+        await selectFile(w, [zip()])
+        expect(api.recalculatePending).toHaveBeenCalledTimes(1)
+        expect(w.text()).toContain('91 件の運行データを取り込みました')
+        expect(w.text()).toContain('日別の再計算: 4 件処理')
+        expect(w.text()).not.toContain('未処理のままです')
+      })
+
+      it('★ 取り込みが失敗したら流さない', async () => {
+        api.uploadZip.mockRejectedValue(new Error('API エラー (500): x'))
+        const w = mountPage()
+        await flushPromises()
+        await selectFile(w, [zip()])
+        expect(api.recalculatePending).not.toHaveBeenCalled()
+        expect(w.text()).not.toContain('日別の再計算')
+      })
+
+      it('★ 再計算が失敗しても「取り込みました」は変えず、別枠で失敗を出す', async () => {
+        api.recalculatePending.mockRejectedValue(new Error('API エラー (502): bad gateway'))
+        const w = mountPage()
+        await flushPromises()
+        await selectFile(w, [zip()])
+        expect(w.text()).toContain('91 件の運行データを取り込みました')
+        expect(w.text()).toContain('取り込みは成功しましたが、日別の再計算に失敗しました')
+        expect(w.text()).toContain('API エラー (502): bad gateway')
+        expect(w.text()).not.toContain('アップロードに失敗しました')
+      })
+
+      it('Error でない失敗でも既定の文言で出す', async () => {
+        api.recalculatePending.mockRejectedValue('boom')
+        const w = mountPage()
+        await flushPromises()
+        await selectFile(w, [zip()])
+        expect(w.text()).toContain('日別の再計算に失敗しました')
+      })
+
+      it('★ failed / remaining が残っていれば、件数つきの警告を出す', async () => {
+        api.recalculatePending.mockResolvedValue({ processed: 9, failed: 2, remaining: 3, rounds: 20 })
+        const w = mountPage()
+        await flushPromises()
+        await selectFile(w, [zip()])
+        expect(w.text()).toContain('日別の再計算: 9 件処理')
+        expect(w.text()).toContain('2 件が失敗、3 件が未処理のままです')
+      })
+
+      it('次の取り込みでは前回の再計算の表示を消す', async () => {
+        api.recalculatePending.mockRejectedValueOnce(new Error('API エラー (502): x'))
+        const w = mountPage()
+        await flushPromises()
+        await selectFile(w, [zip()])
+        expect(w.text()).toContain('日別の再計算に失敗しました')
+        await selectFile(w, [zip()])
+        expect(w.text()).not.toContain('日別の再計算に失敗しました')
+        expect(w.text()).toContain('日別の再計算: 4 件処理')
+      })
     })
 
     it('ファイルの無いドロップでは送らない', async () => {
@@ -216,8 +279,9 @@ describe('/upload デジタコ CSV アップロード', () => {
       expect(w.text()).toContain('一覧にも欠け検知にも出てきません')
       // **緑と赤で別物として読ませる。**色は stub では描かれないので prop で見る
       // (同じ色で 2 枚並ぶと「取り込みも失敗した」に読める)。
+      // 3 枚目の 'neutral' は取り込みの後の「日別の再計算」の静かな確認 (別枠)。
       const alerts = w.findAllComponents({ name: 'UAlert' })
-      expect(alerts.map((a) => a.props('color'))).toEqual(['success', 'error'])
+      expect(alerts.map((a) => a.props('color'))).toEqual(['success', 'error', 'neutral'])
     })
 
     it('分割が 0 件失敗なら赤は出さない', async () => {

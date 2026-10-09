@@ -27,9 +27,12 @@
 export const INTERNAL_PROXY_BASE = "https://auth-worker.internal";
 
 export class AlcInternalUploadError extends Error {
-  constructor(message: string) {
+  /** 非 2xx の HTTP status (呼び手が本文を持たずに種別だけ記録するため)。 */
+  readonly status: number;
+  constructor(message: string, status = 0) {
     super(message);
     this.name = "AlcInternalUploadError";
+    this.status = status;
   }
 }
 
@@ -110,6 +113,7 @@ export async function sendViaAlcInternalProxy(
   if (!res.ok) {
     throw new AlcInternalUploadError(
       `alc-internal-proxy ${req.path} failed (${res.status}): ${text.slice(0, 300)}`,
+      res.status,
     );
   }
   return text;
@@ -183,4 +187,108 @@ export function parseAlcUploadResponse(body: string): AlcUploadOutcome {
       ? obj.split_failed
       : null;
   return { uploadId, operationsCount, splitFailed };
+}
+
+/**
+ * `POST /api/recalculate-pending` (Refs ippoan/alc-dtako-worker#23)。
+ *
+ * 取り込み (`/api/upload`) は日別を書かず、新しい運行・変わった運行の 乗務員 × 月 に
+ * 「要再計算」の印だけを付ける。印の分をまとめて計算し直して印を消すのがこの口で、
+ * 取り込みの一区切り (cron 1 読取日 / バッチの終わり …) ごとに 1 回呼ぶ。呼ばないと
+ * 取り込んだ日の日別が空のまま残る。
+ *
+ * 応答は件数だけ `{"processed": n, "failed": n, "remaining": n}`。alc は 1 回に R2 GET
+ * 4000 件で止まり、残りがあれば `remaining > 0` を返すので、**`remaining` が 0 に
+ * なるまで繰り返す**。`failed` は残っても繰り返さない (繰り返しても直らない)。
+ *
+ * **throw しない。** 呼び手は取り込み・fold を止めたくないので、失敗 (HTTP エラー・
+ * JSON が読めない・通信) は `error` に種類を積んで、それまでに数えた件数と一緒に返す。
+ */
+export const RECALC_PENDING_PATH = "/alc-internal-proxy/api/recalculate-pending";
+
+/** 1 回の呼び出しで繰り返す上限。alc が 1 回 4000 件で止まるので 20 回で 8 万件。
+ * `remaining` が減らない異常のときに無限に叩かないための天井。 */
+export const RECALC_PENDING_MAX_ROUNDS = 20;
+
+export type RecalcPendingErrorKind = "http" | "parse" | "network";
+
+export interface RecalcPendingResult {
+  processed: number;
+  failed: number;
+  /** 最後に見た `remaining`。上限回数で止まったときは 0 より大きい。 */
+  remaining: number;
+  /** 実際に叩いた回数。 */
+  rounds: number;
+  /** 失敗の**種別だけ**を持つ。応答本文・例外の message は持たない (呼び手がログと応答に
+   * そのまま出すため、alc / auth-worker の本文が漏れない形にしておく)。`status` は
+   * `http` のときだけ HTTP status、他は `null`。 */
+  error: { kind: RecalcPendingErrorKind; status: number | null } | null;
+}
+
+function parseRecalcPendingResponse(
+  body: string,
+): { processed: number; failed: number; remaining: number } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { processed, failed, remaining } = parsed as Record<string, unknown>;
+  if (
+    typeof processed !== "number" ||
+    typeof failed !== "number" ||
+    typeof remaining !== "number" ||
+    !Number.isFinite(processed + failed + remaining)
+  ) {
+    return null;
+  }
+  return { processed, failed, remaining };
+}
+
+export async function recalcPendingViaAlcInternalProxy(
+  input: { sharedSecret: string; tenantId: string },
+  fetchImpl: FetchLike,
+  maxRounds: number = RECALC_PENDING_MAX_ROUNDS,
+): Promise<RecalcPendingResult> {
+  const result: RecalcPendingResult = {
+    processed: 0,
+    failed: 0,
+    remaining: 0,
+    rounds: 0,
+    error: null,
+  };
+  while (result.rounds < maxRounds) {
+    result.rounds += 1;
+    let body: string;
+    try {
+      body = await sendViaAlcInternalProxy(
+        {
+          path: RECALC_PENDING_PATH,
+          sharedSecret: input.sharedSecret,
+          tenantId: input.tenantId,
+          contentType: "application/json",
+          body: "{}",
+        },
+        fetchImpl,
+      );
+    } catch (err) {
+      result.error =
+        err instanceof AlcInternalUploadError
+          ? { kind: "http", status: err.status }
+          : { kind: "network", status: null };
+      return result;
+    }
+    const counts = parseRecalcPendingResponse(body);
+    if (!counts) {
+      result.error = { kind: "parse", status: null };
+      return result;
+    }
+    result.processed += counts.processed;
+    result.failed += counts.failed;
+    result.remaining = counts.remaining;
+    if (counts.remaining <= 0) return result;
+  }
+  return result;
 }

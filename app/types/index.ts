@@ -147,6 +147,16 @@ export type CsvType = 'kudguri' | 'events' | 'tolls' | 'ferries' | 'speed'
 
 // --- Upload ---
 
+/** `POST /api/recalculate-pending` の結果 (件数だけ)。`recalculatePending()` が
+ * `remaining` が 0 になるまで繰り返した合計で、`rounds` は実際に叩いた回数。
+ * 上限回数で止まったときは `remaining > 0` のまま返る。 */
+export interface RecalculatePendingResult {
+  processed: number
+  failed: number
+  remaining: number
+  rounds: number
+}
+
 export interface UploadResponse {
   upload_id: string
   operations_count: number

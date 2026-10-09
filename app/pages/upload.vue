@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { uploadZip, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
+import { uploadZip, recalculatePending, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
 import { parseSplitCsvResponse } from '~/utils/scrape-split'
-import type { UploadResponse, PendingUpload } from '~/types'
+import type { UploadResponse, PendingUpload, RecalculatePendingResult } from '~/types'
 import { describeListFailure } from '~/utils/api-error'
 
 const isDragging = ref(false)
 const isUploading = ref(false)
 const result = ref<UploadResponse | null>(null)
+// 取り込みの後に流す「要再計算」の結果 (Refs ippoan/alc-dtako-worker#23)。取り込みの成否とは
+// 別枠 — 失敗しても上の「取り込みました」は変えない。
+const recalc = ref<RecalculatePendingResult | null>(null)
+const recalcError = ref<string | null>(null)
 const error = ref<string | null>(null)
 
 // --- Pending uploads ---
@@ -56,10 +60,19 @@ async function handleUpload(file: File) {
 
   error.value = null
   result.value = null
+  recalc.value = null
+  recalcError.value = null
   isUploading.value = true
 
   try {
     result.value = await uploadZip(file)
+    // 取り込みは日別を書かず印を付けるだけなので、成功したらその分を計算し直す。
+    // 失敗は取り込みの成功表示に混ぜず、別枠 (`recalcError`) に載せる。
+    try {
+      recalc.value = await recalculatePending()
+    } catch (e) {
+      recalcError.value = e instanceof Error ? e.message : '日別の再計算に失敗しました'
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'アップロードに失敗しました'
   } finally {
@@ -219,6 +232,27 @@ onMounted(() => {
       variant="subtle"
       :title="`CSV分割が ${result.split_failed} 件失敗しました`"
       description="このままだと該当運行が一覧にも欠け検知にも出てきません。下の「アップロード履歴 / CSV分割」で該当のアップロードの「CSV分割」を押してやり直してください。"
+    />
+
+    <!-- 取り込みの後の「要再計算」(Refs ippoan/alc-dtako-worker#23)。取り込みの成功表示とは別枠。
+         件数だけの結果。`failed` / `remaining` が 0 でなければ警告にし、0 のときは静かな確認だけ。 -->
+    <UAlert
+      v-if="recalc"
+      icon="i-lucide-calculator"
+      :color="recalc.failed > 0 || recalc.remaining > 0 ? 'warning' : 'neutral'"
+      variant="subtle"
+      :title="`日別の再計算: ${recalc.processed} 件処理`"
+      :description="recalc.failed > 0 || recalc.remaining > 0
+        ? `${recalc.failed} 件が失敗、${recalc.remaining} 件が未処理のままです。同じ ZIP をもう一度アップロードすると再計算をやり直します。`
+        : undefined"
+    />
+    <UAlert
+      v-if="recalcError"
+      icon="i-lucide-alert-triangle"
+      color="warning"
+      variant="subtle"
+      title="取り込みは成功しましたが、日別の再計算に失敗しました"
+      :description="`${recalcError} — 同じ ZIP をもう一度アップロードすると再計算をやり直します。`"
     />
 
     <!-- Error -->
