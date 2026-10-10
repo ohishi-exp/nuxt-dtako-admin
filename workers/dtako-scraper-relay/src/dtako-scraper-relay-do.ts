@@ -35,6 +35,7 @@
  * ohishi-exp/dtako-scraper#22, ippoan/rust-alc-api#434)。
  */
 import { DurableObject } from "cloudflare:workers";
+import { EmailMessage } from "cloudflare:email";
 import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
 import { PromiseQueue } from "./promise-queue";
 import {
@@ -63,7 +64,7 @@ import {
   scrapeEtcCsv,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
-import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveKvConfigRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
   buildScrapeHistoryEntries,
   expandScrapeDateRange,
@@ -499,6 +500,17 @@ import {
   resolveScrapeAlertTarget,
 } from "./scrape-alert";
 import {
+  ALERT_REASON_FOLD_FAILED,
+  ALERT_REASON_FOLD_NOT_CONFIGURED,
+  ALERT_REASON_NO_SHARED_SECRET,
+  buildScrapeAlertSubject,
+  recalcPendingAlertReason,
+  SCRAPE_ALERT_EMAIL_KV_KEY,
+  sendScrapeAlertEmail,
+  splitFailedAlertReason,
+  type ScrapeAlertEmailDeps,
+} from "./scrape-alert-email";
+import {
   fetchBranchDailyReport,
   fetchDailyReportPdf,
   type BranchDailyReport,
@@ -834,6 +846,32 @@ async function resolveSecret(binding: unknown): Promise<string> {
   return "";
 }
 
+/**
+ * 取り込み失敗メールの送り口 (Refs #1206)。`cloudflare:email` の `EmailMessage` を作って
+ * `send_email` binding へ渡すだけ — 設定の検証・MIME の組み立て・失敗の記録は
+ * `scrape-alert-email.ts` (100% gate) が持つ。**binding が無ければ null**
+ * (= 送らなかったことを `sendScrapeAlertEmail` が記録する)。`index.ts` の cron も使う。
+ */
+export function scrapeAlertEmailSender(binding: SendEmail | undefined): ScrapeAlertEmailDeps["send"] {
+  if (!binding) return null;
+  return async (from, to, raw) => {
+    await binding.send(new EmailMessage(from, to, raw));
+  };
+}
+
+/** [`sendScrapeAlertEmail`] の deps。宛先は KV `scrape_alert_email` が唯一の正
+ * (plain 変数への fallback は持たない)。 */
+export function scrapeAlertEmailDeps(env: {
+  DTAKO_CONFIG_KV?: unknown;
+  ALERT_EMAIL?: SendEmail;
+}): ScrapeAlertEmailDeps {
+  return {
+    readConfig: async () =>
+      (await resolveKvConfigRaw(env.DTAKO_CONFIG_KV, SCRAPE_ALERT_EMAIL_KV_KEY, undefined)) || null,
+    send: scrapeAlertEmailSender(env.ALERT_EMAIL),
+  };
+}
+
 export interface RelayEnv {
   RELAY: DurableObjectNamespace;
   /** auth-worker introspect / alc-internal-proxy 呼び出し用 shared secret
@@ -944,6 +982,11 @@ export interface RelayEnv {
    * **未設定は fail-closed** (通知を送らず、送らなかったことを `console.error`
    * に出す)。検証は `scrape-alert.ts` の `resolveScrapeAlertTarget`。 */
   SCRAPE_ALERT_TARGET?: string;
+  /** 取り込み失敗のメール (Refs #1206)。Email Routing の `send_email` binding で、
+   * **本番 (トップレベル) にだけ**ある。宛先・送り元は KV `scrape_alert_email`
+   * (`scrape-alert-email.ts`)。無ければメールは送らず、送らなかったことを
+   * `console.error` に出す。 */
+  ALERT_EMAIL?: SendEmail;
   /** 勤怠 (fold) の対象会社。`wrangler.toml` の宣言をそのまま fold の可否判定に
    * 使う (`kintai-relay.ts` の `judgeFoldScope`)。未設定は「対象外」ではなく
    * `not_configured` (設定の穴) として記録する (Refs #944)。 */
@@ -1508,6 +1551,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       secretDetail = ` — 取得に失敗: ${describeUnknownError(err)}`;
       return "";
     });
+    // 取り込みは成功したが後段 (分割・要再計算・畳み直し) が落ちた理由 (Refs #1206)。
+    // **1 回の取り込みにつき通知は最大 1 通** — 複数起きたら理由を並べて最後に 1 回送る。
+    // 中身は固定の語 + 件数だけ (生のエラー文・key・運行NO は入れない)。
+    const alertReasons: string[] = [];
     try {
       const zip = await scrapeViaHttp(
         {
@@ -1528,6 +1575,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         console.error(JSON.stringify({ ...logBase, status: "error", message }));
         await recordScrapeJob(this.ctx.storage, jobKey, { state: "failed", error: message });
         await this.recordCronScrapeHistory(account, range, { kind: "error", message });
+        // LINE WORKS は同じ secret が要るので送れない (notifyScrapeFailure がそう記録する)。
+        // メールは secret に依らないので届く。理由は固定の語 (取得失敗の生の文は載せない)。
+        await this.notifyScrapeFailure(logBase, account, range, ALERT_REASON_NO_SHARED_SECRET, false, sharedSecret);
         return;
       }
       // ★ 破壊的操作 (has_kudgivt を FALSE に戻すアップロード) の fetch を発火する
@@ -1557,6 +1607,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // split_failed の件数はレコードに残すだけで state は failed にしない
       // (get_dtako_scrape_status の split_failed / unsplit_total 側の役目)。
       if (outcome.splitFailed !== null && outcome.splitFailed > 0) {
+        alertReasons.push(splitFailedAlertReason(outcome.splitFailed));
         console.error(
           JSON.stringify({
             ...line,
@@ -1595,9 +1646,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       //
       // fold の**前**に「要再計算」を 1 回流す (upload はここまでで成功済み)。
       // `recalcPendingAfterIngest` は throw しないので取り込みの記録は動かない。
-      await this.recalcPendingAfterIngest(account, sharedSecret, logBase);
+      const recalcReason = recalcPendingAlertReason(
+        await this.recalcPendingAfterIngest(account, sharedSecret, logBase),
+      );
+      if (recalcReason) alertReasons.push(recalcReason);
       try {
-        await this.foldAfterIngest(account, range, jobKey, outcome);
+        const foldReason = await this.foldAfterIngest(account, range, jobKey, outcome);
+        if (foldReason) alertReasons.push(foldReason);
       } catch (foldErr) {
         console.error(
           JSON.stringify({
@@ -1606,6 +1661,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             error: describeUnknownError(foldErr),
           }),
         );
+      }
+      if (alertReasons.length > 0) {
+        await this.notifyScrapeFailure(logBase, account, range, alertReasons.join(" / "), false, sharedSecret);
       }
     } catch (err) {
       const { message, evidence } = describeScrapeFailure(err);
@@ -1635,11 +1693,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // **人へ届ける** (Refs #967)。上の 3 つ (console / DO storage / alc 履歴) は
       // どれも人が見に行かないと分からない。**durable な記録を全部書き終えてから**
       // 送る — 通知が落ちても失敗が記録から消えないように。
+      // 後段で既に理由を集めていたら (throw がその後で起きた場合)、並べて 1 通にする。
       await this.notifyScrapeFailure(
         logBase,
         account,
         range,
-        message,
+        [...alertReasons, message].join(" / "),
         artifactKey !== null,
         sharedSecret,
       );
@@ -1674,6 +1733,32 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     artifactSaved: boolean,
     sharedSecret: string,
   ): Promise<void> {
+    const text = buildScrapeFailureNotification({
+      compId: account.comp_id,
+      startDate: range.startDate,
+      endDate: range.endDate,
+      message,
+      artifactSaved,
+    });
+    // LINE WORKS とメールは**互いに独立** (Refs #1206)。どちらも throw しないが、
+    // 片方の未設定・失敗がもう片方を止めないよう並べて待つ。
+    await Promise.all([
+      this.notifyScrapeFailureViaLineworks(logBase, text, sharedSecret),
+      sendScrapeAlertEmail(
+        scrapeAlertEmailDeps(this.env),
+        buildScrapeAlertSubject(range.startDate, range.endDate),
+        text,
+        logBase,
+      ),
+    ]);
+  }
+
+  /** [`notifyScrapeFailure`] の LINE WORKS 側 (Refs #967)。throw しない。 */
+  private async notifyScrapeFailureViaLineworks(
+    logBase: Record<string, unknown>,
+    text: string,
+    sharedSecret: string,
+  ): Promise<void> {
     const target = resolveScrapeAlertTarget(this.env.SCRAPE_ALERT_TARGET);
     if (!target.ok) {
       console.error(
@@ -1696,13 +1781,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         {
           sharedSecret,
           destination: target.destination,
-          text: buildScrapeFailureNotification({
-            compId: account.comp_id,
-            startDate: range.startDate,
-            endDate: range.endDate,
-            message,
-            artifactSaved,
-          }),
+          text,
         },
         this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
       );
@@ -1902,7 +1981,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     range: { startDate: string; endDate: string },
     jobKey: string,
     uploadOutcome: AlcUploadOutcome | null,
-  ): Promise<void> {
+  ): Promise<string | null> {
     try {
       // **`KINTAI_COMP_ID` の宣言をそのまま判定に使う** (値をコピーしない、
       // Refs #633-22)。対象外の会社で fold を回すと畳み先が 403 を返し、恒久的な
@@ -1919,7 +1998,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           fold_state: FOLD_SKIP_STATE[decision.reason],
           fold_skip_reason: decision.detail,
         });
-        return;
+        return null;
       }
 
       const months = monthsCoveredByRange(range.startDate, range.endDate);
@@ -1928,12 +2007,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           fold_state: "failed",
           fold_error: `不正な日付範囲: ${range.startDate}..${range.endDate}`,
         });
-        return;
+        return ALERT_REASON_FOLD_FAILED;
       }
 
       // 同一 comp_id (= この DO インスタンス) 内で fold の多重起動を防ぐ
       // (cron と手動 WS が同時に触っても直列に捌く、scrapeQueue と同じ理由)。
-      await this.foldQueue.enqueue(() => this.runFoldMonths(account, jobKey, months));
+      return await this.foldQueue.enqueue(() => this.runFoldMonths(account, jobKey, months));
     } catch (err) {
       console.error(
         JSON.stringify({
@@ -1942,6 +2021,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           error: describeUnknownError(err),
         }),
       );
+      return null;
     }
   }
 
@@ -1995,7 +2075,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     account: DtakoAccountRaw,
     jobKey: string,
     months: string[],
-  ): Promise<void> {
+  ): Promise<string | null> {
     await this.recordFold(jobKey, {
       fold_state: "running",
       fold_started_at: new Date().toISOString(),
@@ -2014,7 +2094,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           fold_error:
             "NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET / INTERNAL_SHARED_SECRET のいずれかが未設定",
         });
-        return;
+        return ALERT_REASON_FOLD_NOT_CONFIGURED;
       }
 
       const deps = buildDeps({
@@ -2044,12 +2124,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         fold_pages: totalPages,
         fold_drivers_written: totalDriversWritten,
       });
+      return null;
     } catch (err) {
       const message = describeUnknownError(err);
       console.error(
         JSON.stringify({ kintai_fold: "failed", comp_id: account.comp_id, months, message }),
       );
       await this.recordFold(jobKey, { fold_state: "failed", fold_error: message });
+      return ALERT_REASON_FOLD_FAILED;
     }
   }
 

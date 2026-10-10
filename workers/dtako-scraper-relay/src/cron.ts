@@ -468,6 +468,11 @@ export async function dispatchEtcAccounts(
 }
 
 
+/** `DTAKO_ACCOUNTS` が空で日次 cron が skip したときの `detail`。取り込み失敗の
+ * メール (`scrape-alert-email.ts` の `dtakoCronAlertReason`) がこの値で skip を見分ける
+ * ので、文言は 1 か所から取る。 */
+export const DTAKO_ACCOUNTS_EMPTY_DETAIL = "DTAKO_ACCOUNTS 未設定のため skip";
+
 export interface CronRunResult {
   kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "vehicle-state" | "none";
   target: string;
@@ -570,7 +575,7 @@ export async function runScheduledCron(
     }
     const accounts = parseDtakoAccounts(env.dtakoAccountsRaw);
     if (accounts.length === 0) {
-      return [{ kind: "dtako", target: "*", ok: true, detail: "DTAKO_ACCOUNTS 未設定のため skip" }];
+      return [{ kind: "dtako", target: "*", ok: true, detail: DTAKO_ACCOUNTS_EMPTY_DETAIL }];
     }
     const date = yesterdayJst(now);
     return Promise.all(

@@ -249,6 +249,15 @@ UPSTREAM_CACHE = "on"
 # `/auth/introspect` の応答 `org_wide` を聞きに行くだけ — 写しを持たない
 # (二重管理の回避)。**この relay に allowlist を新設しないこと。**
 
+# 取り込み失敗のメール (Refs #1206)。Email Routing の send_email binding で、
+# LINE WORKS (SCRAPE_ALERT_TARGET) とは独立に送る。**送り元・送り先はここに書かない** —
+# KV `scrape_alert_email` ({"from": "...", "to": "..."}) が唯一の正で、本番の deploy が
+# 存在を検証する (dtako-scraper-relay-deploy.yml)。`destination_address` で縛らないのは、
+# 宛先を KV 側で差し替えられるようにするため (アカウントで検証済みのアドレスにしか届かない)。
+# **本番だけ** — staging / preview には足さない (staging の日次 cron は意図的に外してある)。
+[[send_email]]
+name = "ALERT_EMAIL"
+
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
 # staging も同様に公開ルートを閉じ、app (service binding) 経由のみにする。
