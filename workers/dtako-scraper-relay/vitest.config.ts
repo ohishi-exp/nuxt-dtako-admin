@@ -1,9 +1,18 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 // DO worker は親 (nuxt-dtako-admin) の vitest config に吸われないようローカル
 // config を持つ (nuxt-items/workers/items-sync と同型)。auth-decision.ts は
 // pure (cloudflare 非依存) なので素の node 環境でテストできる。
 export default defineConfig({
+  // `cloudflare:email` (取り込み失敗メールの EmailMessage、Refs #1206) は Workers
+  // ランタイムでしか解決できない。DO を読み込む全テストで vi.mock するより、引数を
+  // 持つだけの stub に 1 か所で差し替える (`cloudflare:workers` は各テストが vi.mock)。
+  resolve: {
+    alias: {
+      'cloudflare:email': fileURLToPath(new URL('./test/stubs/cloudflare-email.ts', import.meta.url)),
+    },
+  },
   test: {
     include: ['test/**/*.test.ts'],
     coverage: {
@@ -70,6 +79,7 @@ export default defineConfig({
         'src/netprint-cron.ts',
         'src/kosoku-daily.ts',
         'src/scrape-alert.ts',
+        'src/scrape-alert-email.ts',
         'src/driver-master-run.ts',
         'src/dvr-ingest.ts',
         'src/vehicle-state-ingest.ts',

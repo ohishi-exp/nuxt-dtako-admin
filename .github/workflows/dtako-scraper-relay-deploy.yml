@@ -131,6 +131,35 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
+      # ---- scrape_alert_email の存在検証 (Refs #1206) ----
+      # 取り込み失敗のメールの送り元・送り先 ({"from": "...", "to": "..."})。**未設定だと
+      # 失敗しても誰にも届かない** (relay は console.error 1 行で送らずに済ませる) —
+      # 2026-10-05/06 に取り込みが落ちても誰も気づかなかったのがこの形。
+      # DTAKO_ACCOUNTS と同じく **CI は値を投入しない** (KV が唯一の正)。
+      # **本番の deploy だけ**で見る — send_email binding (ALERT_EMAIL) は本番にしか無い。
+      # **値はログに出さない** (アドレスなので)。キー名は src/scrape-alert-email.ts の
+      # SCRAPE_ALERT_EMAIL_KV_KEY が唯一の正 (netprint_targets と同じ理由でリテラルを書かない)。
+      - name: Verify scrape_alert_email (KV)
+        if: github.event_name != 'pull_request' && github.ref_type == 'tag'
+        run: |
+          set -o pipefail
+          KEY=$(node -e 'const s=require("fs").readFileSync("src/scrape-alert-email.ts","utf8"); const m=s.match(/SCRAPE_ALERT_EMAIL_KV_KEY\s*=\s*"([^"]+)"/); if(!m){ console.error("src/scrape-alert-email.ts に SCRAPE_ALERT_EMAIL_KV_KEY が見つかりません (改名されたらこの検証も追随させること)"); process.exit(1) } process.stdout.write(m[1])')
+          HOWTO="値を 1 度だけ投入してください: npx wrangler kv key put $KEY --binding DTAKO_CONFIG_KV --remote --path <file> (中身は {\"from\": \"<Email Routing で有効な送り元>\", \"to\": \"<検証済みの送り先>\"})"
+          if ! npx wrangler kv key get "$KEY" --binding DTAKO_CONFIG_KV --remote > /tmp/scrape_alert_email.json 2>/tmp/scrape_alert_email_err.txt; then
+            echo "::error::KV(dtako-relay-config) に $KEY がありません。取り込みが失敗してもメールが届きません。$HOWTO"
+            cat /tmp/scrape_alert_email_err.txt
+            exit 1
+          fi
+          if ! node -e 'let c; try { c=JSON.parse(require("fs").readFileSync("/tmp/scrape_alert_email.json","utf8")) } catch { process.exit(1) } const ok=(v)=>typeof v==="string"&&v.trim()!==""&&v.includes("@"); if(!c||typeof c!=="object"||Array.isArray(c)||!ok(c.from)||!ok(c.to)) process.exit(1)'; then
+            echo "::error::KV(dtako-relay-config) の $KEY が無いか不正です (from / to のどちらも @ を含む文字列が必要)。$HOWTO"
+            rm -f /tmp/scrape_alert_email.json /tmp/scrape_alert_email_err.txt
+            exit 1
+          fi
+          echo "scrape_alert_email ok ($KEY)"
+          rm -f /tmp/scrape_alert_email.json /tmp/scrape_alert_email_err.txt
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       # ---- D1 migration (Refs #367) ----
       # `migrations/` は app 本体と relay の共有ディレクトリだが、D1 binding
       # (DTAKO_DB) を実際に読み書きするのはこの worker なので適用もここで行う。

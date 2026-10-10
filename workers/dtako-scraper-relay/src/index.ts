@@ -5,6 +5,14 @@
 // binding / migration を持たず no-traffic release を維持する (Refs error
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
+import { scrapeAlertEmailDeps } from "./dtako-scraper-relay-do";
+import {
+  ALERT_REASON_CRON_THREW,
+  buildDtakoCronAlertBody,
+  buildScrapeAlertSubject,
+  dtakoCronAlertReason,
+  sendScrapeAlertEmail,
+} from "./scrape-alert-email";
 import { resolveTheearthRouting } from "./theearth-session";
 import {
   buildDeps,
@@ -19,6 +27,7 @@ import {
 } from "./kintai-relay";
 import {
   asWritableConfigKv,
+  DTAKO_CRON,
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
   dispatchCompIdTargets,
@@ -103,6 +112,23 @@ export interface RelayWorkerEnv {
    * plain 変数は fallback** (`dvr_targets` と同じ理由)。KV も変数も未設定なら
    * cron skip — **`DTAKO_ACCOUNTS` 全件に倒さない**。 */
   VEHICLE_STATE_TARGETS?: unknown;
+  /** 取り込み失敗のメール (Refs #1206)。日次 cron が job を積めなかったときに使う
+   * (DO に入っていないので DO 側の通知は通らない)。本番にだけある。 */
+  ALERT_EMAIL?: SendEmail;
+}
+
+/**
+ * 日次 cron (`DTAKO_CRON`) が取り込みを**積めなかった**ことをメールで知らせる
+ * (Refs #1206)。DO の外なので会社は特定できず、LINE WORKS も送らない。throw しない。
+ */
+async function alertDtakoCron(env: RelayWorkerEnv, now: Date, reason: string): Promise<void> {
+  const date = yesterdayJst(now);
+  await sendScrapeAlertEmail(
+    scrapeAlertEmailDeps(env),
+    buildScrapeAlertSubject(date, date),
+    buildDtakoCronAlertBody(date, reason),
+    { scheduled: DTAKO_CRON },
+  );
 }
 
 export default {
@@ -372,45 +398,58 @@ export default {
   ): Promise<void> {
     ctx.waitUntil(
       (async () => {
-        const results = await runScheduledCron(
-          controller.cron,
-          {
-            scraperMode: env.SCRAPER_MODE,
-            dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
-            etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
-            // KV 読み取りの例外は握らない (`resolveKvConfigRaw` の方針)。伝播させて
-            // cron の実行ごと失敗させる — 宛先が確定できないまま古い plain 変数で
-            // 日報を送るより、送らずに Observability に出す方を選ぶ。
-            netprintTargetsRaw: await resolveNetprintTargetsRaw(
-              env.DTAKO_CONFIG_KV,
-              env.NETPRINT_TARGETS,
-            ),
-            kintaiCompId: env.KINTAI_COMP_ID,
-            // DVR 取り込みの対象会社 (KV `dvr_targets` が正)。**未設定なら skip** —
-            // DTAKO_ACCOUNTS 全件に倒さない (Refs #1094 の設計注意 7)。
-            dvrTargetsRaw: await resolveDvrTargetsRaw(env.DTAKO_CONFIG_KV, env.DVR_TARGETS),
-            // 車輌動態 (dtako_logs) 取り込みの対象会社 (KV `vehicle_state_targets` が正)。
-            // **DVR とは独立に評価する** — 片方の設定漏れがもう片方を止めない (Refs #1098)。
-            vehicleStateTargetsRaw: await resolveVehicleStateTargetsRaw(
-              env.DTAKO_CONFIG_KV,
-              env.VEHICLE_STATE_TARGETS,
-            ),
-          },
-          async (doKey, path, body) => {
-            const id = env.RELAY.idFromName(doKey);
-            const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify(body),
-            });
-            return { ok: res.ok, status: res.status, text: await res.text() };
-          },
-          new Date(),
-        );
-        for (const r of results) {
-          const line = JSON.stringify({ scheduled: controller.cron, ...r });
-          if (r.ok) console.log(line);
-          else console.error(line);
+        const now = new Date();
+        try {
+          const results = await runScheduledCron(
+            controller.cron,
+            {
+              scraperMode: env.SCRAPER_MODE,
+              dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
+              etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
+              // KV 読み取りの例外は握らない (`resolveKvConfigRaw` の方針)。伝播させて
+              // cron の実行ごと失敗させる — 宛先が確定できないまま古い plain 変数で
+              // 日報を送るより、送らずに Observability に出す方を選ぶ。
+              netprintTargetsRaw: await resolveNetprintTargetsRaw(
+                env.DTAKO_CONFIG_KV,
+                env.NETPRINT_TARGETS,
+              ),
+              kintaiCompId: env.KINTAI_COMP_ID,
+              // DVR 取り込みの対象会社 (KV `dvr_targets` が正)。**未設定なら skip** —
+              // DTAKO_ACCOUNTS 全件に倒さない (Refs #1094 の設計注意 7)。
+              dvrTargetsRaw: await resolveDvrTargetsRaw(env.DTAKO_CONFIG_KV, env.DVR_TARGETS),
+              // 車輌動態 (dtako_logs) 取り込みの対象会社 (KV `vehicle_state_targets` が正)。
+              // **DVR とは独立に評価する** — 片方の設定漏れがもう片方を止めない (Refs #1098)。
+              vehicleStateTargetsRaw: await resolveVehicleStateTargetsRaw(
+                env.DTAKO_CONFIG_KV,
+                env.VEHICLE_STATE_TARGETS,
+              ),
+            },
+            async (doKey, path, body) => {
+              const id = env.RELAY.idFromName(doKey);
+              const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(body),
+              });
+              return { ok: res.ok, status: res.status, text: await res.text() };
+            },
+            now,
+          );
+          for (const r of results) {
+            const line = JSON.stringify({ scheduled: controller.cron, ...r });
+            if (r.ok) console.log(line);
+            else console.error(line);
+          }
+          // 会社ぶんの dispatch が落ちた / DTAKO_ACCOUNTS が空で積まなかった (Refs #1206)。
+          if (controller.cron === DTAKO_CRON) {
+            const reason = dtakoCronAlertReason(results);
+            if (reason) await alertDtakoCron(env, now, reason);
+          }
+        } catch (err) {
+          // dispatch の前 (KV の読み取り等) で落ちた。**握らずに投げ直す** — 従来どおり
+          // cron の実行ごと失敗として Observability に出す。日次取り込みの回だけ人へ届ける。
+          if (controller.cron === DTAKO_CRON) await alertDtakoCron(env, now, ALERT_REASON_CRON_THREW);
+          throw err;
         }
       })(),
     );
