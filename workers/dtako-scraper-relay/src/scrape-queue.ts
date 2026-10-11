@@ -145,7 +145,7 @@ export const MAX_SCRAPE_JOB_RECORDS = 200;
  * 大声でログする (`touchScrapeJobOrder` と同じ流儀)。 */
 export const MAX_SCRAPE_QUEUE_LENGTH = 200;
 
-function describeUnknownError(err: unknown): string {
+export function describeUnknownError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
