@@ -159,6 +159,8 @@ import {
   type FoldTriggerDecision,
   type KintaiRelayDeps,
   type KyuyoAuthorizer,
+  KINTAI_WORKER_BASE,
+  kintaiWorkerFor,
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
@@ -9725,30 +9727,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 画面表示に使う。best-effort — 未設定・失敗は両方空 (バッジが出ないだけで
    * 月タブは従来どおり動く)。 */
   private async listIchibanSyncedMonths(compId: string): Promise<{ theearth: string[], timecard: string[] }> {
-    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
-    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
-    let clientSecret = "";
-    try {
-      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-    } catch (err) {
+    const read = await this.restraintReader(
+      compId,
+      `/api/restraint/synced-months?comp=${encodeURIComponent(compId)}`,
       // 失敗を黙って握るとバッジが出ない原因が追えない (2026-07-27 実害) —
       // フォールバック (空 = バッジ非表示) は維持しつつ、必ず 1 行残す
-      console.error(JSON.stringify({ restraint_synced_months: "secret-error", error: describeUnknownError(err) }));
-    }
-    if (!apiUrl || !clientId || !clientSecret) {
+      (err) =>
+        console.error(JSON.stringify({ restraint_synced_months: "secret-error", error: describeUnknownError(err) })),
+    );
+    if (!read) {
       console.log(JSON.stringify({ restraint_synced_months: "skipped-not-configured", comp_id: compId }));
       return { theearth: [], timecard: [] };
     }
     try {
-      const res = await fetch(
-        `${apiUrl}/api/restraint/synced-months?comp=${encodeURIComponent(compId)}`,
-        {
-          headers: {
-            "CF-Access-Client-Id": clientId,
-            "CF-Access-Client-Secret": clientSecret,
-          },
-        },
-      );
+      const res = await read();
       if (!res.ok) {
         console.error(
           JSON.stringify({
@@ -9993,32 +9985,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return { current, prev, ...liveParts };
     };
 
-    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
-    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
-    let clientSecret = "";
-    try {
-      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-    } catch {
-      // secret 不調は push 側で別途 log 済み — ここは R2 に落ちるだけで良い
-    }
-    if (!apiUrl || !clientId || !clientSecret) {
+    const read = await this.restraintReader(
+      compId,
+      `/api/restraint/wage-source?comp=${encodeURIComponent(compId)}&month=${encodeURIComponent(ym)}`,
+      () => {
+        // secret 不調は push 側で別途 log 済み — ここは R2 に落ちるだけで良い
+      },
+    );
+    if (!read) {
       console.log(JSON.stringify({ wage_report_source: "r2-not-configured", comp_id: compId, ym }));
       return allR2();
     }
 
     let wire: WageSourceResponseWire;
     try {
-      const res = await measurePhase(timer, "wage-source", () =>
-        fetch(
-          `${apiUrl}/api/restraint/wage-source?comp=${encodeURIComponent(compId)}&month=${encodeURIComponent(ym)}`,
-          {
-            headers: {
-              "CF-Access-Client-Id": clientId,
-              "CF-Access-Client-Secret": clientSecret,
-            },
-          },
-        ),
-      );
+      const res = await measurePhase(timer, "wage-source", read);
       if (!res.ok) {
         console.error(
           JSON.stringify({ wage_report_source: "upstream-error", comp_id: compId, ym, status: res.status }),
@@ -10596,8 +10577,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       "kintai",
       kintaiBinding && writeToken
         ? {
-            // Service Binding なので host は使われない (path だけが効く)
-            url: "https://ichibanboshi-kintai/api/restraint/summaries",
+            url: `${KINTAI_WORKER_BASE}/api/restraint/summaries`,
             headers: { "X-Kintai-Write-Token": writeToken },
             fetch: (u, init) => kintaiBinding.fetch(u, init),
           }
@@ -10605,6 +10585,35 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       bodies,
     );
     return { onprem, kintai };
+  }
+
+  /**
+   * 拘束サマリの読み (`synced-months`・`wage-source`) を 1 本投げる関数を返す。設定が足りなければ `null`。
+   *
+   * `KINTAI_COMP_ID` の会社で `KINTAI` binding があれば勤怠 Worker (D1) を読む (Refs ohishi-exp/rust-ichibanboshi#322)。
+   * Worker の読みの口は認可なしなので CF Access のヘッダー・secret は付けず、CF Access の設定が無くても読める。
+   * それ以外 (binding の無い staging・preview、別の会社) はオンプレ版 (`apiUrl` + CF Access) を読む。
+   */
+  private async restraintReader(
+    compId: string,
+    path: string,
+    onSecretError: (err: unknown) => void,
+  ): Promise<(() => Promise<Response>) | null> {
+    const kintai = kintaiWorkerFor(this.env.KINTAI, compId, this.env.KINTAI_COMP_ID);
+    if (kintai) return () => kintai.fetch(`${KINTAI_WORKER_BASE}${path}`);
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      onSecretError(err);
+    }
+    if (!apiUrl || !clientId || !clientSecret) return null;
+    return () =>
+      fetch(`${apiUrl}${path}`, {
+        headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+      });
   }
 
   /** push の宛先の secret を読む。読めなければ空 (= その宛先は skipped-not-configured)。 */
