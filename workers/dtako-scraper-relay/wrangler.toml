@@ -68,6 +68,21 @@ binding = "AUTH_KYUYO"
 service = "auth-worker"
 entrypoint = "KyuyoAuthEntrypoint"
 
+# 勤怠 Worker (Refs ohishi-exp/rust-ichibanboshi#322)。拘束サマリの写しをオンプレ版と
+# 両方へ PUT する (Worker の D1 へ。`X-Kintai-Write-Token` は下の secret)。
+# **top-level (本番) にだけ置く** — staging・preview は本番 KV を共有し、Worker の D1 も
+# 本番 1 つしか無いので、足すと staging の操作が本番 D1 に書く。無い環境は Worker 宛を skip。
+[[services]]
+binding = "KINTAI"
+service = "ichibanboshi-kintai"
+
+# 勤怠 Worker の書き込みの口の共有 secret。**既存の entry を binding するだけ**
+# (勤怠 Worker と同じ store・同じ secret_name)。値は repo に書かない。
+[[secrets_store_secrets]]
+binding = "KINTAI_WRITE_TOKEN"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "KINTAI_WRITE_TOKEN"
+
 # Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS
 # 127.0.0.1:8081) に到達する VPC Service `dtako-scraper-relay`。
 [[vpc_services]]

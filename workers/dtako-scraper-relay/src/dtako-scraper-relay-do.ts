@@ -415,7 +415,12 @@ import {
   type CompareResult,
 } from "./timecard-compare";
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
-import { buildRestraintPushBodies } from "./restraint-push";
+import {
+  buildRestraintPushBodies,
+  sendRestraintPushBodies,
+  type RestraintPushResult,
+  type RestraintPushTargetName,
+} from "./restraint-push";
 import {
   isWageSourceResponse,
   wageSourceMonthR2Fallback,
@@ -959,6 +964,12 @@ export interface RelayEnv {
   NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
   /** 同 client_secret (Secrets Store binding。app 本体と同じ entry を物理共有)。 */
   ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
+  /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding (Refs ohishi-exp/rust-ichibanboshi#322)。
+   * 拘束サマリの写しを `PUT /api/restraint/summaries` で D1 にも書く。**本番 (top-level) にだけ
+   * ある** — staging・preview は本番 KV・本番 D1 を共有するので置かない。無ければ Worker 宛は skip。 */
+  KINTAI?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** 勤怠 Worker の書き込みの口の共有 secret (Secrets Store、`X-Kintai-Write-Token`)。本番にだけある。 */
+  KINTAI_WRITE_TOKEN?: unknown;
   /** 勤怠アーカイブの R2 prefix (既定 `kintai`)。theearth 由来 (`restraint`) とは
    * 別に置く — 同じ月・同じ乗務員CD で両方存在しうるため。 */
   KINTAI_R2_PREFIX?: string;
@@ -9815,7 +9826,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
     }
     await this.upsertRestraintSummariesD1(record.compId, "theearth", parsed.ym, d1Entries);
-    await this.pushRestraintSummariesToIchiban(record.compId, "theearth", parsed.ym, d1Entries);
+    const restraintPush = await this.pushRestraintSummariesToIchiban(record.compId, "theearth", parsed.ym, d1Entries);
     // 上流キャッシュの無効化 (Refs #543 PR-3)。resummarize 自体は kintai 上流を
     // 変えないが、「操作者が再計算した = 表示を最新にしたい」合図なので、次の
     // kintai 読みを再検証に倒す (最新テキストは持っていないので put はしない)
@@ -9826,6 +9837,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       summaries_written: summariesWritten,
       summaries_new_version: newVersions,
       errors,
+      // 宛先ごとの push の結果 (オンプレ版・勤怠 Worker)。D1 へ全月 resummarize するとき
+      // Worker 側が skipped・失敗でないことをここで確かめる (Refs ohishi-exp/rust-ichibanboshi#322)
+      restraint_push: restraintPush,
     });
   }
 
@@ -10501,63 +10515,63 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return { changed: true, sha256: hash, fetchedAt };
   }
 
-  /** サマリ写しを rust-ichibanboshi (restraint_local.sqlite) へ push する
-   * (Refs #452 / rust-ichibanboshi#106 Phase 3b)。best-effort — 到達不能・非 2xx でも
-   * 取り込み自体は成功させる (R2 が正。欠けは resummarize の再実行で追い付ける)。
-   * wage-report の読みは Phase 3c でこの写し (wage-source) に切り替わる。 */
+  /** サマリ写しを rust-ichibanboshi の 2 か所へ push する (Refs #452 / rust-ichibanboshi#106
+   * Phase 3b、勤怠 Worker は ohishi-exp/rust-ichibanboshi#322)。
+   * - `onprem` — オンプレ版 (restraint_local.sqlite、CF Tunnel + CF Access)
+   * - `kintai` — 勤怠 Worker (`ichibanboshi-kintai` の D1、Service Binding `KINTAI` +
+   *   `X-Kintai-Write-Token`)。**本番 (top-level) にだけ binding がある** — staging・preview は
+   *   本番 KV・本番 D1 を共有するので足さない (足すと staging の操作が本番 D1 に書く)
+   *
+   * 宛先ごとに独立に best-effort (オンプレ → Worker の順に直列。片方の失敗で他方を止めない)。
+   * 到達不能・非 2xx でも取り込み自体は成功させる (R2 が正。欠けは resummarize の再実行で
+   * 追い付ける)。結果は resummarize だけが応答に載せる (D1 の充足を確かめるため)。 */
   private async pushRestraintSummariesToIchiban(
     compId: string,
     source: WageReportSource,
     ym: string,
     entries: RestraintD1Entry[],
-  ): Promise<void> {
-    if (entries.length === 0) return;
+  ): Promise<Record<RestraintPushTargetName, RestraintPushResult>> {
+    const bodies = buildRestraintPushBodies(compId, source, ym, entries);
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
     const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
-    let clientSecret = "";
+    const clientSecret = await this.resolveRestraintPushSecret("onprem", this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    // 未設定環境 (ローカル dev 等) では push なしで動く — wage-source 側は
+    // synced_at null になり、読みは R2 フォールバックのまま
+    const onprem = await sendRestraintPushBodies(
+      "onprem",
+      apiUrl && clientId && clientSecret
+        ? {
+            url: `${apiUrl}/api/restraint/summaries`,
+            headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+            fetch: (u, init) => fetch(u, init),
+          }
+        : null,
+      bodies,
+    );
+    const kintaiBinding = this.env.KINTAI;
+    const writeToken = await this.resolveRestraintPushSecret("kintai", this.env.KINTAI_WRITE_TOKEN);
+    const kintai = await sendRestraintPushBodies(
+      "kintai",
+      kintaiBinding && writeToken
+        ? {
+            // Service Binding なので host は使われない (path だけが効く)
+            url: "https://ichibanboshi-kintai/api/restraint/summaries",
+            headers: { "X-Kintai-Write-Token": writeToken },
+            fetch: (u, init) => kintaiBinding.fetch(u, init),
+          }
+        : null,
+      bodies,
+    );
+    return { onprem, kintai };
+  }
+
+  /** push の宛先の secret を読む。読めなければ空 (= その宛先は skipped-not-configured)。 */
+  private async resolveRestraintPushSecret(target: RestraintPushTargetName, binding: unknown): Promise<string> {
     try {
-      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+      return await resolveSecretBinding(binding);
     } catch (err) {
-      console.error(JSON.stringify({ restraint_push: "secret-error", error: describeUnknownError(err) }));
-    }
-    if (!apiUrl || !clientId || !clientSecret) {
-      // 未設定環境 (ローカル dev 等) では push なしで動く — wage-source 側は
-      // synced_at null になり、読みは R2 フォールバックのまま
-      console.log(JSON.stringify({ restraint_push: "skipped-not-configured", comp_id: compId, source, ym }));
-      return;
-    }
-    try {
-      for (const body of buildRestraintPushBodies(compId, source, ym, entries)) {
-        const res = await fetch(`${apiUrl}/api/restraint/summaries`, {
-          method: "PUT",
-          headers: {
-            "content-type": "application/json",
-            "CF-Access-Client-Id": clientId,
-            "CF-Access-Client-Secret": clientSecret,
-          },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          console.error(
-            JSON.stringify({
-              restraint_push: "upstream-error",
-              comp_id: compId,
-              source,
-              ym,
-              status: res.status,
-              body: (await res.text()).slice(0, 200),
-            }),
-          );
-          return; // 同一 push 内の続きは諦める (次の取り込み/resummarize で追い付く)
-        }
-      }
-      console.log(
-        JSON.stringify({ restraint_push: "done", comp_id: compId, source, ym, entries: entries.length }),
-      );
-    } catch (err) {
-      console.error(
-        JSON.stringify({ restraint_push: "error", comp_id: compId, source, ym, error: describeUnknownError(err) }),
-      );
+      console.error(JSON.stringify({ restraint_push: "secret-error", target, error: describeUnknownError(err) }));
+      return "";
     }
   }
 
