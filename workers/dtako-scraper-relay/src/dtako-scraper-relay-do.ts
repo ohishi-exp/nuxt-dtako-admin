@@ -2154,6 +2154,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         authWorker: this.env.AUTH_WORKER,
         proxySecret: sharedSecret,
         tenantId: account.tenant_id,
+        kintai: this.env.KINTAI,
+        compId: account.comp_id,
+        kintaiCompId: this.env.KINTAI_COMP_ID,
       });
 
       let totalPages = 0;
@@ -7665,6 +7668,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       authWorker: this.env.AUTH_WORKER,
       proxySecret: sharedSecret,
       tenantId: account.tenant_id,
+      kintai: this.env.KINTAI,
+      compId,
+      kintaiCompId: this.env.KINTAI_COMP_ID,
     });
     return { deps, creds };
   }

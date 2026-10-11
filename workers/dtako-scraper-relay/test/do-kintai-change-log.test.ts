@@ -57,12 +57,25 @@ interface Setup {
   /** 未指定なら OWN_COMP と同じ値 (= 対象会社) */
   kintaiCompId?: string | undefined;
   upstream?: () => Response;
+  /** 勤怠 Worker の binding (`KINTAI`)。未指定なら binding 無し (staging・preview と同じ)。 */
+  kintai?: () => Response;
 }
 
 function makeDO(opts: Setup = {}) {
   const introspectCalls: string[] = [];
   const gcpCalls: string[] = [];
+  const kintaiCalls: { url: string; headers: Record<string, string> }[] = [];
   const env = {
+    ...(opts.kintai
+      ? {
+          KINTAI: {
+            fetch: vi.fn(async (url: string, init?: RequestInit) => {
+              kintaiCalls.push({ url, headers: init?.headers as Record<string, string> });
+              return opts.kintai!();
+            }),
+          },
+        }
+      : {}),
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
     INTERNAL_SHARED_SECRET: "shared-secret",
     ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
@@ -102,7 +115,7 @@ function makeDO(opts: Setup = {}) {
         },
       }) as never,
     );
-  return { get, introspectCalls, gcpCalls };
+  return { get, introspectCalls, gcpCalls, kintaiCalls };
 }
 
 const OK_QUERY = "?driver=1078&from=2026-06-01&to=2026-06-30";
@@ -167,6 +180,29 @@ describe("GET /restraint-api/kintai/change-log (Refs #1133 c1133-6)", () => {
     const res = await get("?driver=1078&from=2025-01-01&to=2026-02-05");
     expect(res.status).toBe(400);
     expect(gcpCalls).toHaveLength(0);
+  });
+
+  it("KINTAI があれば勤怠 Worker から読み、auth-worker の /ichibanboshi-proxy は叩かない (Refs ohishi-exp/rust-ichibanboshi#322)", async () => {
+    const { get, gcpCalls, kintaiCalls } = makeDO({ kintai: () => Response.json(SAMPLE_LOG) });
+    const res = await get(OK_QUERY);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(SAMPLE_LOG);
+    expect(gcpCalls).toHaveLength(0);
+    expect(kintaiCalls.map((c) => c.url)).toEqual([
+      "https://ichibanboshi-kintai/api/kintai/change-log?driver=1078&from=2026-06-01&to=2026-06-30",
+    ]);
+    expect(Object.keys(kintaiCalls[0]!.headers)).toEqual(["Accept"]);
+  });
+
+  it("勤怠 Worker の 503 は今の経路と同じく 502 で、本文の先頭を error に載せる", async () => {
+    const { get } = makeDO({
+      kintai: () => new Response("[KINTAI_HYPERDRIVE] が無効です (読み先がありません)", { status: 503 }),
+    });
+    const res = await get(OK_QUERY);
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "gcp kintai change-log: status 503: [KINTAI_HYPERDRIVE] が無効です (読み先がありません)",
+    );
   });
 
   it("上流が落ちたら 502", async () => {
