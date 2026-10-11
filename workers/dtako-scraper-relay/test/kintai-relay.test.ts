@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  kintaiWriteDeps,
   relayKintaiWindow,
   relayKintaiRecalc,
   relayKintaiShiftOverlaps,
@@ -1204,6 +1205,38 @@ describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#6
     const sent = JSON.parse(String(seen!.init?.body));
     expect(sent.comp_id).toBe("27324455");
     expect(sent.month).toBe("2026-01");
+  });
+
+  it("kintaiWriteDeps は wage-snapshot を勤怠 Worker へ送り、ヘッダーは content-type と X-Kintai-Write-Token だけ (Refs ohishi-exp/rust-ichibanboshi#322)", async () => {
+    const kintai = { fetch: vi.fn(async () => json({ saved: 1, skipped_unchanged: true })) };
+    const out = await relayWageSnapshotPut(kintaiWriteDeps(kintai, "write-token"), "27324455", {
+      comp_id: "他社のID",
+      month: "2026-01",
+    });
+    expect(out).toEqual({ saved: 1, skipped_unchanged: true });
+    expect(kintai.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = kintai.fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://ichibanboshi-kintai/api/kintai/wage-snapshot");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ "content-type": "application/json", "X-Kintai-Write-Token": "write-token" });
+    expect(JSON.parse(String(init.body)).comp_id).toBe("27324455");
+  });
+
+  it("kintaiWriteDeps は wage-snapshot 以外の path を Worker へ送らず失敗にする (書き込みの口を閉じる)", async () => {
+    const kintai = { fetch: vi.fn(async () => json({})) };
+    const deps = kintaiWriteDeps(kintai, "write-token");
+    await expect(deps.gcp("/api/kintai/timecard", { method: "POST" })).rejects.toThrow(
+      "kintai worker write: path not allowed: /api/kintai/timecard",
+    );
+    await expect(deps.gcp("/api/kintai/wage-snapshot?x=1")).rejects.toThrow("path not allowed");
+    expect(kintai.fetch).not.toHaveBeenCalled();
+  });
+
+  it("kintaiWriteDeps は init 無しでも token だけを付けて送る", async () => {
+    const kintai = { fetch: vi.fn(async () => json({})) };
+    await kintaiWriteDeps(kintai, "t").gcp("/api/kintai/wage-snapshot");
+    const [, init] = kintai.fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.headers).toEqual({ "X-Kintai-Write-Token": "t" });
   });
 
   it("relayWageRangeGet は comp を上書きし、他のクエリはそのまま渡す", async () => {

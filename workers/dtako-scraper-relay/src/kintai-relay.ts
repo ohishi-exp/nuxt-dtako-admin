@@ -339,6 +339,26 @@ const KINTAI_WORKER_READ_PATHS: ReadonlySet<string> = new Set([
   WAGE_RANGE_PATH,
 ]);
 
+/**
+ * 勤怠 Worker の書き込みの口 (wage-snapshot) へ送る `gcp` (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * 書き込みの口は `X-Kintai-Write-Token` を照合するので、読みの振り分け (`KINTAI_WORKER_READ_PATHS`) と分けて
+ * 呼び手が token を読めたときだけ使う。secret・テナント・CF Access は付けない (Worker は見ない)。
+ */
+export function kintaiWriteDeps(kintai: FetcherLike, writeToken: string): Pick<KintaiRelayDeps, "gcp"> {
+  return {
+    gcp(path, init) {
+      // 書き込みの口は wage-snapshot だけに閉じる (他の path に token を付けて送らない)
+      if (path !== WAGE_SNAPSHOT_PATH) {
+        return Promise.reject(new Error(`kintai worker write: path not allowed: ${path}`));
+      }
+      return kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, {
+        ...init,
+        headers: { ...(init?.headers as Record<string, string>), "X-Kintai-Write-Token": writeToken },
+      });
+    },
+  };
+}
+
 /** [`relayKintaiWindow`] に渡す実体を組む。 */
 export function buildDeps(opts: {
   ichibanOrigin: string;

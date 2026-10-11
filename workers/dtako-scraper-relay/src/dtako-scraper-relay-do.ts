@@ -161,6 +161,7 @@ import {
   type KyuyoAuthorizer,
   KINTAI_WORKER_BASE,
   kintaiWorkerFor,
+  kintaiWriteDeps,
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
@@ -10168,8 +10169,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return dvrJsonError(400, "JSON body が必要です");
     }
+    // KINTAI_COMP_ID の会社で token が読めれば勤怠 Worker へ書く (Refs ohishi-exp/rust-ichibanboshi#322)。
+    // Worker の書き先テナントは自分の KINTAI_TENANT_ID 固定 (relay の KV の tenant は使わない) で、
+    // KINTAI_COMP_ID の会社の tenant と一致する前提。それ以外は auth-worker 経由のまま
+    const kintai = kintaiWorkerFor(this.env.KINTAI, record.compId, this.env.KINTAI_COMP_ID);
+    let writeToken = "";
+    if (kintai) {
+      try {
+        writeToken = await resolveSecretBinding(this.env.KINTAI_WRITE_TOKEN);
+      } catch (err) {
+        console.error(JSON.stringify({ wage_snapshot: "secret-error", error: describeUnknownError(err) }));
+      }
+    }
+    const deps = kintai && writeToken ? kintaiWriteDeps(kintai, writeToken) : ctx.deps;
     try {
-      return Response.json(await relayWageSnapshotPut(ctx.deps, record.compId, body));
+      return Response.json(await relayWageSnapshotPut(deps, record.compId, body));
     } catch (err) {
       const message = describeUnknownError(err);
       console.error(JSON.stringify({ wage_snapshot: "error", comp_id: record.compId, error: message }));
