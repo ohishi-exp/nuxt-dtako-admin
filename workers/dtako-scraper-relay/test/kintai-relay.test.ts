@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   kintaiWriteDeps,
+  WAGE_SNAPSHOT_PATH,
   relayKintaiWindow,
   relayKintaiRecalc,
   relayKintaiShiftOverlaps,
@@ -21,6 +22,7 @@ import {
   jstMonth,
   tenantForCompId,
   buildDeps,
+  kintaiAutoloader,
   kintaiReader,
   kintaiWorkerFor,
   KINTAI_READ_ROUTES,
@@ -1268,6 +1270,119 @@ describe("kintaiReader — 勤怠の読みの入口 (Refs ohishi-exp/rust-ichiba
   });
 });
 
+describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const CF = {
+    NUXT_ICHIBAN_API_URL: "https://rust-ichiban.example/",
+    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
+    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csec",
+  };
+  const PATH = "/api/dtako/autoload?unko_no=1&reset_timecard=false";
+  const INIT = { method: "POST", headers: { "content-type": "application/zip" }, body: "zip" };
+  function stubFetch() {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init: unknown) => {
+      seen.push({ url: String(url), init: init as RequestInit });
+      return json({});
+    }) as unknown as typeof fetch;
+    return seen;
+  }
+  function binding() {
+    return { fetch: vi.fn(async (_url: string, _init?: RequestInit) => json({})) };
+  }
+
+  it("本番設定 (KINTAI・会社 = KINTAI_COMP_ID・token あり) は Worker へ token 付きで送り、CF Access 無しでも通る", async () => {
+    const seen = stubFetch();
+    const kintai = binding();
+    const onSecretError = vi.fn();
+    const loader = await kintaiAutoloader(
+      { KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: { get: async () => "wt" } },
+      "1001",
+      onSecretError,
+    );
+    expect(loader!.route).toBe("worker");
+    await loader!.autoload(PATH, INIT);
+    expect(kintai.fetch).toHaveBeenCalledWith(`https://ichibanboshi-kintai${PATH}`, {
+      ...INIT,
+      headers: { "content-type": "application/zip", "X-Kintai-Write-Token": "wt" },
+    });
+    expect(seen).toEqual([]);
+    expect(onSecretError).not.toHaveBeenCalled();
+    // autoload 用の deps なので他の書き込みの口には token を付けて送らない
+    await expect(loader!.autoload("/api/kintai/wage-snapshot", INIT)).rejects.toThrow("path not allowed");
+  });
+
+  it.each([
+    ["KINTAI が無い", { KINTAI_COMP_ID: "1001" }, "1001"],
+    ["会社が KINTAI_COMP_ID と違う", { KINTAI_COMP_ID: "1001", withBinding: true }, "2002"],
+  ] as const)("%s ときはオンプレ版 (apiUrl + CF Access)、token は読まない", async (_label, cfg, compId) => {
+    const seen = stubFetch();
+    const kintai = binding();
+    const token = { get: vi.fn(async () => "wt") };
+    const onSecretError = vi.fn();
+    const loader = await kintaiAutoloader(
+      { ...CF, KINTAI_COMP_ID: cfg.KINTAI_COMP_ID, KINTAI_WRITE_TOKEN: token, ...("withBinding" in cfg ? { KINTAI: kintai } : {}) },
+      compId,
+      onSecretError,
+    );
+    expect(loader!.route).toBe("onprem");
+    await loader!.autoload(PATH, INIT);
+    expect(seen).toEqual([
+      {
+        url: `https://rust-ichiban.example${PATH}`,
+        init: {
+          ...INIT,
+          headers: { "content-type": "application/zip", "CF-Access-Client-Id": "cid", "CF-Access-Client-Secret": "csec" },
+        },
+      },
+    ]);
+    expect(kintai.fetch).not.toHaveBeenCalled();
+    expect(token.get).not.toHaveBeenCalled();
+    expect(onSecretError).not.toHaveBeenCalled();
+  });
+
+  const boom = new Error("secret store down");
+  it.each([
+    ["token の解決が throw", { get: async () => Promise.reject(boom) }, boom],
+    ["token が空", { get: async () => "" }, undefined],
+    ["token の binding が無い", undefined, undefined],
+  ])("binding があっても %s ならオンプレ版に倒し、onSecretError に必ず渡す (黙って通さない)", async (_label, token, err) => {
+    const seen = stubFetch();
+    const kintai = binding();
+    const onSecretError = vi.fn();
+    const loader = await kintaiAutoloader(
+      { ...CF, KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: token },
+      "1001",
+      onSecretError,
+    );
+    expect(loader!.route).toBe("onprem");
+    await loader!.autoload(PATH, INIT);
+    expect(seen).toHaveLength(1);
+    expect(kintai.fetch).not.toHaveBeenCalled();
+    if (err) expect(onSecretError).toHaveBeenCalledWith(err);
+    expect(onSecretError).toHaveBeenLastCalledWith(new Error("KINTAI_WRITE_TOKEN が読めないためオンプレ版へ送ります"));
+  });
+
+  it("binding あり・token が読めない・CF Access 無しなら null (呼び手が 503 にする)", async () => {
+    const onSecretError = vi.fn();
+    const loader = await kintaiAutoloader(
+      { KINTAI: binding(), KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: { get: async () => "" } },
+      "1001",
+      onSecretError,
+    );
+    expect(loader).toBeNull();
+    expect(onSecretError).toHaveBeenCalledTimes(1);
+  });
+
+  it("binding も CF Access も無ければ null", async () => {
+    expect(await kintaiAutoloader({ KINTAI_COMP_ID: "1001" }, "1001", vi.fn())).toBeNull();
+  });
+});
+
 describe("kintaiWorkerFor (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
   const binding = { fetch: async () => new Response() };
   it("会社が KINTAI_COMP_ID (前後の空白は落とす) と一致すれば binding を返す", () => {
@@ -1311,7 +1426,7 @@ describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#6
 
   it("kintaiWriteDeps は wage-snapshot を勤怠 Worker へ送り、ヘッダーは content-type と X-Kintai-Write-Token だけ (Refs ohishi-exp/rust-ichibanboshi#322)", async () => {
     const kintai = { fetch: vi.fn(async () => json({ saved: 1, skipped_unchanged: true })) };
-    const out = await relayWageSnapshotPut(kintaiWriteDeps(kintai, "write-token"), "27324455", {
+    const out = await relayWageSnapshotPut(kintaiWriteDeps(kintai, "write-token", WAGE_SNAPSHOT_PATH), "27324455", {
       comp_id: "他社のID",
       month: "2026-01",
     });
@@ -1326,17 +1441,39 @@ describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#6
 
   it("kintaiWriteDeps は wage-snapshot 以外の path を Worker へ送らず失敗にする (書き込みの口を閉じる)", async () => {
     const kintai = { fetch: vi.fn(async () => json({})) };
-    const deps = kintaiWriteDeps(kintai, "write-token");
+    const deps = kintaiWriteDeps(kintai, "write-token", WAGE_SNAPSHOT_PATH);
     await expect(deps.gcp("/api/kintai/timecard", { method: "POST" })).rejects.toThrow(
       "kintai worker write: path not allowed: /api/kintai/timecard",
     );
-    await expect(deps.gcp("/api/kintai/wage-snapshot?x=1")).rejects.toThrow("path not allowed");
+    // `?` より前の完全一致 — 接頭辞が同じでも別の口は通さない (startsWith でない)
+    await expect(deps.gcp("/api/kintai/wage-snapshot-x")).rejects.toThrow("path not allowed");
+    await expect(deps.gcp("/api/kintai/wage-snapshot/../timecard")).rejects.toThrow("path not allowed");
     expect(kintai.fetch).not.toHaveBeenCalled();
+  });
+
+  it("wage-snapshot 用の deps では autoload を叩けない (許可する口は呼び手ごと)", async () => {
+    const kintai = { fetch: vi.fn(async () => json({})) };
+    const deps = kintaiWriteDeps(kintai, "write-token", WAGE_SNAPSHOT_PATH);
+    await expect(
+      deps.gcp("/api/dtako/autoload?unko_no=1&reset_timecard=false", { method: "POST" }),
+    ).rejects.toThrow("kintai worker write: path not allowed: /api/dtako/autoload");
+    expect(kintai.fetch).not.toHaveBeenCalled();
+  });
+
+  it("autoload 用の deps は query 付きの autoload だけ通し、wage-snapshot は拒む", async () => {
+    const kintai = { fetch: vi.fn(async () => json({})) };
+    const deps = kintaiWriteDeps(kintai, "t", "/api/dtako/autoload");
+    await deps.gcp("/api/dtako/autoload?unko_no=1&reset_timecard=true", { method: "POST" });
+    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/dtako/autoload?unko_no=1&reset_timecard=true", {
+      method: "POST",
+      headers: { "X-Kintai-Write-Token": "t" },
+    });
+    await expect(deps.gcp("/api/kintai/wage-snapshot")).rejects.toThrow("path not allowed");
   });
 
   it("kintaiWriteDeps は init 無しでも token だけを付けて送る", async () => {
     const kintai = { fetch: vi.fn(async () => json({})) };
-    await kintaiWriteDeps(kintai, "t").gcp("/api/kintai/wage-snapshot");
+    await kintaiWriteDeps(kintai, "t", WAGE_SNAPSHOT_PATH).gcp("/api/kintai/wage-snapshot");
     const [, init] = kintai.fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(init.headers).toEqual({ "X-Kintai-Write-Token": "t" });
   });

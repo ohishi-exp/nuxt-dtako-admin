@@ -24,12 +24,12 @@
  * (`http_status`/`location`/`reset_*` 等) をそのまま呼び出し元へ転送するだけで、
  * 成否判定はしない — 判定は呼び出し側 (人 / モデル) に委ねる。
  *
- * ## 経路と資格情報 (relay → オンプレ)
+ * ## 経路と資格情報
  *
- * kyuyo-mcp の `fetchIchibanJson` や relay 自身の他の経路 (`/api/kintai/pdf-json`
- * 等) と同じ `NUXT_ICHIBAN_API_URL` + CF Access Service Token
- * (`CF-Access-Client-Id`/`CF-Access-Client-Secret`) をそのまま使う。新しい
- * credential も allowlist 登録も要らない (Refs #280 の条件1、親へ報告済み)。
+ * ② の送り先はこの module では決めない (`deps.autoload`)。`KINTAI_COMP_ID` の会社で
+ * token が読めれば勤怠 Worker (`X-Kintai-Write-Token`)、それ以外はオンプレ版
+ * (`NUXT_ICHIBAN_API_URL` + CF Access) — 振り分けは `kintai-relay.ts` の
+ * `kintaiAutoloader` 1 か所 (Refs ohishi-exp/rust-ichibanboshi#322)。
  */
 
 import { listZipEntryNames } from "./operation-zip";
@@ -64,9 +64,10 @@ export class DtakoReimportError extends Error {
 }
 
 /**
- * push (② オンプレ autoload への POST) を送った後、応答を確定できずに失敗した
- * ことを示す (受け入れ条件・親指摘 2026-08-01)。**取り込みは応答より前に走る**
- * (`dtako_autoload.rs` 実測: 307 でも取り込み済み) ため、`deps.onpremAutoload` が
+ * push (② autoload への POST) を送った後、応答を確定できずに失敗した
+ * ことを示す (受け入れ条件・親指摘 2026-08-01)。送り先が 502 を返したときも同じ扱い
+ * (勤怠 Worker・オンプレ版とも、502 は ② を送った後の失敗からだけ出る)。**取り込みは応答より前に走る**
+ * (`dtako_autoload.rs` 実測: 307 でも取り込み済み) ため、`deps.autoload` が
  * 例外を投げた場合 — DO の deploy 中断・network 断等で応答を読めなかった場合 —
  * **push 自体は届いていて取り込みが実行された可能性がある。** この例外は通常の
  * `DtakoReimportError` (= まだ push していない/対象が悪い、再実行して安全) と
@@ -106,12 +107,15 @@ export function assertZipReadyForPush(buf: ArrayBuffer): void {
 /**
  * `POST /api/dtako/autoload` の相対 path + query を組む。**host は含めない**
  * (`rust-ichibanboshi` 側の内部アドレス方針と同じ — 呼び出し側の
- * `deps.onpremAutoload` が `NUXT_ICHIBAN_API_URL` を持つ)。
+ * `deps.autoload` が送り先を持つ)。
  */
 export function buildAutoloadPath(unkoNo: string, resetTimecard: boolean): string {
   const q = new URLSearchParams({ unko_no: unkoNo, reset_timecard: resetTimecard ? "true" : "false" });
-  return `/api/dtako/autoload?${q.toString()}`;
+  return `${DTAKO_AUTOLOAD_PATH}?${q.toString()}`;
 }
+
+/** ② の口。オンプレ版と勤怠 Worker の両方にある (Refs ohishi-exp/rust-ichibanboshi#322)。 */
+export const DTAKO_AUTOLOAD_PATH = "/api/dtako/autoload";
 
 export interface DtakoReimportDeps {
   /** ① zip 取得の直前に走らせる「作業時間再集計」(theearth F-DES1013、Refs
@@ -121,8 +125,9 @@ export interface DtakoReimportDeps {
   recalculateWork(): Promise<void>;
   /** ① zip 取得 (自前ログイン)。実装側 (DO) が opeNo/startOpe/comp_id を握って呼ぶ。 */
   fetchZip(): Promise<ArrayBuffer>;
-  /** ② オンプレ autoload への POST。CF Access ヘッダは実装側で付ける。 */
-  onpremAutoload(path: string, init: RequestInit): Promise<Response>;
+  /** ② autoload への POST。送り先 (勤怠 Worker かオンプレ版) と認証ヘッダは実装側
+   * (`kintai-relay.ts` の `kintaiAutoloader`) が決める。 */
+  autoload(path: string, init: RequestInit): Promise<Response>;
 }
 
 export interface DtakoReimportInput {
@@ -189,7 +194,7 @@ export async function runDtakoReimport(
   let res: Response;
   let bodyText: string;
   try {
-    res = await deps.onpremAutoload(path, {
+    res = await deps.autoload(path, {
       method: "POST",
       headers: { "content-type": "application/zip" },
       body: zip,
@@ -197,17 +202,27 @@ export async function runDtakoReimport(
     bodyText = await res.text();
   } catch (err) {
     throw new DtakoReimportPushUncertainError(
-      `unko_no=${input.unkoNo} へのオンプレ push 中に応答を確定できませんでした — ` +
+      `unko_no=${input.unkoNo} への push 中に応答を確定できませんでした — ` +
         "取り込みは応答より前に走るため、既に取り込み済みの可能性があります。" +
         "再実行の前に dtako_events (この unko_no) を確認してください: " +
         (err instanceof Error ? err.message : String(err)),
+    );
+  }
+  // 502 は勤怠 Worker・オンプレ版とも ② を送った後の失敗 (接続失敗・timeout・CakePHP の非 2xx・
+  // JSON 不正) からだけ出る — 取り込み済みかもしれないので uncertain。本文の語では分けない。
+  // 502 以外の 5xx・4xx は今までどおり応答をそのまま返す
+  if (res.status === 502) {
+    throw new DtakoReimportPushUncertainError(
+      `unko_no=${input.unkoNo} の取り込みが 502 を返しました — 送った後の失敗なので既に取り込み済みの` +
+        "可能性があります。再実行の前に dtako_events (この unko_no) を確認してください: " +
+        bodyText.slice(0, 300),
     );
   }
   let autoload: Record<string, unknown>;
   try {
     autoload = JSON.parse(bodyText) as Record<string, unknown>;
   } catch {
-    // オンプレ (or その手前の nginx) が JSON 以外 (502 の HTML 等) を返すことも
+    // オンプレ (or その手前の nginx) が JSON 以外 (HTML 等) を返すことも
     // ある — 黙って握り潰さず、抜粋を返す (kintai-relay.ts の readJson と同じ方針)。
     autoload = { parse_error: true, raw_excerpt: bodyText.slice(0, 300) };
   }

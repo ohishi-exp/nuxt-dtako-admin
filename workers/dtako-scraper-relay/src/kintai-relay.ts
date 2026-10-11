@@ -46,6 +46,7 @@
  */
 
 import { resolveSecretBinding } from "./cron";
+import { DTAKO_AUTOLOAD_PATH } from "./dtako-reimport";
 import { parseGcpShiftDays, type GcpNonWorking, type GcpShiftDay } from "./gcp-day-summaries";
 
 /** service binding の最小形 (`cloudflare:workers` の型に依存しないための構造的型)。 */
@@ -93,7 +94,7 @@ const CHANGE_LOG_PATH = "/api/kintai/change-log";
  */
 const SHIFT_DAYS_PATH = "/api/kintai/shift-days";
 /** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
-const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
+export const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
 /** 期間集計の口 (同上)。 */
 const WAGE_RANGE_PATH = "/api/kintai/wage-range";
 
@@ -366,6 +367,18 @@ export async function kintaiReader(
   if (kintai) {
     return { route: "worker", read: (path, init) => kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, init) };
   }
+  const read = await onpremKintaiFetch(env, onSecretError);
+  return read && { route: "onprem", read };
+}
+
+/**
+ * オンプレ版 (`NUXT_ICHIBAN_API_URL` + CF Access) を叩く関数。揃わなければ `null`。
+ * **オンプレの apiUrl + CF Access の組み立てはここ 1 か所** (読みの [`kintaiReader`] と書きの [`kintaiAutoloader`])。
+ */
+async function onpremKintaiFetch(
+  env: KintaiReaderEnv,
+  onSecretError: (err: unknown) => void,
+): Promise<((path: string, init?: RequestInit) => Promise<Response>) | null> {
   const apiUrl = (env.NUXT_ICHIBAN_API_URL ?? "").trim().replace(/\/+$/, "");
   const clientId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
   let clientSecret = "";
@@ -375,18 +388,55 @@ export async function kintaiReader(
     onSecretError(err);
   }
   if (!apiUrl || !clientId || !clientSecret) return null;
-  return {
-    route: "onprem",
-    read: (path, init) =>
-      fetch(`${apiUrl}${path}`, {
-        ...init,
-        headers: {
-          ...(init?.headers as Record<string, string>),
-          "CF-Access-Client-Id": clientId,
-          "CF-Access-Client-Secret": clientSecret,
-        },
-      }),
-  };
+  return (path, init) =>
+    fetch(`${apiUrl}${path}`, {
+      ...init,
+      headers: {
+        ...(init?.headers as Record<string, string>),
+        "CF-Access-Client-Id": clientId,
+        "CF-Access-Client-Secret": clientSecret,
+      },
+    });
+}
+
+/** [`kintaiAutoloader`] が見る env。 */
+export interface KintaiAutoloadEnv extends KintaiReaderEnv {
+  KINTAI_WRITE_TOKEN?: unknown;
+}
+
+export interface KintaiAutoloader {
+  route: KintaiReadRoute;
+  /** `path` は `/api/dtako/autoload?...`。 */
+  autoload(path: string, init: RequestInit): Promise<Response>;
+}
+
+/**
+ * `run_dtako_reimport` の ② 取り込み (`POST /api/dtako/autoload`) の送り先 (Refs ohishi-exp/rust-ichibanboshi#322)。
+ *
+ * `KINTAI_COMP_ID` の会社で `KINTAI_WRITE_TOKEN` が読めれば勤怠 Worker へ (CF Access は要らない)。
+ * binding が無い・別の会社・token が読めないときはオンプレ版 (wage-snapshot と同じ作法)。token が読めずに
+ * 倒れたときは `onSecretError` に渡す (黙って通さない)。どちらも揃わなければ `null`。
+ */
+export async function kintaiAutoloader(
+  env: KintaiAutoloadEnv,
+  compId: string,
+  onSecretError: (err: unknown) => void,
+): Promise<KintaiAutoloader | null> {
+  const kintai = kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID);
+  if (kintai) {
+    let writeToken = "";
+    try {
+      writeToken = await resolveSecretBinding(env.KINTAI_WRITE_TOKEN);
+    } catch (err) {
+      onSecretError(err);
+    }
+    if (writeToken) {
+      return { route: "worker", autoload: kintaiWriteDeps(kintai, writeToken, DTAKO_AUTOLOAD_PATH).gcp };
+    }
+    onSecretError(new Error("KINTAI_WRITE_TOKEN が読めないためオンプレ版へ送ります"));
+  }
+  const autoload = await onpremKintaiFetch(env, onSecretError);
+  return autoload && { route: "onprem", autoload };
 }
 
 /**
@@ -405,15 +455,20 @@ const KINTAI_WORKER_READ_PATHS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 勤怠 Worker の書き込みの口 (wage-snapshot) へ送る `gcp` (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * 勤怠 Worker の書き込みの口 (wage-snapshot・autoload) へ送る `gcp` (Refs ohishi-exp/rust-ichibanboshi#322)。
  * 書き込みの口は `X-Kintai-Write-Token` を照合するので、読みの振り分け (`KINTAI_WORKER_READ_PATHS`) と分けて
  * 呼び手が token を読めたときだけ使う。secret・テナント・CF Access は付けない (Worker は見ない)。
+ * 送ってよい口は呼び手ごとに `allowedPath` で 1 本だけ渡す (wage-snapshot 用の deps で autoload を叩けない)。
  */
-export function kintaiWriteDeps(kintai: FetcherLike, writeToken: string): Pick<KintaiRelayDeps, "gcp"> {
+export function kintaiWriteDeps(
+  kintai: FetcherLike,
+  writeToken: string,
+  allowedPath: string,
+): Pick<KintaiRelayDeps, "gcp"> {
   return {
     gcp(path, init) {
-      // 書き込みの口は wage-snapshot だけに閉じる (他の path に token を付けて送らない)
-      if (path !== WAGE_SNAPSHOT_PATH) {
+      // `?` より前の完全一致だけ通す (他の path に token を付けて送らない。startsWith は使わない)
+      if (path.split("?")[0] !== allowedPath) {
         return Promise.reject(new Error(`kintai worker write: path not allowed: ${path}`));
       }
       return kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, {
