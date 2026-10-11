@@ -86,6 +86,14 @@ describe('parseKintaiUnkoGaps', () => {
     expect(parseKintaiUnkoGaps(body({ drivers: 'not-array' })).drivers).toEqual([])
   })
 
+  it('elapsed_ms が無い応答 (勤怠 Worker) は elapsedMs が null (画面は「所要」を出さない)', () => {
+    const noElapsed: Record<string, unknown> = { ...body({}) }
+    delete noElapsed.elapsed_ms
+    expect(parseKintaiUnkoGaps(noElapsed).elapsedMs).toBeNull()
+    expect(parseKintaiUnkoGaps(body({ elapsed_ms: null })).elapsedMs).toBeNull()
+    expect(parseKintaiUnkoGaps(body({ elapsed_ms: 7 })).elapsedMs).toBe(7)
+  })
+
   it('driver_cd の無い/空文字・object でない要素は捨てる (driver_cd が主キー、文字列も数値も両方受ける)', () => {
     const r = parseKintaiUnkoGaps(
       body({

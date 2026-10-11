@@ -1069,13 +1069,14 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     return { deps, authWorker, kintai };
   }
 
-  /** 切り替える読み 5 本を、relay の実際の関数で叩く (path は関数が組む)。 */
+  /** 切り替える読み 6 本を、relay の実際の関数で叩く (path は関数が組む)。 */
   async function readFive(deps: KintaiRelayDeps) {
     await relayKintaiDaySummaries(deps, { month: MONTH, driver: "9001" });
     await relayKintaiShiftOverlaps(deps, { month: MONTH });
     await relayKintaiChangeLog(deps, { driver: "9001", from: "2026-07-01", to: "2026-07-31" });
     await relayKintaiYTimeShifts(deps, { driverCd: "9001", from: "2026-07-01", to: "2026-07-31" }, "tenant-a");
     await relayWageRangeGet(deps, "1001", new URLSearchParams({ from: "2026-06", to: "2026-07" }));
+    await relayKintaiUnkoGaps(deps, { month: MONTH, driverCd: "9001" });
   }
 
   const FIVE_PATHS = [
@@ -1085,9 +1086,10 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     "/api/kintai/shift-days",
     "/api/kintai/shift-days",
     "/api/kintai/wage-range",
+    "/api/kintai/unko-gaps",
   ];
 
-  it("本番の設定では 5 本とも Worker の binding に飛び、auth-worker を呼ばない", async () => {
+  it("本番の設定では 6 本とも Worker の binding に飛び、auth-worker を呼ばない", async () => {
     const { deps, authWorker, kintai } = setup();
     await readFive(deps);
     expect(authWorker.fetch).not.toHaveBeenCalled();
@@ -1096,6 +1098,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     // query はそのまま (wage-range の comp は relay が上書きした値)
     expect(urls[0]).toBe("https://ichibanboshi-kintai/api/kintai/day-summaries?month=2026-07&driver=9001");
     expect(urls[5]).toBe("https://ichibanboshi-kintai/api/kintai/wage-range?from=2026-06&to=2026-07&comp=1001");
+    expect(urls[6]).toBe("https://ichibanboshi-kintai/api/kintai/unko-gaps?month=2026-07&driver_cd=9001");
   });
 
   it("Worker への要求に secret・テナント・CF Access のヘッダーを付けない", async () => {
@@ -1114,7 +1117,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     ["読む会社が KINTAI_COMP_ID と違う", { compId: "2002" }],
     ["KINTAI_COMP_ID が未設定", { kintaiCompId: undefined }],
     ["会社が空 (KINTAI_COMP_ID も空)", { compId: "", kintaiCompId: "" }],
-  ] as const)("%s ときは 5 本とも今の経路 (auth-worker) のまま", async (_label, over) => {
+  ] as const)("%s ときは 6 本とも今の経路 (auth-worker) のまま", async (_label, over) => {
     const { deps, authWorker, kintai } = setup(over);
     await readFive(deps);
     expect(kintai.fetch).not.toHaveBeenCalled();
@@ -1134,14 +1137,13 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     expect(authWorker.fetch).not.toHaveBeenCalled();
   });
 
-  it("残す口 (window・recalc・stale-months・unko-gaps・wage-snapshot) は本番の設定でも auth-worker 経由のまま", async () => {
+  it("残す口 (window・recalc・stale-months・wage-snapshot) は本番の設定でも auth-worker 経由のまま", async () => {
     globalThis.fetch = vi.fn(async () => json({ drivers: [], events: [] })) as unknown as typeof fetch;
     const { deps, authWorker, kintai } = setup();
     await relayKintaiWindow(deps, { month: MONTH, apply: false });
     await relayKintaiRecalc(deps, { month: MONTH });
     await relayKintaiRecalc(deps, { month: MONTH, apply: true });
     await relayKintaiStaleMonths(deps, {});
-    await relayKintaiUnkoGaps(deps, { month: MONTH });
     await relayWageSnapshotPut(deps, "1001", { month: MONTH, rows: [] });
     expect(kintai.fetch).not.toHaveBeenCalled();
     expect(authWorker.fetch.mock.calls.map((c) => new URL(String(c[0])).pathname)).toEqual([
@@ -1149,7 +1151,6 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
       "/ichibanboshi-proxy/api/kintai/recalc",
       "/ichibanboshi-proxy/api/kintai/recalc",
       "/ichibanboshi-proxy/api/kintai/stale-months",
-      "/ichibanboshi-proxy/api/kintai/unko-gaps",
       "/ichibanboshi-proxy/api/kintai/wage-snapshot",
     ]);
   });
@@ -1160,6 +1161,13 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
       new Response("読み先のテナントが決まりません (KINTAI_TENANT_ID を設定してください)", { status: 503 }),
     );
     await expect(relayKintaiDaySummaries(deps, { month: MONTH })).rejects.toThrow(/503/);
+  });
+
+  it("unko-gaps: Worker の 502 (etags が読めない) は畳まず readJson の失敗として伝播する", async () => {
+    const { deps, authWorker, kintai } = setup();
+    kintai.fetch.mockResolvedValueOnce(new Response("alc etags unavailable", { status: 502 }));
+    await expect(relayKintaiUnkoGaps(deps, { month: MONTH })).rejects.toThrow(/502/);
+    expect(authWorker.fetch).not.toHaveBeenCalled();
   });
 });
 

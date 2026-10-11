@@ -391,7 +391,9 @@ export async function kintaiReader(
 
 /**
  * 勤怠 Worker (`ichibanboshi-kintai`) に同じ口がある GCP の読み (Refs ohishi-exp/rust-ichibanboshi#322)。
- * window・recalc・stale-months・unko-gaps・wage-snapshot は入れない (Worker に無いか、失敗の扱いが違う)。
+ * window・recalc・stale-months・wage-snapshot は入れない (Worker に無いか、失敗の扱いが違う)。
+ * unko-gaps は入れる: alc の etags が読めないとき Worker は 502 を返す (Cloud Run は 200 + `gcp_etags_available:false`)。
+ * relay は畳まず 502 のまま伝播し、画面は「取得できませんでした」を出す。Worker は `elapsed_ms` を付けない。
  */
 const KINTAI_WORKER_READ_PATHS: ReadonlySet<string> = new Set([
   DAY_SUMMARIES_PATH,
@@ -399,6 +401,7 @@ const KINTAI_WORKER_READ_PATHS: ReadonlySet<string> = new Set([
   CHANGE_LOG_PATH,
   SHIFT_DAYS_PATH,
   WAGE_RANGE_PATH,
+  UNKO_GAPS_PATH,
 ]);
 
 /**
