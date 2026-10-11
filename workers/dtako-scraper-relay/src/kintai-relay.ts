@@ -91,6 +91,10 @@ const CHANGE_LOG_PATH = "/api/kintai/change-log";
  * Refs #1133)。乗務員 1 人・1 か月ぶん。**始業がその月に入る勤務**だけを返す。
  */
 const SHIFT_DAYS_PATH = "/api/kintai/shift-days";
+/** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
+const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
+/** 期間集計の口 (同上)。 */
+const WAGE_RANGE_PATH = "/api/kintai/wage-range";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -162,7 +166,8 @@ export interface KintaiWindowInput {
 export interface KintaiRelayDeps {
   /** オンプレ (CF Tunnel 越し) を叩く。path は `/api/...`、CF Access は実装側で付ける。 */
   onprem(path: string, init?: RequestInit): Promise<Response>;
-  /** auth-worker 経由で GCP を叩く。`X-Tenant-ID` は実装側で付ける。 */
+  /** auth-worker 経由で GCP を叩く。`X-Tenant-ID` は実装側で付ける。勤怠 Worker に同じ読みの口があれば
+   * そちらへ回す (`buildDeps`)。 */
   gcp(path: string, init?: RequestInit): Promise<Response>;
 }
 
@@ -306,6 +311,21 @@ export function tenantForCompId(accounts: unknown, compId: string): string | nul
   return null;
 }
 
+/** 勤怠 Worker の Service Binding 用の絶対 URL base。host は binding が無視する。 */
+const KINTAI_WORKER_BASE = "https://ichibanboshi-kintai";
+
+/**
+ * 勤怠 Worker (`ichibanboshi-kintai`) に同じ口がある GCP の読み (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * window・recalc・stale-months・unko-gaps・wage-snapshot は入れない (Worker に無いか、失敗の扱いが違う)。
+ */
+const KINTAI_WORKER_READ_PATHS: ReadonlySet<string> = new Set([
+  DAY_SUMMARIES_PATH,
+  SHIFT_OVERLAPS_PATH,
+  CHANGE_LOG_PATH,
+  SHIFT_DAYS_PATH,
+  WAGE_RANGE_PATH,
+]);
+
 /** [`relayKintaiWindow`] に渡す実体を組む。 */
 export function buildDeps(opts: {
   ichibanOrigin: string;
@@ -314,8 +334,18 @@ export function buildDeps(opts: {
   authWorker: FetcherLike;
   proxySecret: string;
   tenantId: string;
+  /** 勤怠 Worker への Service Binding (`env.KINTAI`。本番にだけある)。 */
+  kintai: FetcherLike | undefined;
+  /** この deps で読む会社 (`tenantId` を引いた comp_id)。 */
+  compId: string;
+  /** `env.KINTAI_COMP_ID`。 */
+  kintaiCompId: string | undefined;
 }): KintaiRelayDeps {
   const base = opts.ichibanOrigin.replace(/\/$/, "");
+  // Worker のテナントは自分の `KINTAI_TENANT_ID` で固定 (`X-Tenant-ID` を読まない)。それと一致するのは
+  // `KINTAI_COMP_ID` の会社の tenant だけなので、他の会社の読みは auth-worker 経由のまま
+  const kintai =
+    opts.compId && opts.compId === (opts.kintaiCompId ?? "").trim() ? opts.kintai : undefined;
   return {
     onprem(path, init) {
       return fetch(`${base}${path}`, {
@@ -329,6 +359,13 @@ export function buildDeps(opts: {
       });
     },
     gcp(path, init) {
+      if (kintai && KINTAI_WORKER_READ_PATHS.has(path.split("?")[0]!)) {
+        // secret・テナント・CF Access は付けない (Worker は見ない。読みの口は認可なし)
+        return kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, {
+          ...init,
+          headers: { ...(init?.headers as Record<string, string>), Accept: "application/json" },
+        });
+      }
       return opts.authWorker.fetch(`${PROXY_BASE}${PROXY_PREFIX}${path}`, {
         ...init,
         headers: {
@@ -1085,11 +1122,6 @@ export async function relayKintaiYTimeShifts(
  * 許可リストの正は auth-worker の KV `kyuyo-allowed-emails` 1 か所。
  */
 const KYUYO_ACCESS_UNREACHABLE_MESSAGE = "給与の認可 (auth-worker) に届きません";
-
-/** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
-const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
-/** 期間集計の口 (同上)。 */
-const WAGE_RANGE_PATH = "/api/kintai/wage-range";
 
 /**
  * 給与 allowlist に通らなかったときに relay が返すもの。**null = 通った。**

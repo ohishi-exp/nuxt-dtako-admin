@@ -81,6 +81,9 @@ export interface RelayWorkerEnv {
   ETC_ACCOUNTS?: unknown;
   /** auth-worker への service binding。`/ichibanboshi-proxy/*` (OIDC mint) に使う。 */
   AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding。本番 (top-level) にだけある。
+   * GCP の読みのうち勤怠 Worker に同じ口があるものをここへ回す (`buildDeps`、Refs ohishi-exp/rust-ichibanboshi#322)。 */
+  KINTAI?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** auth-worker の RPC entrypoint (`InternalEntrypoint`)。**名前付きメソッドは
    * service binding からしか呼べない**ので、履歴の読み書きに credential が要らない
    * (Refs #950 / ippoan/auth-worker#483)。 */
@@ -521,6 +524,9 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
     authWorker,
     proxySecret,
     tenantId,
+    kintai: env.KINTAI,
+    compId,
+    kintaiCompId: env.KINTAI_COMP_ID,
   });
   try {
     const report = await relayKintaiWindow(deps, {
@@ -606,6 +612,9 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
     authWorker,
     proxySecret,
     tenantId,
+    kintai: env.KINTAI,
+    compId,
+    kintaiCompId: env.KINTAI_COMP_ID,
   });
   try {
     const report = await relayKintaiRecalc(deps, {
@@ -756,6 +765,9 @@ async function passKintaiGcpGate(
     authWorker,
     proxySecret,
     tenantId,
+    kintai: env.KINTAI,
+    compId,
+    kintaiCompId: env.KINTAI_COMP_ID,
   });
   return { ok: true, deps, tenantId };
 }

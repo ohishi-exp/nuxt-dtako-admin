@@ -102,3 +102,41 @@ describe("GET /kintai-relay/day-summaries (関門を shift-overlaps と共有し
     expect(calls[0]).toContain("/api/kintai/day-summaries?month=2026-06&driver=1026");
   });
 });
+
+describe("勤怠 Worker (KINTAI) があれば Worker から読む (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  function withKintai(respond: () => Response) {
+    const { env, calls } = fakeEnv(() => Response.json({ via: "auth-worker" }));
+    const kintaiCalls: { url: string; headers: Record<string, string> }[] = [];
+    (env as { KINTAI?: unknown }).KINTAI = {
+      fetch: vi.fn(async (url: string, init?: RequestInit) => {
+        kintaiCalls.push({ url, headers: init?.headers as Record<string, string> });
+        return respond();
+      }),
+    };
+    return { env, calls, kintaiCalls };
+  }
+
+  it("day-summaries・shift-overlaps は Worker に飛び、auth-worker を呼ばない。secret・テナントを付けない", async () => {
+    const { env, calls, kintaiCalls } = withKintai(() => Response.json(OVERLAPS));
+    expect((await worker.fetch(get("/kintai-relay/day-summaries?month=2026-06"), env)).status).toBe(200);
+    const res = await worker.fetch(get("/kintai-relay/shift-overlaps?month=2026-06"), env);
+    expect(await res.json()).toEqual(OVERLAPS);
+    expect(calls).toHaveLength(0);
+    expect(kintaiCalls.map((c) => c.url)).toEqual([
+      "https://ichibanboshi-kintai/api/kintai/day-summaries?month=2026-06",
+      "https://ichibanboshi-kintai/api/kintai/shift-overlaps?month=2026-06",
+    ]);
+    for (const c of kintaiCalls) expect(Object.keys(c.headers)).toEqual(["Accept"]);
+  });
+
+  it("Worker の 503 は 502 になり、本文の先頭が error に載る", async () => {
+    const { env } = withKintai(
+      () => new Response("読み先のテナントが決まりません (KINTAI_TENANT_ID を設定してください)", { status: 503 }),
+    );
+    const res = await worker.fetch(get("/kintai-relay/day-summaries?month=2026-06"), env);
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "gcp kintai day-summaries: status 503: 読み先のテナントが決まりません (KINTAI_TENANT_ID を設定してください)",
+    );
+  });
+});
