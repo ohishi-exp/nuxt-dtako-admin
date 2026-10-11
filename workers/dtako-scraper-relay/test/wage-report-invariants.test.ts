@@ -108,16 +108,11 @@ function makeDO(opts: { shiftOverlaps?: () => Response; daySummariesEmpty?: bool
     // 勤怠の対象会社 (本番 [vars] と同じ)。無いと打刻の live-build / source=gcp が止まる (Refs #1133 c1133-8)
     KINTAI_COMP_ID: COMP_ID,
     RESTRAINT_DEV_VIEWER_EMAIL: "viewer@example.com",
-    // live-build が「配線未設定」で諦めないように 3 点を埋める
-    NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    // `source=gcp` 経路 (day_summaries) の配線
     DTAKO_ACCOUNTS: JSON.stringify([{ comp_id: COMP_ID, tenant_id: "tenant" }]),
-    INTERNAL_SHARED_SECRET: "shared",
-    AUTH_WORKER: {
-      fetch: async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    // 勤怠 Worker (live-build・`source=gcp` とも読み先はここだけ。Refs ohishi-exp/rust-ichibanboshi#322)。
+    // GCP の 2 口はここで返し、残り (daily・kosoku-daily・wage-source) は `stubUpstream` の global fetch へ回す
+    KINTAI: {
+      fetch: async (url: string, init?: RequestInit) => {
         if (url.includes("/api/kintai/shift-overlaps")) {
           return opts.shiftOverlaps?.() ?? Response.json(shiftOverlapsBody(YM));
         }
@@ -127,7 +122,7 @@ function makeDO(opts: { shiftOverlaps?: () => Response; daySummariesEmpty?: bool
             gcpDaySummariesBody(isPrev ? PREV_YM : YM, !isPrev && !opts.daySummariesEmpty, opts.gcpOnlyDriver),
           );
         }
-        return new Response("unexpected", { status: 500 });
+        return globalThis.fetch(url, init);
       },
     },
   };

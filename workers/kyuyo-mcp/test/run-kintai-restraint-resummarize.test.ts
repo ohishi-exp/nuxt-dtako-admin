@@ -20,10 +20,11 @@ describe("run_kintai_restraint_resummarize (Refs ohishi-exp/rust-ichibanboshi#32
     expect(runKintaiRestraintResummarizeTool.requiresScope).toBe("mcp.write");
   });
 
-  it("説明に「theearth に触らない」「D1 とオンプレ版の両方に書く」「viewer 側のキャッシュは消さない」が読める", () => {
+  it("説明に「theearth に触らない」「勤怠 Worker の D1 に書く」「viewer 側のキャッシュは消さない」が読める", () => {
     const d = runKintaiRestraintResummarizeTool.description;
     expect(d).toContain("R2 に保存済みの生 CSV から再計算し、theearth には触らない");
-    expect(d).toContain("勤怠 Worker の D1 とオンプレ版の両方");
+    expect(d).toContain("勤怠 Worker の D1。");
+    expect(d).not.toContain("オンプレ版");
     expect(d).toContain("scraper-comp-{comp}");
     expect(d).toContain("viewer 側の DO が持つ上流キャッシュ");
     expect(d).toContain("/kintai-relay/");
@@ -66,6 +67,22 @@ describe("run_kintai_restraint_resummarize (Refs ohishi-exp/rust-ichibanboshi#32
     const init = call[1] as RequestInit;
     expect((init.headers as Record<string, string>)["X-Alc-Proxy-Secret"]).toBe(SECRET);
     expect(JSON.parse(init.body as string)).toEqual({ month: "2026-06", comp_id: "27324455" });
+  });
+
+  it("restraint_push に onprem キーが無い (勤怠 Worker だけの) 応答もそのまま返す", async () => {
+    const payload = {
+      month: "2026-06",
+      csv_processed: 1,
+      summaries_written: 2,
+      summaries_new_version: 0,
+      errors: [],
+      restraint_push: { kintai: { outcome: "done", puts: 1 } },
+    };
+    const e = env({
+      SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(payload))) },
+    });
+    const got = await runKintaiRestraintResummarizeTool.execute(e, baseArgs);
+    expect(got).toEqual(payload);
   });
 
   it("comp_id を省略すると relay の既定に委ねる (こちらで埋めない)", async () => {

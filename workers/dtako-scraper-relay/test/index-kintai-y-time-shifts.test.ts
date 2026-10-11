@@ -11,25 +11,29 @@ const COMP_ID = "90000001";
 const TENANT = "tenant-a";
 const PATH = "/kintai-relay/y-time-shifts";
 
-/** 新しい口が要る配線だけの env。上流 (auth-worker `/ichibanboshi-proxy`) は `upstream` で差し替える。 */
+/** 新しい口が要る配線だけの env。上流 (勤怠 Worker `KINTAI`) は `upstream` で差し替える。
+ * `AUTH_WORKER` は勤怠では呼ばない (Refs ohishi-exp/rust-ichibanboshi#322) — 呼ばれたら `authCalls` に残る。 */
 function fakeEnv(upstream: (month: string) => Response | Promise<Response>) {
   const calls: string[] = [];
+  const authCalls: string[] = [];
   const env = {
     INTERNAL_SHARED_SECRET: SECRET,
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    NUXT_ICHIBAN_API_URL: "https://onprem.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
     KINTAI_COMP_ID: COMP_ID,
     DTAKO_ACCOUNTS: JSON.stringify([{ comp_id: COMP_ID, tenant_id: TENANT }]),
-    AUTH_WORKER: {
-      fetch: vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    KINTAI: {
+      fetch: vi.fn(async (url: string) => {
         calls.push(url);
         return upstream(new URL(url).searchParams.get("month")!);
       }),
     },
+    AUTH_WORKER: {
+      fetch: vi.fn(async (url: string) => {
+        authCalls.push(url);
+        return new Response("unexpected", { status: 500 });
+      }),
+    },
   } as unknown as RelayWorkerEnv;
-  return { env, calls };
+  return { env, calls, authCalls };
 }
 
 const BODY = { driver_cd: "9001", from: "2026-04-01", to: "2026-04-30", tenant_id: TENANT };
@@ -57,9 +61,10 @@ const shiftDays = (month: string) => Response.json({ month, driver_cd: 9001, ite
 
 describe("POST /kintai-relay/y-time-shifts (Refs #1133 c1133-40)", () => {
   it("関門を通れば前月と期間の月の shift-days を読み、勤務を束ねて返す。tenant_id は relay が引いた値", async () => {
-    const { env, calls } = fakeEnv(shiftDays);
+    const { env, calls, authCalls } = fakeEnv(shiftDays);
     const res = await worker.fetch(post(), env);
     expect(res.status).toBe(200);
+    expect(authCalls).toHaveLength(0);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     expect(await res.json()).toEqual({
       tenant_id: TENANT,
@@ -70,8 +75,8 @@ describe("POST /kintai-relay/y-time-shifts (Refs #1133 c1133-40)", () => {
       missing_months: [],
     });
     expect(calls.map((u) => new URL(u).pathname + new URL(u).search)).toEqual([
-      "/ichibanboshi-proxy/api/kintai/shift-days?month=2026-03&driver=9001",
-      "/ichibanboshi-proxy/api/kintai/shift-days?month=2026-04&driver=9001",
+      "/api/kintai/shift-days?month=2026-03&driver=9001",
+      "/api/kintai/shift-days?month=2026-04&driver=9001",
     ]);
   });
 
@@ -135,12 +140,7 @@ describe("POST /kintai-relay/y-time-shifts (Refs #1133 c1133-40)", () => {
     }
   });
 
-  it.each([
-    "NUXT_ICHIBAN_API_URL",
-    "NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID",
-    "ICHIBAN_CF_ACCESS_CLIENT_SECRET",
-    "AUTH_WORKER",
-  ])("別の設定 (%s) が空 + 正しい secret → 503 で reason なし", async (key) => {
+  it.each(["KINTAI"])("別の設定 (%s) が空 + 正しい secret → 503 で reason なし", async (key) => {
     const { env } = fakeEnv(shiftDays);
     (env as unknown as Record<string, unknown>)[key] = undefined;
     const res = await worker.fetch(post(), env);

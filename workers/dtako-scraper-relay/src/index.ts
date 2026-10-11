@@ -18,7 +18,6 @@ import {
   buildDeps,
   judgeKintaiGate,
   judgeYTimeShiftsRequest,
-  kintaiReader,
   kintaiRelayFailStatus,
   readKintaiWriteToken,
   relayKintaiDaySummaries,
@@ -82,10 +81,10 @@ export interface RelayWorkerEnv {
    * 消える (Refs #367)。 */
   DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
-  /** auth-worker への service binding。`/ichibanboshi-proxy/*` (OIDC mint) に使う。 */
+  /** auth-worker への service binding (勤怠では使わない)。 */
   AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding。本番 (top-level) にだけある。
-   * GCP の読みのうち勤怠 Worker に同じ口があるものをここへ回す (`buildDeps`、Refs ohishi-exp/rust-ichibanboshi#322)。 */
+   * 勤怠の読み書きはここだけへ送る (`buildDeps`、Refs ohishi-exp/rust-ichibanboshi#322)。 */
   KINTAI?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** auth-worker の RPC entrypoint (`InternalEntrypoint`)。**名前付きメソッドは
    * service binding からしか呼べない**ので、履歴の読み書きに credential が要らない
@@ -95,10 +94,6 @@ export interface RelayWorkerEnv {
   INTERNAL_SHARED_SECRET?: unknown;
   /** 勤怠 Worker の書き込みの口の token (`X-Kintai-Write-Token`)。 */
   KINTAI_WRITE_TOKEN?: unknown;
-  /** オンプレ rust-ichibanboshi (CF Tunnel) の origin と CF Access Service Token。 */
-  NUXT_ICHIBAN_API_URL?: string;
-  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
-  ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
   /** 打刻を運ぶ対象の会社。tenant は KV の `dtako_accounts` から引く。 */
   KINTAI_COMP_ID?: string;
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
@@ -243,7 +238,7 @@ export default {
     }
 
     if (url.pathname === "/kintai-relay/dtako-reimport" && request.method === "POST") {
-      // ① zip 取得 (自前ログイン) → ② オンプレ autoload push を 1 tool で完結させる
+      // ① zip 取得 (自前ログイン) → ② 勤怠 Worker の autoload push を 1 tool で完結させる
       // (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67)。**同期。** 取り込みまで
       // 行う書き込み経路なので `/kintai-relay/operation-zip` (read-only) とは別の口
       return handleDtakoReimport(request, env);
@@ -251,7 +246,7 @@ export default {
 
     if (url.pathname === "/kintai-relay/dtako-alc-upload" && request.method === "POST") {
       // ① zip 取得 (自前ログイン) → ② alc `/api/upload` 投入を運行1件で完結させる
-      // (Refs #633-7)。**同期。** `/kintai-relay/dtako-reimport` (オンプレ autoload
+      // (Refs #633-7)。**同期。** `/kintai-relay/dtako-reimport` (勤怠 Worker の autoload
       // 向け) と対になる書き込み経路 — 投入先が alc なので unko_no は不要
       return handleDtakoAlcUpload(request, env);
     }
@@ -476,9 +471,8 @@ export default {
  * `/kintai-relay/run`・`/kintai-relay/recalc` の共通の関門 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
  * 宣言が欠けていれば **503 で fail-closed** — 「走ったが実は何も運んでいない」を
- * 作らない。tenant は KV の `dtako_accounts` から `KINTAI_COMP_ID` で引く
- * (呼び出し元に名乗らせない)。窓も recalc も勤怠 Worker にしか送らない (`buildDeps` の
- * `KINTAI_WORKER_ONLY_PATHS`) ので AUTH_WORKER は要らない。書き込みの token はここで 1 回だけ読む。
+ * 作らない。会社は `KINTAI_COMP_ID` (呼び出し元に名乗らせない)。窓も recalc も勤怠 Worker にしか
+ * 送らない (`buildDeps`)。書き込みの token はここで 1 回だけ読む。
  */
 async function passKintaiWriteGate(
   request: Request,
@@ -486,15 +480,13 @@ async function passKintaiWriteGate(
   logKey: string,
 ): Promise<{ deps: ReturnType<typeof buildDeps> } | Response> {
   const compId = (env.KINTAI_COMP_ID ?? "").trim();
-  // オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`kintaiReader`)
-  const [proxySecret, reader, writeToken] = await Promise.all([
+  const [proxySecret, writeToken] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
-    kintaiReader(env, compId),
     readKintaiWriteToken(env, compId, (err) =>
       console.error(JSON.stringify({ [logKey]: "secret-error", error: err instanceof Error ? err.message : String(err) })),
     ),
   ]);
-  if (!compId || !proxySecret || !reader) {
+  if (!compId || !proxySecret || !env.KINTAI) {
     return kintaiGcpFail(503, "kintai-relay not configured");
   }
 
@@ -504,30 +496,8 @@ async function passKintaiWriteGate(
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return kintaiGcpFail(401, "Unauthorized");
 
-  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
-  let accounts: unknown = null;
-  try {
-    accounts = JSON.parse(accountsRaw || "null");
-  } catch {
-    accounts = null;
-  }
-  const tenantId = tenantForCompId(accounts, compId);
-  if (!tenantId) {
-    // KV から消えた時に静かに別テナントへ書かないよう loud fail (Refs #367 の実害)
-    console.error(JSON.stringify({ [logKey]: "tenant not resolved", comp_id: compId }));
-    return kintaiGcpFail(503, "tenant not resolved from dtako_accounts");
-  }
-
-  const deps = buildDeps({
-    reader,
-    authWorker: env.AUTH_WORKER,
-    proxySecret,
-    tenantId,
-    kintai: env.KINTAI,
-    compId,
-    kintaiCompId: env.KINTAI_COMP_ID,
-    writeToken,
-  });
+  // 書き先のテナントは勤怠 Worker が自分の設定で固定する (relay の KV の tenant は送らない)
+  const deps = buildDeps({ kintai: env.KINTAI, compId, kintaiCompId: env.KINTAI_COMP_ID, writeToken });
   return { deps };
 }
 
@@ -695,7 +665,7 @@ function kintaiGcpFail(status: number, error: string, reason?: string): Response
 }
 
 /**
- * GCP (`/ichibanboshi-proxy` 経由) を**読むだけ**の口の共通の関門。
+ * 勤怠 Worker を**読むだけ**の口の共通の関門。
  * day-summaries / shift-overlaps / y-time-shifts が共有する — 関門を写すと片方だけ直す
  * 事故になるため。順序 (secret の解決 → secret の比較 → 残りの配線) の判定は
  * `judgeKintaiGate`、そのあと tenant を KV `dtako_accounts` から `KINTAI_COMP_ID` で引く。
@@ -708,18 +678,14 @@ async function passKintaiGcpGate(
   | { ok: true; deps: ReturnType<typeof buildDeps>; tenantId: string }
   | { ok: false; status: number; error: string; reason?: string }
 > {
-  const compIdEnv = (env.KINTAI_COMP_ID ?? "").trim();
-  const [proxySecret, maybeReader] = await Promise.all([
-    resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
-    kintaiReader(env, compIdEnv),
-  ]);
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
   const verdict = judgeKintaiGate(
-    { authWorker: env.AUTH_WORKER, compId: compIdEnv, reader: maybeReader, proxySecret },
+    { kintai: env.KINTAI, compId: (env.KINTAI_COMP_ID ?? "").trim(), proxySecret },
     request.headers.get("X-Alc-Proxy-Secret") ?? "",
     constantTimeEquals,
   );
   if (!verdict.ok) return verdict;
-  const { authWorker, compId, reader } = verdict.config;
+  const { kintai, compId } = verdict.config;
 
   const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
   let accounts: unknown = null;
@@ -733,15 +699,7 @@ async function passKintaiGcpGate(
     console.error(JSON.stringify({ [logKey]: "tenant not resolved", comp_id: compId }));
     return { ok: false, status: 503, error: "tenant not resolved from dtako_accounts" };
   }
-  const deps = buildDeps({
-    reader,
-    authWorker,
-    proxySecret,
-    tenantId,
-    kintai: env.KINTAI,
-    compId,
-    kintaiCompId: env.KINTAI_COMP_ID,
-  });
+  const deps = buildDeps({ kintai, compId, kintaiCompId: env.KINTAI_COMP_ID });
   return { ok: true, deps, tenantId };
 }
 
@@ -938,7 +896,7 @@ export function handleScrapeErrorObject(request: Request, env: RelayWorkerEnv): 
 
 /**
  * `POST /kintai-relay/dtako-reimport` — 運行 1 件 (または `items` でまとめて
- * 複数件) の csvdata.zip を**自前ログイン**で取り、オンプレ rust-ichibanboshi の
+ * 複数件) の csvdata.zip を**自前ログイン**で取り、勤怠 Worker の
  * `POST /api/dtako/autoload` (Refs #205 の 58/61/63/65、変更しない) へそのまま
  * push する (Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67。複数件対応は
  * Refs #633-24a)。
@@ -949,7 +907,7 @@ export function handleScrapeErrorObject(request: Request, env: RelayWorkerEnv): 
  * `/kintai-relay/operation-zip` (read-only) と違い**取り込みを伴う書き込み経路**
  * なので、別の口にする。
  *
- * **同期で返す。** entries (zip 内ファイル名) とオンプレの応答をその場で見られる
+ * **同期で返す。** entries (zip 内ファイル名) と取り込み先の応答をその場で見られる
  * ようにする — `/kintai-relay/scrape` (202 非同期) とは違う型。
  *
  * 認証・tenant フォールバックは `/kintai-relay/operation-zip` と同じ
@@ -1000,7 +958,7 @@ export async function handleDtakoReimport(request: Request, env: RelayWorkerEnv)
  * `start_ope`/`items` の検証は DO 側の `/cron/dtako/alc-upload`
  * (`parseDtakoAlcUploadRequest`) に委ねる。`unko_no` は不要 — `/api/upload` は
  * zip 内の KUDGURI.csv から読むため URL に載せる必要が無い
- * (`/kintai-relay/dtako-reimport` = オンプレ autoload 向けとの違い)。
+ * (`/kintai-relay/dtako-reimport` = 勤怠 Worker の autoload 向けとの違い)。
  *
  * **同期で返す。** entries (zip 内ファイル名) と alc の応答 (upload_id/split の
  * 未確定注記) をその場で見られるようにする — `/kintai-relay/dtako-reimport` と
@@ -1219,7 +1177,7 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
 /**
  * `POST /kintai-relay/restraint-resummarize` — theearth の拘束サマリを、R2 に保存済みの
  * 生 CSV から指定した年月ぶん作り直す (theearth には触らない。Refs ohishi-exp/rust-ichibanboshi#322)。
- * 書き先は R2 の summary・D1・拘束サマリの写しの push 先 (オンプレ版と勤怠 Worker)。
+ * 書き先は R2 の summary・D1・拘束サマリの写しの push 先 (勤怠 Worker)。
  *
  * body は `{month, comp_id?}`。**`month` は必須。** `comp_id` 省略時は `KINTAI_COMP_ID`。
  * `month` の形式チェック (YYYY-MM) は DO 側 (`handleArchiveResummarize` の

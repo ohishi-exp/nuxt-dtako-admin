@@ -27,9 +27,9 @@ import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
  * 別会社 (75700192) は認可を**通る**。その上で、取得先が会社を受け取らない口
  * (`KINTAI_SINGLE_COMP_PATHS`) と wage-report の打刻系だけを止めることを測る:
  *
- * - (a) 集合の 16 口 — 不一致・未設定・空は 403、上流 (ichiban / auth-worker) と R2 を 1 回も呼ばない
- * - (b) 一致なら 403 にならず上流まで届く (代表 2 口)
- * - (c) 集合外 (`/kintai/alc-upload` / `/wage-snapshot`) は不一致でも 403 にならない (陰性対照)
+ * - (a) 集合の 18 口 — 不一致・未設定・空は 403、上流 (勤怠 Worker / auth-worker / 素の fetch) と R2 を 1 回も呼ばない
+ * - (b) 一致なら 403 にならず勤怠 Worker まで届く (代表 2 口)。auth-worker と素の fetch は 0 回
+ * - (c) 集合外 (`/kintai/alc-upload`、勤怠を呼ばない) は不一致でも 403 にならない (陰性対照)
  * - (d) wage-report — `source=gcp` は 403、既定は 200 のまま打刻の live-build だけを止める
  */
 const OWN_COMP = "27324455";
@@ -61,6 +61,9 @@ const SINGLE_COMP_ROUTES: Array<[method: "GET" | "POST", path: string]> = [
   ["GET", "/restraint-api/kintai/day-operations"],
   ["GET", "/restraint-api/kintai/archive"],
   ["GET", "/restraint-api/kintai/diff-cache"],
+  // 勤怠 Worker にしか送らない (Refs ohishi-exp/rust-ichibanboshi#322)
+  ["POST", "/restraint-api/wage-snapshot"],
+  ["GET", "/restraint-api/wage-range"],
 ];
 
 /** R2 の全メソッドの呼び出しを数える (どのキーも未投入)。 */
@@ -89,15 +92,17 @@ interface Setup {
 
 function makeDO(opts: Setup = {}) {
   const { r2, calls: r2Calls } = countingR2();
-  /** auth-worker のうち introspect 以外 (= `/ichibanboshi-proxy` 等の上流)。 */
+  /** auth-worker のうち introspect 以外。勤怠では 1 本も呼ばれないはず。 */
   const authWorkerUpstream: string[] = [];
-  /** global fetch (= ichiban へ直、オンプレ系)。 */
+  /** global fetch (= 旧オンプレ版の経路)。1 本も呼ばれないはず。 */
+  const fetchCalls: string[] = [];
+  /** 勤怠 Worker の binding (`KINTAI`)。 */
   const ichibanCalls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      ichibanCalls.push(url);
+      fetchCalls.push(url);
       return new Response("nope", { status: 502 });
     }),
   );
@@ -105,9 +110,13 @@ function makeDO(opts: Setup = {}) {
     DTAKO_R2: r2,
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
     INTERNAL_SHARED_SECRET: "shared-secret",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
+    KINTAI_WRITE_TOKEN: "write-token",
+    KINTAI: {
+      fetch: vi.fn(async (url: string) => {
+        ichibanCalls.push(url);
+        return new Response("nope", { status: 502 });
+      }),
+    },
     ...("kintaiCompId" in opts ? { KINTAI_COMP_ID: opts.kintaiCompId } : { KINTAI_COMP_ID: OWN_COMP }),
     AUTH_WORKER: {
       fetch: vi.fn(async (input: RequestInfo | URL) => {
@@ -144,7 +153,7 @@ function makeDO(opts: Setup = {}) {
         ...(method === "POST" ? { body: "{}" } : {}),
       }) as never,
     );
-  return { call, r2Calls, authWorkerUpstream, ichibanCalls };
+  return { call, r2Calls, authWorkerUpstream, ichibanCalls, fetchCalls };
 }
 
 afterEach(() => {
@@ -159,36 +168,36 @@ describe("KINTAI_SINGLE_COMP_PATHS (Refs #1133 c1133-8)", () => {
   ];
   describe.each(cases)("★ (a) %s", (_label, setup, compId) => {
     it.each(SINGLE_COMP_ROUTES)("%s %s は 403、上流と R2 を 1 回も呼ばない", async (method, path) => {
-      const { call, r2Calls, authWorkerUpstream, ichibanCalls } = makeDO(setup);
+      const { call, r2Calls, authWorkerUpstream, ichibanCalls, fetchCalls } = makeDO(setup);
       const res = await call(method, `${path}?month=2026-06`, compId);
       expect(res.status).toBe(403);
       // KINTAI_COMP_ID の値や fold 向けの文言 (judgeFoldScope の detail) は返さない
       expect(await res.json()).toEqual({ error: FORBIDDEN });
       expect(authWorkerUpstream).toEqual([]);
       expect(ichibanCalls).toEqual([]);
+      expect(fetchCalls).toEqual([]);
       expect(r2Calls).toEqual([]);
     });
   });
 
-  // stale-months は勤怠 Worker にしか送らない (binding の無いこの makeDO では 503) ので、auth-worker まで届く口で測る
-  it("(b) 一致なら /kintai/unko-gaps は GCP (auth-worker 経由) まで届く", async () => {
-    const { call, authWorkerUpstream } = makeDO();
+  it("(b) 一致なら /kintai/unko-gaps は勤怠 Worker まで届く (auth-worker・素の fetch は 0 回)", async () => {
+    const { call, authWorkerUpstream, ichibanCalls, fetchCalls } = makeDO();
     const res = await call("GET", "/restraint-api/kintai/unko-gaps?month=2026-06", OWN_COMP);
     expect(res.status).not.toBe(403);
-    expect(authWorkerUpstream.some((u) => u.includes("/ichibanboshi-proxy/"))).toBe(true);
+    expect(ichibanCalls.some((u) => u.includes("/api/kintai/unko-gaps"))).toBe(true);
+    expect(authWorkerUpstream).toEqual([]);
+    expect(fetchCalls).toEqual([]);
   });
 
-  it("(b) 一致なら /kintai/kosoku-daily はオンプレ (ichiban) まで届く", async () => {
-    const { call, ichibanCalls } = makeDO();
+  it("(b) 一致なら /kintai/kosoku-daily は勤怠 Worker まで届く (素の fetch は 0 回)", async () => {
+    const { call, ichibanCalls, fetchCalls } = makeDO();
     const res = await call("GET", "/restraint-api/kintai/kosoku-daily?month=2026-06", OWN_COMP);
     expect(res.status).not.toBe(403);
     expect(ichibanCalls.some((u) => u.includes("/api/kintai/kosoku-daily"))).toBe(true);
+    expect(fetchCalls).toEqual([]);
   });
 
-  it.each([
-    ["POST", "/restraint-api/kintai/alc-upload"],
-    ["POST", "/restraint-api/wage-snapshot"],
-  ])("★ (c) 集合外の %s %s は不一致でも止めない (陰性対照)", async (method, path) => {
+  it.each([["POST", "/restraint-api/kintai/alc-upload"]])("★ (c) 集合外の %s %s は不一致でも止めない (陰性対照)", async (method, path) => {
     const { call } = makeDO();
     const res = await call(method, path, OTHER_COMP_SAME_TENANT);
     expect(res.status).not.toBe(403);
@@ -197,7 +206,7 @@ describe("KINTAI_SINGLE_COMP_PATHS (Refs #1133 c1133-8)", () => {
 });
 
 describe("GET /restraint-api/wage-report の打刻系 (Refs #1133 c1133-8)", () => {
-  /** `buildKintaiSummariesLive` が叩く打刻の口 (オンプレ)。 */
+  /** `buildKintaiSummariesLive` が叩く打刻の口 (勤怠 Worker)。 */
   const liveBuildCalls = (ichibanCalls: string[]) =>
     ichibanCalls.filter((u) => u.includes("/api/kintai/daily") || u.includes("/api/kintai/kosoku-daily"));
   const NOT_CONFIGURED_WARNING = "KINTAI_COMP_ID が未設定のため打刻の行を組んでいません";
@@ -217,7 +226,7 @@ describe("GET /restraint-api/wage-report の打刻系 (Refs #1133 c1133-8)", () 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { warnings: string[]; timecard_kosoku: unknown };
     expect(liveBuildCalls(ichibanCalls)).toEqual([]);
-    // theearth 側 (wage-source、会社ごとに絞れている) は従来どおり取りに行く
+    // theearth 側 (wage-source、会社ごとに絞れている) は従来どおり勤怠 Worker の D1 へ取りに行く
     expect(ichibanCalls.some((u) => u.includes(`/api/restraint/wage-source?comp=${OTHER_COMP_SAME_TENANT}`))).toBe(
       true,
     );

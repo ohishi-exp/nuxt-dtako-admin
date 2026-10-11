@@ -6,10 +6,10 @@ vi.mock("cloudflare:workers", () => ({ DurableObject: class {} }));
 import worker, { type RelayWorkerEnv } from "../src/index";
 
 /**
- * `/kintai-relay/*` の機械経路 (run・recalc・GCP 読み 3 口) のオンプレ側の読み先 (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * `/kintai-relay/*` の機械経路 (run・recalc・勤怠の読み 3 口) の送り先 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
- * - 勤怠 Worker の binding があれば、オンプレを読むための CF Access が未設定でも止めない (`kintaiReader`)
- * - binding も CF Access も無ければ今と同じ 503
+ * - 勤怠 Worker の binding だけへ送る。素の fetch (旧オンプレ版) と auth-worker は呼ばない
+ * - binding が無ければ 503
  * - 呼び手の `X-Alc-Proxy-Secret` の照合と `INTERNAL_SHARED_SECRET` の必須は binding があっても残る
  */
 const SECRET = "internal-shared-secret";
@@ -17,7 +17,6 @@ const COMP_ID = "27324455";
 
 interface Setup {
   kintaiBinding?: boolean;
-  cfAccess?: boolean;
   sharedSecret?: boolean;
   /** `KINTAI_WRITE_TOKEN` の binding (既定は本番の形の文字列)。 */
   writeToken?: unknown;
@@ -28,23 +27,17 @@ interface Setup {
 function fakeEnv(opts: Setup = {}) {
   const authWorker: string[] = [];
   const kintai: { url: string; method: string; headers: Record<string, string> }[] = [];
-  const onprem: string[] = [];
+  /** 素の fetch (旧オンプレ版の経路)。勤怠では 1 回も呼ばない。 */
+  const bare: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
-      onprem.push(String(input));
+      bare.push(String(input));
       return Response.json({ drivers: [], events: [] });
     }),
   );
   const env = {
     ...(opts.sharedSecret === false ? {} : { INTERNAL_SHARED_SECRET: SECRET }),
-    ...(opts.cfAccess === false
-      ? {}
-      : {
-          ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-          NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-          NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
-        }),
     ...(opts.kintaiBinding === false
       ? {}
       : {
@@ -73,7 +66,7 @@ function fakeEnv(opts: Setup = {}) {
           },
         }),
   } as unknown as RelayWorkerEnv;
-  return { env, authWorker, kintai, onprem };
+  return { env, authWorker, kintai, bare };
 }
 
 const post = (path: string, body: unknown, secret = SECRET) =>
@@ -101,25 +94,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("/kintai-relay/* のオンプレ側の読み先 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
-  it.each(ROUTES)("%s: binding があれば CF Access が未設定でも 200", async (_label, request) => {
-    const { env, onprem } = fakeEnv({ cfAccess: false });
+describe("/kintai-relay/* の送り先は勤怠 Worker だけ (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  it.each(ROUTES)("%s: binding があれば 200 で、素の fetch も auth-worker も呼ばない", async (_label, request) => {
+    const { env, bare, authWorker } = fakeEnv();
     const res = await worker.fetch(request(), env);
     expect(res.status).toBe(200);
-    expect(onprem).toEqual([]);
+    expect(bare).toEqual([]);
+    expect(authWorker).toEqual([]);
   });
 
-  it.each(ROUTES)("%s: binding も CF Access も無ければ今と同じ 503", async (_label, request) => {
-    const { env, authWorker, onprem } = fakeEnv({ kintaiBinding: false, cfAccess: false });
+  it.each(ROUTES)("%s: binding が無ければ 503", async (_label, request) => {
+    const { env, authWorker, bare } = fakeEnv({ kintaiBinding: false });
     const res = await worker.fetch(request(), env);
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toBe("kintai-relay not configured");
     expect(authWorker).toEqual([]);
-    expect(onprem).toEqual([]);
+    expect(bare).toEqual([]);
   });
 
   it.each(ROUTES)("%s: binding があっても X-Alc-Proxy-Secret が違えば 401", async (_label, request) => {
-    const { env, authWorker, kintai } = fakeEnv({ cfAccess: false });
+    const { env, authWorker, kintai } = fakeEnv();
     const res = await worker.fetch(request("wrong"), env);
     expect(res.status).toBe(401);
     expect(authWorker).toEqual([]);
@@ -127,17 +121,17 @@ describe("/kintai-relay/* のオンプレ側の読み先 (Refs ohishi-exp/rust-i
   });
 
   it.each(ROUTES)("%s: binding があっても INTERNAL_SHARED_SECRET が無ければ 503", async (_label, request) => {
-    const { env, kintai } = fakeEnv({ cfAccess: false, sharedSecret: false });
+    const { env, kintai } = fakeEnv({ sharedSecret: false });
     const res = await worker.fetch(request(""), env);
     expect(res.status).toBe(503);
     expect(kintai).toEqual([]);
   });
 
-  it("run の打刻 (timecard/events) は本番の設定で Worker に飛び、CF Access・secret を付けない (window は token だけ)", async () => {
-    const { env, kintai, onprem, authWorker } = fakeEnv();
+  it("run の打刻 (timecard/events) は本番の設定で Worker に飛び、secret を付けない (window は token だけ)", async () => {
+    const { env, kintai, bare, authWorker } = fakeEnv();
     const res = await worker.fetch(ROUTES[0]![1](), env);
     expect(res.status).toBe(200);
-    expect(onprem).toEqual([]);
+    expect(bare).toEqual([]);
     expect(authWorker).toEqual([]);
     expect(kintai.map((c) => c.url)).toEqual([
       "https://ichibanboshi-kintai/api/kintai/timecard/events?months=2026-06",
@@ -145,15 +139,6 @@ describe("/kintai-relay/* のオンプレ側の読み先 (Refs ohishi-exp/rust-i
     ]);
     expect(kintai[0]!.headers).toEqual({ accept: "application/json" });
     expect(kintai[1]!.headers).toEqual({ "content-type": "application/json", "x-kintai-write-token": "write-token" });
-  });
-
-  it("binding が無ければ run の打刻は今のまま CF Access 付きでオンプレを読み、window はどこにも送らず 503", async () => {
-    const { env, kintai, onprem, authWorker } = fakeEnv({ kintaiBinding: false });
-    const res = await worker.fetch(ROUTES[0]![1](), env);
-    expect(res.status).toBe(503);
-    expect(kintai).toEqual([]);
-    expect(authWorker).toEqual([]);
-    expect(onprem).toEqual(["https://ichiban.invalid/api/kintai/timecard/events?months=2026-06"]);
   });
 });
 
@@ -190,7 +175,7 @@ describe("/kintai-relay/run・/kintai-relay/recalc は勤怠 Worker だけ (Refs
     for (const req of [recalc(false), recalc(true), run()]) {
       const res = await worker.fetch(req, env);
       expect(res.status).toBe(503);
-      expect(((await res.json()) as { error: string }).error).toContain("勤怠 Worker の binding が無いか");
+      expect(((await res.json()) as { error: string }).error).toBe("kintai-relay not configured");
     }
     expect(authWorker).toEqual([]);
   });

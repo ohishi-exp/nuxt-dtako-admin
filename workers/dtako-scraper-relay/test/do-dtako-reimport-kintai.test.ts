@@ -41,14 +41,14 @@ import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
 /**
  * `POST /cron/dtako/reimport` (`run_dtako_reimport`) の ② 取り込みの送り先 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
- * 振り分け (`kintaiAutoloader`) と 502 の扱い (`runDtakoReimport`) は 100% gate に載る pure ロジックだが、
- * DO が単体・バッチの両方でそれを使うか、CF Access の 503 判定を Worker 経路の前に置いていないかは
- * gate では捕まらない。ここで測るのは:
+ * 送り先 (`kintaiAutoloader`) と 502 の扱い (`runDtakoReimport`) は 100% gate に載る pure ロジックだが、
+ * DO が単体・バッチの両方でそれを使うか、会社の判定を取り込みの前に置いているかは gate では捕まらない。
+ * ここで測るのは:
  *
  * - (a) 本番設定 (KINTAI・comp = KINTAI_COMP_ID・token あり) → 単体・バッチとも Worker へ token 付きで送り、
- *       オンプレを 0 回呼ぶ。CF Access が未設定でも通る
- * - (b) binding 無し・別会社・token が読めない → オンプレ版 (CF Access 付き)
- * - (c) binding あり・token が読めない・CF Access 無し → 503 と console.error
+ *       素の fetch (旧オンプレ版の宛先) を 0 回呼ぶ
+ * - (b) 別会社 → 403 (zip も取らず autoload を 0 回)。binding 無し → 503
+ * - (c) token が無い・読めない → 503 と console.error
  * - (d) Worker の 502 → uncertain
  *
  * comp・tenant・URL は架空 (この repo は public)。
@@ -64,12 +64,6 @@ const ACCOUNTS = [
   { comp_id: OWN_COMP, user_name: "u1", user_pass: "p", tenant_id: "tenant-a" },
   { comp_id: OTHER_COMP, user_name: "u2", user_pass: "p", tenant_id: "tenant-b" },
 ];
-
-const CF_ACCESS = {
-  NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
-  ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-};
 
 /** `PK\x03\x04` + ファイル名だけの最小 ZIP (dtako-reimport.test.ts と同じ)。 */
 function minimalZip(name = "KUDGIVT.csv"): ArrayBuffer {
@@ -87,8 +81,6 @@ interface Setup {
   kintai?: boolean;
   /** `KINTAI_WRITE_TOKEN` の binding (既定 = Secrets Store 形で WRITE_TOKEN)。 */
   writeToken?: unknown;
-  /** オンプレ版の CF Access を置くか (既定 true)。 */
-  cfAccess?: boolean;
   /** 勤怠 Worker の応答 (既定 AUTOLOADED)。 */
   kintaiResponse?: () => Response;
 }
@@ -100,9 +92,9 @@ afterEach(() => {
 function makeDO(opts: Setup = {}) {
   downloadOperationCsvZip.mockReset().mockImplementation(async () => minimalZip());
   const kintaiCalls: { url: string; headers: Record<string, string>; body: unknown }[] = [];
-  const onpremCalls: { url: string; headers: Record<string, string> }[] = [];
+  const globalFetchCalls: { url: string; headers: Record<string, string> }[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-    onpremCalls.push({ url: String(input), headers: init?.headers as Record<string, string> });
+    globalFetchCalls.push({ url: String(input), headers: init?.headers as Record<string, string> });
     return Response.json(AUTOLOADED);
   });
   const env = {
@@ -119,7 +111,6 @@ function makeDO(opts: Setup = {}) {
     KINTAI_WRITE_TOKEN: "writeToken" in opts ? opts.writeToken : { get: async () => WRITE_TOKEN },
     KINTAI_COMP_ID: OWN_COMP,
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
-    ...(opts.cfAccess === false ? {} : CF_ACCESS),
   };
   const ctx = {
     setWebSocketAutoResponse: () => {},
@@ -134,63 +125,70 @@ function makeDO(opts: Setup = {}) {
         body: JSON.stringify(body),
       }) as never,
     );
-  return { post, kintaiCalls, onpremCalls };
+  return { post, kintaiCalls, globalFetchCalls };
 }
 
 const AUTOLOAD_URL = `https://ichibanboshi-kintai/api/dtako/autoload?unko_no=${UNKO_NO}&reset_timecard=false`;
 
 describe("POST /cron/dtako/reimport の ② の送り先 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
-  it("(a) 単体: 本番設定なら勤怠 Worker へ token 付きで送り、オンプレは 0 回。CF Access 未設定でも通る", async () => {
-    const { post, kintaiCalls, onpremCalls } = makeDO({ cfAccess: false });
+  it("(a) 単体: 本番設定なら勤怠 Worker へ token 付きで送り、素の fetch は 0 回", async () => {
+    const { post, kintaiCalls, globalFetchCalls } = makeDO();
     const res = await post({ comp_id: OWN_COMP, ...ITEM });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ unko_no: UNKO_NO, http_status: 200, autoload: AUTOLOADED });
-    expect(onpremCalls).toEqual([]);
+    expect(globalFetchCalls).toEqual([]);
     expect(kintaiCalls).toHaveLength(1);
     expect(kintaiCalls[0]!.url).toBe(AUTOLOAD_URL);
     expect(kintaiCalls[0]!.headers).toEqual({ "content-type": "application/zip", "X-Kintai-Write-Token": WRITE_TOKEN });
     expect(kintaiCalls[0]!.body).toBeInstanceOf(ArrayBuffer);
   });
 
-  it("(a) バッチ: 全件を勤怠 Worker へ送り、オンプレは 0 回。CF Access 未設定でも通る", async () => {
-    const { post, kintaiCalls, onpremCalls } = makeDO({ cfAccess: false });
+  it("(a) バッチ: 全件を勤怠 Worker へ送り、素の fetch は 0 回", async () => {
+    const { post, kintaiCalls, globalFetchCalls } = makeDO();
     const second = { ...ITEM, unko_no: `${ITEM.ope_no}2` };
     const res = await post({ comp_id: OWN_COMP, items: [ITEM, second] });
     expect(res.status).toBe(200);
-    expect(onpremCalls).toEqual([]);
+    expect(globalFetchCalls).toEqual([]);
     expect(kintaiCalls.map((c) => c.url)).toEqual([AUTOLOAD_URL, AUTOLOAD_URL.replace(UNKO_NO, second.unko_no)]);
     expect(kintaiCalls.every((c) => c.headers["X-Kintai-Write-Token"] === WRITE_TOKEN)).toBe(true);
   });
 
-  it.each([
-    ["KINTAI が無い", { kintai: false }, OWN_COMP, false],
-    ["別の会社", {}, OTHER_COMP, false],
-    ["token が読めない", { writeToken: { get: async () => Promise.reject(new Error("store down")) } }, OWN_COMP, true],
-  ] as const)("(b) %s ときはオンプレ版へ CF Access 付きで送る", async (_label, setup, compId, logsSecretError) => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { post, kintaiCalls, onpremCalls } = makeDO(setup);
-    const res = await post({ comp_id: compId, ...ITEM });
-    expect(res.status).toBe(200);
+  it("★ (b) 別の会社は 403 で、zip も取らず autoload を 0 回呼ぶ (バッチも同じ)", async () => {
+    const { post, kintaiCalls, globalFetchCalls } = makeDO();
+    for (const body of [{ comp_id: OTHER_COMP, ...ITEM }, { comp_id: OTHER_COMP, items: [ITEM] }]) {
+      const res = await post(body);
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toContain("この会社では使えません");
+    }
+    expect(downloadOperationCsvZip).not.toHaveBeenCalled();
     expect(kintaiCalls).toEqual([]);
-    expect(onpremCalls).toEqual([
-      {
-        url: `https://ichiban.invalid/api/dtako/autoload?unko_no=${UNKO_NO}&reset_timecard=false`,
-        headers: { "content-type": "application/zip", "CF-Access-Client-Id": "cid", "CF-Access-Client-Secret": "csecret" },
-      },
-    ]);
-    const secretErrors = errors.mock.calls.filter(([line]) => String(line).includes('"dtako_reimport":"secret-error"'));
-    expect(secretErrors.length > 0).toBe(logsSecretError);
+    expect(globalFetchCalls).toEqual([]);
   });
 
-  it("(c) binding あり・token が読めない・CF Access 無しなら 503。token が読めないことを console.error に出す", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { post, kintaiCalls, onpremCalls } = makeDO({ writeToken: undefined, cfAccess: false });
+  it("★ (b) KINTAI が無ければ 503 で、zip も取らない", async () => {
+    const { post, globalFetchCalls } = makeDO({ kintai: false });
     const res = await post({ comp_id: OWN_COMP, ...ITEM });
     expect(res.status).toBe(503);
-    expect(kintaiCalls).toEqual([]);
-    expect(onpremCalls).toEqual([]);
+    expect(await res.json()).toEqual({ error: "勤怠 Worker (KINTAI) の書き込み (KINTAI_WRITE_TOKEN) が使えません" });
     expect(downloadOperationCsvZip).not.toHaveBeenCalled();
-    expect(errors.mock.calls.some(([line]) => String(line).includes("KINTAI_WRITE_TOKEN が読めない"))).toBe(true);
+    expect(globalFetchCalls).toEqual([]);
+  });
+
+  it.each([
+    ["token の binding が無い", undefined, false],
+    ["token が読めない (get が throw)", { get: async () => Promise.reject(new Error("store down")) }, true],
+  ] as const)("★ (c) %s なら 503。token が読めないことを console.error に出す", async (_label, writeToken, logsSecretError) => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { post, kintaiCalls, globalFetchCalls } = makeDO({ writeToken });
+    const res = await post({ comp_id: OWN_COMP, ...ITEM });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "勤怠 Worker (KINTAI) の書き込み (KINTAI_WRITE_TOKEN) が使えません" });
+    expect(kintaiCalls).toEqual([]);
+    expect(globalFetchCalls).toEqual([]);
+    expect(downloadOperationCsvZip).not.toHaveBeenCalled();
+    expect(errors.mock.calls.some(([line]) => String(line).includes("KINTAI_WRITE_TOKEN が読めません"))).toBe(true);
+    const secretErrors = errors.mock.calls.filter(([line]) => String(line).includes("store down"));
+    expect(secretErrors.length > 0).toBe(logsSecretError);
   });
 
   it("(d) 勤怠 Worker の 502 は uncertain (取り込み済みかもしれないので再実行させない)", async () => {

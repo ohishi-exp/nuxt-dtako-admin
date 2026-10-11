@@ -24,10 +24,11 @@ import type { WageSourceMonthWire } from "../src/restraint-wage-source";
 /**
  * 拘束サマリの読み 2 本 (`synced-months`・`wage-source`) の読み先 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
- * - 本番設定 (`KINTAI` binding + 会社が `KINTAI_COMP_ID`) では勤怠 Worker を読み、オンプレ (`apiUrl`) を呼ばない
- * - Worker への要求には CF Access のヘッダー・secret を付けない。CF Access が未設定でも Worker から読める
- * - binding が無い・会社が違う・`KINTAI_COMP_ID` が無いときはオンプレ版 (CF Access 付き) のまま
- * - 応答の扱いは読み先によらず同じ (wage-source の `synced_at = null` は R2 へ落ちる)
+ * - `KINTAI` binding があれば勤怠 Worker の D1 を読み、素の `fetch` (旧オンプレ版の宛先) は呼ばない
+ * - 拘束サマリは `comp` を鍵に持つので、会社が `KINTAI_COMP_ID` と違っても・未設定でも Worker を読む
+ * - Worker への要求にはヘッダー・secret を付けない
+ * - binding が無ければ読まない (synced-months は空、wage-source は全部 R2)
+ * - wage-source の `synced_at = null` の月は R2 へ落ちる
  */
 const COMP = "27324455";
 const OTHER_COMP = "75700192";
@@ -74,9 +75,7 @@ interface Setup {
   kintaiBinding?: boolean;
   /** `KINTAI_COMP_ID` (既定 COMP)。 */
   kintaiCompId?: string | undefined;
-  /** オンプレ版の CF Access の設定を置くか (既定 true)。 */
-  cfAccess?: boolean;
-  /** 両方の読み先が返す応答 (path で振り分け)。 */
+  /** 読み先が返す応答 (path で振り分け)。 */
   reply?: (url: string) => Response;
 }
 
@@ -86,25 +85,18 @@ const defaultReply = (url: string) =>
     : Response.json(wageSource(month("s", "9901"), month("s", "9902")));
 
 function makeDO(opts: Setup = {}) {
-  const onpremCalls: Call[] = [];
+  const globalFetchCalls: Call[] = [];
   const kintaiCalls: Call[] = [];
   const reply = opts.reply ?? defaultReply;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      onpremCalls.push({ url, init });
+      globalFetchCalls.push({ url, init });
       return reply(url);
     }),
   );
   const env = {
-    ...(opts.cfAccess === false
-      ? {}
-      : {
-          ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-          NUXT_ICHIBAN_API_URL: "https://ichiban.invalid/",
-          NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
-        }),
     ...(opts.kintaiBinding === false
       ? {}
       : {
@@ -141,7 +133,7 @@ function makeDO(opts: Setup = {}) {
   // skipTimecard = true (打刻の live-build は呼ばない。この PR の対象は theearth 側の読みだけ)
   const wage = (compId = COMP) =>
     priv.loadWageReportSource({}, compId, YM, PREV_YM, null, undefined, undefined, false, true);
-  return { syncedMonths, wage, onpremCalls, kintaiCalls, r2Months };
+  return { syncedMonths, wage, globalFetchCalls, kintaiCalls, r2Months };
 }
 
 afterEach(() => {
@@ -152,27 +144,27 @@ afterEach(() => {
 const EXPECTED_SYNCED = { theearth: ["2026-06", "2026-05"], timecard: ["2026-06"] };
 
 describe("拘束サマリの読み先 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
-  it("★ 本番設定では synced-months を勤怠 Worker から読み、オンプレを呼ばない。CF Access のヘッダーを付けない", async () => {
+  it("★ 本番設定では synced-months を勤怠 Worker から読み、素の fetch を呼ばない。ヘッダーを付けない", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const { syncedMonths, onpremCalls, kintaiCalls } = makeDO();
+    const { syncedMonths, globalFetchCalls, kintaiCalls } = makeDO();
     expect(await syncedMonths()).toEqual(EXPECTED_SYNCED);
-    expect(onpremCalls).toHaveLength(0);
+    expect(globalFetchCalls).toHaveLength(0);
     expect(kintaiCalls).toHaveLength(1);
     const url = new URL(kintaiCalls[0]!.url);
     expect(url.pathname).toBe("/api/restraint/synced-months");
     expect(url.searchParams.get("comp")).toBe(COMP);
-    // ヘッダーそのものを渡さない (CF Access も secret も載らない)
+    // ヘッダーそのものを渡さない (secret も載らない)
     expect(kintaiCalls[0]!.init).toBeUndefined();
   });
 
-  it("★ 本番設定では wage-source を勤怠 Worker から読み、オンプレを呼ばない。CF Access のヘッダーを付けない", async () => {
+  it("★ 本番設定では wage-source を勤怠 Worker から読み、素の fetch を呼ばない。ヘッダーを付けない", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const { wage, onpremCalls, kintaiCalls, r2Months } = makeDO();
+    const { wage, globalFetchCalls, kintaiCalls, r2Months } = makeDO();
     const got = await wage();
     expect(got.current.summaries.map((s) => s.data.driverCd)).toEqual(["9901"]);
     expect(got.prev.summaries.map((s) => s.data.driverCd)).toEqual(["9902"]);
     expect(r2Months).toEqual([]);
-    expect(onpremCalls).toHaveLength(0);
+    expect(globalFetchCalls).toHaveLength(0);
     expect(kintaiCalls).toHaveLength(1);
     const url = new URL(kintaiCalls[0]!.url);
     expect(url.pathname).toBe("/api/restraint/wage-source");
@@ -181,45 +173,30 @@ describe("拘束サマリの読み先 (Refs ohishi-exp/rust-ichibanboshi#322)", 
     expect(kintaiCalls[0]!.init).toBeUndefined();
   });
 
-  it("★ binding はあるが CF Access が未設定でも、2 本とも勤怠 Worker から読める", async () => {
+  it.each([
+    ["読む会社が KINTAI_COMP_ID と違う", {}, OTHER_COMP],
+    ["KINTAI_COMP_ID が未設定", { kintaiCompId: undefined }, COMP],
+  ] as const)("★ %s ときも 2 本とも勤怠 Worker から読む (拘束サマリは会社で絞らない)", async (_label, over, compId) => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const { syncedMonths, wage, onpremCalls, kintaiCalls, r2Months } = makeDO({ cfAccess: false });
-    expect(await syncedMonths()).toEqual(EXPECTED_SYNCED);
-    const got = await wage();
+    const { syncedMonths, wage, globalFetchCalls, kintaiCalls, r2Months } = makeDO(over);
+    expect(await syncedMonths(compId)).toEqual(EXPECTED_SYNCED);
+    const got = await wage(compId);
     expect(got.current.summaries.map((s) => s.data.driverCd)).toEqual(["9901"]);
     expect(r2Months).toEqual([]);
-    expect(onpremCalls).toHaveLength(0);
+    expect(globalFetchCalls).toHaveLength(0);
     expect(kintaiCalls.map((c) => new URL(c.url).pathname)).toEqual([
       "/api/restraint/synced-months",
       "/api/restraint/wage-source",
     ]);
+    expect(kintaiCalls.map((c) => new URL(c.url).searchParams.get("comp"))).toEqual([compId, compId]);
   });
 
-  it.each([
-    ["KINTAI が無い (staging・preview)", { kintaiBinding: false }, COMP],
-    ["読む会社が KINTAI_COMP_ID と違う", {}, OTHER_COMP],
-    ["KINTAI_COMP_ID が未設定", { kintaiCompId: undefined }, COMP],
-  ] as const)("%s ときは 2 本ともオンプレ版 (CF Access 付き) のまま", async (_label, over, compId) => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    const { syncedMonths, wage, onpremCalls, kintaiCalls } = makeDO(over);
-    expect(await syncedMonths(compId)).toEqual(EXPECTED_SYNCED);
-    await wage(compId);
-    expect(kintaiCalls).toHaveLength(0);
-    expect(onpremCalls.map((c) => c.url)).toEqual([
-      `https://ichiban.invalid/api/restraint/synced-months?comp=${compId}`,
-      `https://ichiban.invalid/api/restraint/wage-source?comp=${compId}&month=${YM}`,
-    ]);
-    for (const c of onpremCalls) {
-      expect(c.init?.headers).toEqual({ "CF-Access-Client-Id": "cid", "CF-Access-Client-Secret": "csecret" });
-    }
-  });
-
-  it("binding が無く CF Access も未設定なら今までどおり読まない (synced-months は空、wage-source は全部 R2)", async () => {
+  it("★ binding が無い (staging・preview) なら読まない (synced-months は空、wage-source は全部 R2)", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { syncedMonths, wage, onpremCalls, r2Months } = makeDO({ kintaiBinding: false, cfAccess: false });
+    const { syncedMonths, wage, globalFetchCalls, r2Months } = makeDO({ kintaiBinding: false });
     expect(await syncedMonths()).toEqual({ theearth: [], timecard: [] });
     await wage();
-    expect(onpremCalls).toHaveLength(0);
+    expect(globalFetchCalls).toHaveLength(0);
     expect(r2Months.sort()).toEqual([PREV_YM, YM]);
     const lines = log.mock.calls.map((c) => String(c[0]));
     expect(lines.some((l) => l.includes('"restraint_synced_months":"skipped-not-configured"'))).toBe(true);
@@ -241,12 +218,12 @@ describe("拘束サマリの読み先 (Refs ohishi-exp/rust-ichibanboshi#322)", 
   it("Worker が失敗を返すと今までどおり (synced-months は空、wage-source は全部 R2)", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { syncedMonths, wage, onpremCalls, r2Months } = makeDO({
+    const { syncedMonths, wage, globalFetchCalls, r2Months } = makeDO({
       reply: () => new Response("拘束サマリの D1 の読み書きに失敗しました: batch", { status: 502 }),
     });
     expect(await syncedMonths()).toEqual({ theearth: [], timecard: [] });
     await wage();
-    expect(onpremCalls).toHaveLength(0);
+    expect(globalFetchCalls).toHaveLength(0);
     expect(r2Months.sort()).toEqual([PREV_YM, YM]);
     const lines = error.mock.calls.map((c) => String(c[0]));
     expect(lines.some((l) => l.includes('"restraint_synced_months":"upstream-error"'))).toBe(true);
