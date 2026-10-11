@@ -478,38 +478,13 @@ function describeError(err: unknown): string {
 }
 
 /**
- * rust-ichibanboshi (社内 LAN の橋) を叩いて JSON を返す。
+ * 勤怠 Worker (`KINTAI` binding) を叩いて勤怠の読み (`/api/kintai/*`) の JSON を返す。
  *
- * **握り潰さない** — 未設定・接続不能・非 2xx・非 JSON をそれぞれ原因の分かる
- * メッセージにして throw する。Secrets Store binding は「宣言はあるが解決できない」
- * 時に `get()` が throw する (ローカル dev や entry の消失・改名) ので、未設定と
- * 同じ扱いに倒す — relay の `handleKintaiFetch` と同じ判断。
+ * **握り潰さない** — binding 未設定・接続不能・非 2xx・非 JSON をそれぞれ原因の分かる
+ * メッセージにして throw する。
  */
-async function fetchIchibanJson(env: Env, pathWithQuery: string, tag: string): Promise<unknown> {
-  // 勤怠 Worker の binding があればそちら (CF Access も secret も要らない)。無ければオンプレ版。
-  // オンプレ版への経路はオンプレ版の撤去の段で消す (Refs ohishi-exp/rust-ichibanboshi#322)
-  if (env.KINTAI) return fetchIchibanWorkerJson(env.KINTAI, KINTAI_WORKER, pathWithQuery);
-  const apiUrl = (env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
-  const clientId = env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
-  let clientSecret = "";
-  try {
-    clientSecret = await resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-  } catch (err) {
-    console.error(JSON.stringify({ [tag]: "secret-error", error: describeError(err) }));
-  }
-  if (!apiUrl || !clientId || !clientSecret) {
-    throw new Error(
-      "勤怠の取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / " +
-        "ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
-    );
-  }
-  return readUpstreamJson(
-    () =>
-      fetch(`${apiUrl}${pathWithQuery}`, {
-        headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
-      }),
-    "rust-ichibanboshi",
-  );
+function fetchIchibanJson(env: Env, pathWithQuery: string): Promise<unknown> {
+  return fetchIchibanWorkerJson(env.KINTAI, KINTAI_WORKER, pathWithQuery);
 }
 
 /**
@@ -521,7 +496,7 @@ async function readUpstreamJson(doFetch: () => Promise<Response>, label: string)
   try {
     res = await doFetch();
   } catch (err) {
-    // 握り潰さず原因を返す (社内 LAN が落ちている / Tunnel 断)
+    // 握り潰さず原因を返す (Worker 側の障害・Service Binding 断)
     throw new Error(`${label} へ接続できません: ${describeError(err)}`);
   }
   const text = await res.text();
@@ -595,8 +570,7 @@ export const getKosokuEventsTool = {
       env,
       `/api/kintai/events?month=${encodeURIComponent(args.month)}` +
         `&driver=${encodeURIComponent(args.driver)}`,
-      "kosoku_events",
-    );
+          );
     const rows = (parsed as { rows?: unknown }).rows;
     return { month: args.month, driver: args.driver, rows: Array.isArray(rows) ? rows : [] };
   },
@@ -635,7 +609,6 @@ export const getRestDiffTool = {
     return await fetchIchibanJson(
       env,
       `/api/kintai/rest-diff?month=${encodeURIComponent(args.month)}${driver}`,
-      "rest_diff",
     );
   },
 } satisfies ToolEntry<typeof getRestDiffArgs>;
@@ -850,10 +823,9 @@ export const getTimecardDiffTool = {
         env,
         `/api/kintai/pdf-json?month=${encodeURIComponent(args.month)}` +
           (driver ? `&driver=${encodeURIComponent(driver)}` : ""),
-        "timecard_diff",
       ),
-      fetchIchibanJson(env, kosokuQuery(args.month), "timecard_diff"),
-      fetchIchibanJson(env, kosokuQuery(prevYm), "timecard_diff"),
+      fetchIchibanJson(env, kosokuQuery(args.month)),
+      fetchIchibanJson(env, kosokuQuery(prevYm)),
     ]);
 
     // 当月 + 前月を乗務員CD ごとに連結してから暦日按分する。relay の
@@ -2482,7 +2454,7 @@ const getKintaiDiffArgs = z
 export const getKintaiDiffTool = {
   name: "get_kintai_diff",
   description:
-    "オンプレ (rust-ichibanboshi の `/api/kintai/kosoku-daily`) と GCP " +
+    "オンプレ基準の kosoku-daily (勤怠 Worker の `/api/kintai/kosoku-daily`) と GCP " +
     "(`kintai.day_summaries`、`get_kintai_day_summaries` と同じ値) の日別サマリを " +
     "`乗務員CD|暦日|開始時刻` キーで突き合わせ、**ずれている行だけを名指しで返す**。" +
     "**GET 2 本を叩いて突き合わせるだけ** — 1 バイトも書かない。" +
@@ -2524,7 +2496,7 @@ export const getKintaiDiffTool = {
       relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${gcpQuery}`, {
         headers: { "X-Alc-Proxy-Secret": secret },
       }),
-      fetchIchibanJson(env, onpremQuery, "kintai_diff"),
+      fetchIchibanJson(env, onpremQuery),
     ]);
     const gcpText = await gcpRes.text();
     if (!gcpRes.ok) throw new Error(`relay: status ${gcpRes.status}: ${gcpText.slice(0, 200)}`);

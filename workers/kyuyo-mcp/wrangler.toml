@@ -29,10 +29,10 @@ bucket_name = "dtako-uploads"
 AUTH_WORKER_ORIGIN = "https://auth-staging.ippoan.org"
 # workers/dtako-scraper-relay/wrangler.toml と同じ prefix (Refs #241)。
 RESTRAINT_R2_PREFIX = "restraint"
-# 勤怠の生イベント取得先 (Refs #470)。**この worker で唯一の上流 fetch** —
-# 他 tool は R2 直読みで完結する。値は relay と同じ (公開識別子)。
-NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
-NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
+# deploy 済み commit を /healthz で確認できるようにする (Refs #374)。実際の値は
+# kyuyo-mcp-deploy.yml が `wrangler deploy --var GIT_SHA:${{ github.sha }}` で
+# 上書きする。"unknown" はローカル (`wrangler dev` 等、CI 外) 実行時の既定値。
+GIT_SHA = "unknown"
 
 [[services]]
 binding = "AUTH_WORKER"
@@ -53,7 +53,7 @@ binding = "ICHIBAN_DB"
 service = "ichibanboshi-ichiban"
 
 # 勤怠 Worker (/api/kintai/* の読み、Refs ohishi-exp/rust-ichibanboshi#322)。
-# Service Binding 専用・認可なし。あればオンプレ版 (NUXT_ICHIBAN_API_URL + CF Access) は使わない。
+# Service Binding 専用・認可なし。無ければ勤怠の読みはエラーになる (オンプレ版への fallback は無い)。
 [[services]]
 binding = "KINTAI"
 service = "ichibanboshi-kintai"
@@ -63,19 +63,6 @@ service = "ichibanboshi-kintai"
 binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
-
-# 一番星 (rust-ichibanboshi) への CF Access Service Token (Refs #470)。
-# **既存の Service Token を再利用** — app 本体 / dtako-scraper-relay が使っている
-# のと同じ Secrets Store entry (secret_name="CF_ACCESS_CLIENT_SECRET") を binding
-# するだけで、secrets-inventory への新規投入は不要。
-[[secrets_store_secrets]]
-binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
-store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
-secret_name = "CF_ACCESS_CLIENT_SECRET"
-# deploy 済み commit を /healthz で確認できるようにする (Refs #374)。実際の値は
-# kyuyo-mcp-deploy.yml が `wrangler deploy --var GIT_SHA:${{ github.sha }}` で
-# 上書きする。"unknown" はローカル (`wrangler dev` 等、CI 外) 実行時の既定値。
-GIT_SHA = "unknown"
 
 # custom domain (single-env、staging = prod、cf-access-mcp / gmail-mcp と同じ形)。
 # ルート有効化・実 deploy はコード実装後に別途判断 (account owner の手動作業含む)。
