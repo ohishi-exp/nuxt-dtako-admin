@@ -49,15 +49,16 @@ function makeDO() {
     // 勤怠の対象会社 (本番 [vars] と同じ)。無いと打刻の live-build / source=gcp が止まる (Refs #1133 c1133-8)
     KINTAI_COMP_ID: COMP_ID,
     RESTRAINT_DEV_VIEWER_EMAIL: "viewer@example.com",
-    // live-build が「配線未設定」で諦めないように 3 点を埋める
-    NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    // `source=gcp` 経路 (day_summaries) の配線。GCP 側は空 (この test が見るのは
-    // 「kosoku を取りに行かない」ことだけ)
     DTAKO_ACCOUNTS: JSON.stringify([{ comp_id: COMP_ID, tenant_id: "tenant" }]),
-    INTERNAL_SHARED_SECRET: "shared",
-    AUTH_WORKER: { fetch: async () => Response.json({ summaries: {} }) },
+    // 勤怠 Worker (live-build・`source=gcp` とも読み先はここだけ。Refs ohishi-exp/rust-ichibanboshi#322)。
+    // GCP の 2 口は空で返し (この test が見るのは「kosoku を取りに行かない」ことだけ)、
+    // 残り (daily・kosoku-daily・wage-source) は `stubUpstream` の global fetch へ回す
+    KINTAI: {
+      fetch: async (url: string, init?: RequestInit) =>
+        url.includes("/api/kintai/day-summaries") || url.includes("/api/kintai/shift-overlaps")
+          ? Response.json({ summaries: {} })
+          : globalThis.fetch(url, init),
+    },
   };
   const ctx = {
     setWebSocketAutoResponse: () => {},

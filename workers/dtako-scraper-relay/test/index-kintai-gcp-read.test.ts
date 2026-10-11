@@ -10,26 +10,30 @@ import worker, { type RelayWorkerEnv } from "../src/index";
 const SECRET = "internal-shared-secret";
 const COMP_ID = "27324455";
 
-/** GCP 読み取りの口 (`/kintai-relay/day-summaries` / `shift-overlaps`) が要る配線だけの env。
- * 上流 (auth-worker `/ichibanboshi-proxy`) は `upstream` で差し替える。 */
+/** 勤怠を読むだけの口 (`/kintai-relay/day-summaries` / `shift-overlaps`) が要る配線だけの env。
+ * 上流 (勤怠 Worker `KINTAI`) は `upstream` で差し替える。`AUTH_WORKER` は呼ばれたら `authCalls` に残る
+ * (勤怠では呼ばない。Refs ohishi-exp/rust-ichibanboshi#322)。 */
 function fakeEnv(upstream: (url: string) => Response) {
   const calls: string[] = [];
+  const authCalls: string[] = [];
   const env = {
     INTERNAL_SHARED_SECRET: SECRET,
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
     KINTAI_COMP_ID: COMP_ID,
     DTAKO_ACCOUNTS: JSON.stringify([{ comp_id: COMP_ID, tenant_id: "tenant" }]),
-    AUTH_WORKER: {
-      fetch: vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    KINTAI: {
+      fetch: vi.fn(async (url: string) => {
         calls.push(url);
         return upstream(url);
       }),
     },
+    AUTH_WORKER: {
+      fetch: vi.fn(async (url: string) => {
+        authCalls.push(url);
+        return Response.json({ via: "auth-worker" });
+      }),
+    },
   } as unknown as RelayWorkerEnv;
-  return { env, calls };
+  return { env, calls, authCalls };
 }
 
 function get(path: string, headers: Record<string, string> = { "X-Alc-Proxy-Secret": SECRET }) {
@@ -103,9 +107,9 @@ describe("GET /kintai-relay/day-summaries (関門を shift-overlaps と共有し
   });
 });
 
-describe("勤怠 Worker (KINTAI) があれば Worker から読む (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+describe("勤怠 Worker (KINTAI) だけから読む (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
   function withKintai(respond: () => Response) {
-    const { env, calls } = fakeEnv(() => Response.json({ via: "auth-worker" }));
+    const { env, authCalls } = fakeEnv(respond);
     const kintaiCalls: { url: string; headers: Record<string, string> }[] = [];
     (env as { KINTAI?: unknown }).KINTAI = {
       fetch: vi.fn(async (url: string, init?: RequestInit) => {
@@ -113,20 +117,36 @@ describe("勤怠 Worker (KINTAI) があれば Worker から読む (Refs ohishi-e
         return respond();
       }),
     };
-    return { env, calls, kintaiCalls };
+    return { env, authCalls, kintaiCalls };
   }
 
-  it("day-summaries・shift-overlaps は Worker に飛び、auth-worker を呼ばない。secret・テナントを付けない", async () => {
-    const { env, calls, kintaiCalls } = withKintai(() => Response.json(OVERLAPS));
+  it("day-summaries・shift-overlaps は Worker に飛び、auth-worker を一度も呼ばない。secret・テナントを付けない", async () => {
+    const { env, authCalls, kintaiCalls } = withKintai(() => Response.json(OVERLAPS));
     expect((await worker.fetch(get("/kintai-relay/day-summaries?month=2026-06"), env)).status).toBe(200);
     const res = await worker.fetch(get("/kintai-relay/shift-overlaps?month=2026-06"), env);
     expect(await res.json()).toEqual(OVERLAPS);
-    expect(calls).toHaveLength(0);
+    expect(authCalls).toHaveLength(0);
     expect(kintaiCalls.map((c) => c.url)).toEqual([
       "https://ichibanboshi-kintai/api/kintai/day-summaries?month=2026-06",
       "https://ichibanboshi-kintai/api/kintai/shift-overlaps?month=2026-06",
     ]);
     for (const c of kintaiCalls) expect(Object.keys(c.headers)).toEqual(["Accept"]);
+  });
+
+  it("KINTAI binding が無ければ 503 で、auth-worker へ倒さない", async () => {
+    const { env, authCalls } = fakeEnv(() => Response.json(OVERLAPS));
+    (env as { KINTAI?: unknown }).KINTAI = undefined;
+    const res = await worker.fetch(get("/kintai-relay/day-summaries?month=2026-06"), env);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "kintai-relay not configured" });
+    expect(authCalls).toHaveLength(0);
+  });
+
+  it("KINTAI binding が無くても secret 不一致は 401 (401 が設定の 503 より前)", async () => {
+    const { env } = fakeEnv(() => Response.json(OVERLAPS));
+    (env as { KINTAI?: unknown }).KINTAI = undefined;
+    const res = await worker.fetch(get("/kintai-relay/day-summaries?month=2026-06", { "X-Alc-Proxy-Secret": "wrong" }), env);
+    expect(res.status).toBe(401);
   });
 
   it("Worker の 503 は 502 になり、本文の先頭が error に載る", async () => {

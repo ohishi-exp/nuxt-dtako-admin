@@ -21,14 +21,13 @@ import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
   };
 
 /**
- * `POST /restraint-api/wage-snapshot` の書き先の振り分け (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * `POST /restraint-api/wage-snapshot` の書き先 (Refs ohishi-exp/rust-ichibanboshi#322)。勤怠 Worker だけへ書く。
  *
- * `kintaiWriteDeps` (kintai-relay.ts) は 100% gate に載る pure ロジックだが、DO が「どの条件で
- * Worker へ回すか」「関門 (kyuyoAccessGate) を Worker の経路でも先に通すか」は gate では捕まらない。
- * ここで測るのは:
+ * `buildDeps` (kintai-relay.ts) は 100% gate に載る pure ロジックだが、DO が「どの条件で 403/503 にするか」
+ * 「関門 (kyuyoAccessGate) を先に通すか」は gate では捕まらない。ここで測るのは:
  *
  * - (a) 本番設定 (KINTAI あり・comp = KINTAI_COMP_ID・token あり) → Worker だけを呼び、AUTH_WORKER の上流は呼ばない
- * - (b) KINTAI 無し・comp 違い・token が読めない → 今の経路 (auth-worker の /ichibanboshi-proxy) のまま
+ * - (b) comp 違い → 403、KINTAI 無し・token が読めない → 503。どれも Worker にも auth-worker にも書かない
  * - (c) allowlist の外は 403 で、Worker にも auth-worker の上流にも届かない
  */
 const OWN_COMP = "27324455";
@@ -79,9 +78,6 @@ function makeDO(opts: Setup = {}) {
     AUTH_KYUYO: { authorize: async () => ({ status: opts.kyuyoStatus ?? 200, body: "" }) },
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
     INTERNAL_SHARED_SECRET: "shared-secret",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
     KINTAI_COMP_ID: OWN_COMP,
     AUTH_WORKER: {
       fetch: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -145,36 +141,36 @@ describe("POST /restraint-api/wage-snapshot の書き先 (Refs ohishi-exp/rust-i
     expect(kintaiCalls[0]!.headers["X-Kintai-Write-Token"]).toBe(WRITE_TOKEN);
   });
 
-  /** 経路 A (auth-worker → /ichibanboshi-proxy) に送られたことを確かめる。 */
-  function expectRouteA(upstreamCalls: { url: string; headers: Record<string, string> }[]) {
-    expect(upstreamCalls.map((c) => c.url)).toEqual([
-      "https://auth-worker.internal/ichibanboshi-proxy/api/kintai/wage-snapshot",
-    ]);
-    expect(upstreamCalls[0]!.headers["X-Tenant-ID"]).toBe(TENANT);
-    expect(upstreamCalls[0]!.headers["X-Kintai-Write-Token"]).toBeUndefined();
-  }
-
-  it("★ (b) KINTAI が無ければ今の経路 A のまま", async () => {
+  it("★ (b) KINTAI が無ければ 503 で、どこにも書かない", async () => {
     const { post, upstreamCalls } = makeDO({ kintai: false });
-    expect((await post()).status).toBe(200);
-    expectRouteA(upstreamCalls);
+    const res = await post();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "勤怠 Worker (KINTAI) が使えません" });
+    expect(upstreamCalls).toEqual([]);
   });
 
-  it("★ (b) comp が KINTAI_COMP_ID と違えば今の経路 A のまま (Worker の固定テナントに他社を書かない)", async () => {
+  it("★ (b) comp が KINTAI_COMP_ID と違えば入口で 403 (Worker の固定テナントに他社を書かない)", async () => {
     const { post, upstreamCalls, kintaiCalls } = makeDO();
-    expect((await post(OTHER_COMP_SAME_TENANT)).status).toBe(200);
+    const res = await post(OTHER_COMP_SAME_TENANT);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toContain("この会社では使えません");
     expect(kintaiCalls).toEqual([]);
-    expectRouteA(upstreamCalls);
+    expect(upstreamCalls).toEqual([]);
   });
 
-  it("★ (b) token の binding が無ければ今の経路 A のまま (token 無しで Worker に送って 403 にしない)", async () => {
+  it("★ (b) token の binding が無ければ 503 (token 無しで Worker に送らない)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const { post, upstreamCalls, kintaiCalls } = makeDO({ writeToken: undefined });
-    expect((await post()).status).toBe(200);
+    const res = await post();
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("賃金スナップショットの保存に失敗しました");
+    expect(body.error).toContain("KINTAI_WRITE_TOKEN が読めません");
     expect(kintaiCalls).toEqual([]);
-    expectRouteA(upstreamCalls);
+    expect(upstreamCalls).toEqual([]);
   });
 
-  it("★ (b) token が読めない (get が throw) なら経路 A に倒し、ログは wage_snapshot のキーで token を出さない", async () => {
+  it("★ (b) token が読めない (get が throw) なら 503 で、ログは wage_snapshot のキーで token を出さない", async () => {
     const errors: string[] = [];
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       errors.push(args.map(String).join(" "));
@@ -186,9 +182,9 @@ describe("POST /restraint-api/wage-snapshot の書き先 (Refs ohishi-exp/rust-i
         },
       },
     });
-    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(503);
     expect(kintaiCalls).toEqual([]);
-    expectRouteA(upstreamCalls);
+    expect(upstreamCalls).toEqual([]);
     const logged = errors.find((e) => e.includes("secret-error"))!;
     expect(JSON.parse(logged)).toEqual({ wage_snapshot: "secret-error", error: "Error: secrets store unavailable" });
     expect(errors.join("\n")).not.toContain("restraint_push");

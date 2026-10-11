@@ -27,9 +27,8 @@
  * ## 経路と資格情報
  *
  * ② の送り先はこの module では決めない (`deps.autoload`)。`KINTAI_COMP_ID` の会社で
- * token が読めれば勤怠 Worker (`X-Kintai-Write-Token`)、それ以外はオンプレ版
- * (`NUXT_ICHIBAN_API_URL` + CF Access) — 振り分けは `kintai-relay.ts` の
- * `kintaiAutoloader` 1 か所 (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * token が読めれば勤怠 Worker (`X-Kintai-Write-Token`)、それ以外は送り先が無い (呼び手は 403/503)
+ * — 組み立ては `kintai-relay.ts` の `kintaiAutoloader` 1 か所 (Refs ohishi-exp/rust-ichibanboshi#322)。
  */
 
 import { listZipEntryNames } from "./operation-zip";
@@ -125,7 +124,7 @@ export interface DtakoReimportDeps {
   recalculateWork(): Promise<void>;
   /** ① zip 取得 (自前ログイン)。実装側 (DO) が opeNo/startOpe/comp_id を握って呼ぶ。 */
   fetchZip(): Promise<ArrayBuffer>;
-  /** ② autoload への POST。送り先 (勤怠 Worker かオンプレ版) と認証ヘッダは実装側
+  /** ② autoload への POST。送り先 (勤怠 Worker) と認証ヘッダは実装側
    * (`kintai-relay.ts` の `kintaiAutoloader`) が決める。 */
   autoload(path: string, init: RequestInit): Promise<Response>;
 }

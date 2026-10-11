@@ -76,13 +76,12 @@ export function buildRestraintPushBodies(
 }
 
 /** push の宛先の名前 (ログと resummarize の応答のキー)。 */
-export type RestraintPushTargetName = "onprem" | "kintai";
+export type RestraintPushTargetName = "kintai";
 
 /**
- * push の宛先 1 つ。送信ループは `sendRestraintPushBodies` の 1 本だけで、宛先ごとの
- * 違い (fetch するもの・URL・ヘッダー) をここで渡す (Refs ohishi-exp/rust-ichibanboshi#322)。
- * - `onprem` — オンプレ rust-ichibanboshi (CF Tunnel) を素の `fetch` + CF Access ヘッダーで
- * - `kintai` — 勤怠 Worker (`ichibanboshi-kintai`) を Service Binding + `X-Kintai-Write-Token` で
+ * push の宛先。宛先ごとの違い (fetch するもの・URL・ヘッダー) をここで渡す
+ * (Refs ohishi-exp/rust-ichibanboshi#322)。いまは `kintai` — 勤怠 Worker (`ichibanboshi-kintai`) を
+ * Service Binding + `X-Kintai-Write-Token` で — だけ。
  */
 export interface RestraintPushTarget {
   url: string;
@@ -105,7 +104,7 @@ export type RestraintPushResult =
  * 他方を止めない。
  *
  * `target` が null = 未設定 (URL・binding・secret のどれかが無い) で skip。
- * **ログにリクエストのヘッダー (token・CF Access の secret) を出さない** — 出すのは
+ * **ログにリクエストのヘッダー (token) を出さない** — 出すのは
  * 応答本文の先頭 200 字だけ。
  */
 export async function sendRestraintPushBodies(

@@ -75,7 +75,7 @@ function makeDO(
     splitFailed?: number;
     /** `POST /api/recalculate-pending` の応答本文。 */
     pendingBody?: unknown;
-    /** fold を回す (`KINTAI_COMP_ID` を対象会社にする)。`configured` で畳み先の設定も置く。 */
+    /** fold を回す (`KINTAI_COMP_ID` を対象会社にする)。`configured` で畳み先 (勤怠 Worker の binding) も置く。 */
     fold?: "not_configured" | "configured";
   } = {},
 ) {
@@ -96,9 +96,8 @@ function makeDO(
     ...(opts.fold ? { KINTAI_COMP_ID: ACCOUNT.comp_id } : {}),
     ...(opts.fold === "configured"
       ? {
-          NUXT_ICHIBAN_API_URL: "https://ichiban.example.com",
-          NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "client-id",
-          ICHIBAN_CF_ACCESS_CLIENT_SECRET: "client-secret",
+          // 畳み先 = 勤怠 Worker。foldMonth を mock するので fetch までは届かない
+          KINTAI: { fetch: async () => new Response(null, { status: 500 }) },
         }
       : {}),
     INTERNAL_SHARED_SECRET: opts.secretRejects

@@ -28,12 +28,12 @@ import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
  * 直接突き合わせる」「driver/from/to を検証してから渡す」かは gate では捕まらない
  * (このファイルは allowlist の外)。ここで測るのは:
  *
- * - (a) record.compId === KINTAI_COMP_ID なら ichibanboshi へ中継し応答をそのまま返す
+ * - (a) record.compId === KINTAI_COMP_ID なら勤怠 Worker へ中継し応答をそのまま返す
  * - (b) 別の compId (同じ tenant で viewer 認可自体は通る) は 403 で中継しない
  * - (c) KINTAI_COMP_ID 未設定は 403 (viewer 認可が通る compId でも)
  * - (d) driver / from / to の不正は 400 (中継しない)
  *
- * ichibanboshi へは実際には繋がない (AUTH_WORKER.fetch を stub する)。
+ * 勤怠 Worker へは実際には繋がない (KINTAI.fetch を stub する)。
  */
 const OWN_COMP = "27324455";
 const OTHER_COMP_SAME_TENANT = "75700192";
@@ -56,31 +56,33 @@ const SAMPLE_LOG = {
 interface Setup {
   /** 未指定なら OWN_COMP と同じ値 (= 対象会社) */
   kintaiCompId?: string | undefined;
-  upstream?: () => Response;
-  /** 勤怠 Worker の binding (`KINTAI`)。未指定なら binding 無し (staging・preview と同じ)。 */
+  /** 勤怠 Worker (`KINTAI`) の応答。未指定なら SAMPLE_LOG。 */
   kintai?: () => Response;
+  /** `true` なら binding 無し (staging・preview と同じ)。 */
+  noBinding?: boolean;
 }
 
 function makeDO(opts: Setup = {}) {
   const introspectCalls: string[] = [];
+  /** 勤怠 Worker への中継 (url)。 */
   const gcpCalls: string[] = [];
+  /** auth-worker のうち introspect 以外。勤怠では 1 本も呼ばれないはず。 */
+  const authWorkerCalls: string[] = [];
   const kintaiCalls: { url: string; headers: Record<string, string> }[] = [];
   const env = {
-    ...(opts.kintai
-      ? {
+    ...(opts.noBinding
+      ? {}
+      : {
           KINTAI: {
             fetch: vi.fn(async (url: string, init?: RequestInit) => {
+              gcpCalls.push(url);
               kintaiCalls.push({ url, headers: init?.headers as Record<string, string> });
-              return opts.kintai!();
+              return opts.kintai ? opts.kintai() : Response.json(SAMPLE_LOG);
             }),
           },
-        }
-      : {}),
+        }),
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
     INTERNAL_SHARED_SECRET: "shared-secret",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csecret",
-    NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid",
     ...("kintaiCompId" in opts ? { KINTAI_COMP_ID: opts.kintaiCompId } : { KINTAI_COMP_ID: OWN_COMP }),
     AUTH_WORKER: {
       fetch: vi.fn(async (input: RequestInfo | URL) => {
@@ -89,8 +91,8 @@ function makeDO(opts: Setup = {}) {
           introspectCalls.push(url);
           return Response.json({ active: true, tenant_id: TENANT, email: "viewer@example.com" });
         }
-        gcpCalls.push(url);
-        return opts.upstream ? opts.upstream() : Response.json(SAMPLE_LOG);
+        authWorkerCalls.push(url);
+        return Response.json(SAMPLE_LOG);
       }),
     },
   };
@@ -115,19 +117,19 @@ function makeDO(opts: Setup = {}) {
         },
       }) as never,
     );
-  return { get, introspectCalls, gcpCalls, kintaiCalls };
+  return { get, introspectCalls, gcpCalls, authWorkerCalls, kintaiCalls };
 }
 
 const OK_QUERY = "?driver=1078&from=2026-06-01&to=2026-06-30";
 
 describe("GET /restraint-api/kintai/change-log (Refs #1133 c1133-6)", () => {
-  it("(a) record.compId === KINTAI_COMP_ID なら ichibanboshi へ中継し、応答をそのまま返す", async () => {
+  it("(a) record.compId === KINTAI_COMP_ID なら勤怠 Worker へ中継し、応答をそのまま返す", async () => {
     const { get, gcpCalls } = makeDO();
     const res = await get(OK_QUERY);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(SAMPLE_LOG);
     expect(gcpCalls).toHaveLength(1);
-    expect(gcpCalls[0]).toContain("/ichibanboshi-proxy/api/kintai/change-log");
+    expect(gcpCalls[0]).toContain("https://ichibanboshi-kintai/api/kintai/change-log");
     expect(gcpCalls[0]).toContain("driver=1078");
     expect(gcpCalls[0]).toContain("from=2026-06-01");
     expect(gcpCalls[0]).toContain("to=2026-06-30");
@@ -182,19 +184,19 @@ describe("GET /restraint-api/kintai/change-log (Refs #1133 c1133-6)", () => {
     expect(gcpCalls).toHaveLength(0);
   });
 
-  it("KINTAI があれば勤怠 Worker から読み、auth-worker の /ichibanboshi-proxy は叩かない (Refs ohishi-exp/rust-ichibanboshi#322)", async () => {
-    const { get, gcpCalls, kintaiCalls } = makeDO({ kintai: () => Response.json(SAMPLE_LOG) });
+  it("勤怠 Worker から読み、auth-worker は introspect 以外叩かない (Refs ohishi-exp/rust-ichibanboshi#322)", async () => {
+    const { get, authWorkerCalls, kintaiCalls } = makeDO();
     const res = await get(OK_QUERY);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(SAMPLE_LOG);
-    expect(gcpCalls).toHaveLength(0);
+    expect(authWorkerCalls).toHaveLength(0);
     expect(kintaiCalls.map((c) => c.url)).toEqual([
       "https://ichibanboshi-kintai/api/kintai/change-log?driver=1078&from=2026-06-01&to=2026-06-30",
     ]);
     expect(Object.keys(kintaiCalls[0]!.headers)).toEqual(["Accept"]);
   });
 
-  it("勤怠 Worker の 503 は今の経路と同じく 502 で、本文の先頭を error に載せる", async () => {
+  it("勤怠 Worker の 503 は 502 で、本文の先頭を error に載せる", async () => {
     const { get } = makeDO({
       kintai: () => new Response("[KINTAI_HYPERDRIVE] が無効です (読み先がありません)", { status: 503 }),
     });
@@ -206,9 +208,17 @@ describe("GET /restraint-api/kintai/change-log (Refs #1133 c1133-6)", () => {
   });
 
   it("上流が落ちたら 502", async () => {
-    const { get } = makeDO({ upstream: () => new Response("boom", { status: 500 }) });
+    const { get } = makeDO({ kintai: () => new Response("boom", { status: 500 }) });
     const res = await get(OK_QUERY);
     expect(res.status).toBe(502);
+  });
+
+  it("KINTAI binding が無ければ 503 (auth-worker にも送らない)", async () => {
+    const { get, authWorkerCalls } = makeDO({ noBinding: true });
+    const res = await get(OK_QUERY);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toBe("勤怠 Worker (KINTAI) が使えません");
+    expect(authWorkerCalls).toHaveLength(0);
   });
 
   it("Bearer 無し・自 tenant 外の会社は 401 (KINTAI_COMP_ID チェックより前で落ちる)", async () => {
