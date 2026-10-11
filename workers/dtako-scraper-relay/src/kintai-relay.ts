@@ -45,6 +45,7 @@
  * やり直せば同じ状態に収束する。
  */
 
+import { resolveSecretBinding } from "./cron";
 import { parseGcpShiftDays, type GcpNonWorking, type GcpShiftDay } from "./gcp-day-summaries";
 
 /** service binding の最小形 (`cloudflare:workers` の型に依存しないための構造的型)。 */
@@ -327,6 +328,67 @@ export function kintaiWorkerFor<T>(
   return compId && compId === (kintaiCompId ?? "").trim() ? kintai : undefined;
 }
 
+/** 勤怠の読みの入口 ([`kintaiReader`]) が見る env。DO と index.ts の env の共通部分。 */
+export interface KintaiReaderEnv {
+  KINTAI?: FetcherLike;
+  KINTAI_COMP_ID?: string;
+  NUXT_ICHIBAN_API_URL?: string;
+  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
+  ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
+}
+
+/** 読み先。memo のキーに入れる (Worker の etag とオンプレの本文を 1 つの memo に混ぜない)。 */
+export type KintaiReadRoute = "worker" | "onprem";
+export const KINTAI_READ_ROUTES: readonly KintaiReadRoute[] = ["worker", "onprem"];
+
+export interface KintaiReader {
+  route: KintaiReadRoute;
+  /** `path` は `/api/...` (クエリ込み)。`init` のヘッダーはそのまま送る。 */
+  read(path: string, init?: RequestInit): Promise<Response>;
+}
+
+/**
+ * 勤怠の読み (オンプレ版と勤怠 Worker の両方にある口) の入口 (Refs ohishi-exp/rust-ichibanboshi#322)。
+ *
+ * `kintaiWorkerFor` が binding を返せば勤怠 Worker を読む。Worker の読みの口は認可なしなので CF Access の
+ * ヘッダー・secret は付けず、CF Access の設定が無くても読める。それ以外 (binding の無い staging・preview、
+ * 別の会社) はオンプレ版 (`NUXT_ICHIBAN_API_URL` + CF Access) を読む。どちらも揃わなければ `null`。
+ *
+ * **読みの apiUrl + CF Access の組み立てはここ 1 か所。** 書き込み (autoload・restraint の PUT) は使わない。
+ * Secrets Store binding は「宣言はあるが解決できない」時に `get()` が throw するので、未設定と同じ扱いに倒す。
+ */
+export async function kintaiReader(
+  env: KintaiReaderEnv,
+  compId: string,
+  onSecretError: (err: unknown) => void = () => {},
+): Promise<KintaiReader | null> {
+  const kintai = kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID);
+  if (kintai) {
+    return { route: "worker", read: (path, init) => kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, init) };
+  }
+  const apiUrl = (env.NUXT_ICHIBAN_API_URL ?? "").trim().replace(/\/+$/, "");
+  const clientId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+  let clientSecret = "";
+  try {
+    clientSecret = await resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+  } catch (err) {
+    onSecretError(err);
+  }
+  if (!apiUrl || !clientId || !clientSecret) return null;
+  return {
+    route: "onprem",
+    read: (path, init) =>
+      fetch(`${apiUrl}${path}`, {
+        ...init,
+        headers: {
+          ...(init?.headers as Record<string, string>),
+          "CF-Access-Client-Id": clientId,
+          "CF-Access-Client-Secret": clientSecret,
+        },
+      }),
+  };
+}
+
 /**
  * 勤怠 Worker (`ichibanboshi-kintai`) に同じ口がある GCP の読み (Refs ohishi-exp/rust-ichibanboshi#322)。
  * window・recalc・stale-months・unko-gaps・wage-snapshot は入れない (Worker に無いか、失敗の扱いが違う)。
@@ -361,9 +423,8 @@ export function kintaiWriteDeps(kintai: FetcherLike, writeToken: string): Pick<K
 
 /** [`relayKintaiWindow`] に渡す実体を組む。 */
 export function buildDeps(opts: {
-  ichibanOrigin: string;
-  cfAccessClientId: string;
-  cfAccessClientSecret: string;
+  /** オンプレ側 (`timecard/events`) の読み先。[`kintaiReader`] が返したもの。 */
+  reader: KintaiReader;
   authWorker: FetcherLike;
   proxySecret: string;
   tenantId: string;
@@ -374,19 +435,13 @@ export function buildDeps(opts: {
   /** `env.KINTAI_COMP_ID`。 */
   kintaiCompId: string | undefined;
 }): KintaiRelayDeps {
-  const base = opts.ichibanOrigin.replace(/\/$/, "");
   // 他の会社の読みは auth-worker 経由のまま (`kintaiWorkerFor`)
   const kintai = kintaiWorkerFor(opts.kintai, opts.compId, opts.kintaiCompId);
   return {
     onprem(path, init) {
-      return fetch(`${base}${path}`, {
+      return opts.reader.read(path, {
         ...init,
-        headers: {
-          ...(init?.headers as Record<string, string>),
-          "CF-Access-Client-Id": opts.cfAccessClientId,
-          "CF-Access-Client-Secret": opts.cfAccessClientSecret,
-          Accept: "application/json",
-        },
+        headers: { ...(init?.headers as Record<string, string>), Accept: "application/json" },
       });
     },
     gcp(path, init) {
@@ -416,11 +471,8 @@ export interface KintaiGateConfig<F> {
   authWorker: F | undefined;
   /** `KINTAI_COMP_ID`。 */
   compId: string;
-  /** オンプレの URL。 */
-  origin: string;
-  /** CF Access の client id / secret。 */
-  cfId: string;
-  cfSecret: string;
+  /** オンプレ側の読み先 ([`kintaiReader`])。binding があれば Worker、無ければオンプレ版、どちらも無ければ null。 */
+  reader: KintaiReader | null;
   /** 共有 secret (`X-Alc-Proxy-Secret` と比べる側)。 */
   proxySecret: string;
 }
@@ -429,7 +481,7 @@ export interface KintaiGateConfig<F> {
 export const KINTAI_COMP_ID_UNSET = "kintai_comp_id_unset";
 
 export type KintaiGateVerdict<F> =
-  | { ok: true; config: KintaiGateConfig<F> & { authWorker: F } }
+  | { ok: true; config: KintaiGateConfig<F> & { authWorker: F; reader: KintaiReader } }
   | { ok: false; status: 401 | 503; error: string; reason?: typeof KINTAI_COMP_ID_UNSET };
 
 /**
@@ -438,7 +490,8 @@ export type KintaiGateVerdict<F> =
  *
  * 1. 共有 secret を解決できない → 503 (`reason` なし)
  * 2. 呼び手の secret が一致しない → 401
- * 3. 残りの配線が欠けている → 503。`KINTAI_COMP_ID` が空のときだけ `reason` を付ける
+ * 3. 残りの配線が欠けている → 503。`KINTAI_COMP_ID` が空のときだけ `reason` を付ける。
+ *    オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`reader` が null かどうか)
  *
  * これらの口は front の公開ホストから素通しで届く (front の `worker/index.ts`)。
  * **secret を通していない呼び手に、設定の様子 (どれが欠けているか) を教えない** ために
@@ -458,9 +511,9 @@ export function judgeKintaiGate<F>(
     return { ok: false, status: 401, error: "Unauthorized" };
   }
   if (!config.compId) return { ...notConfigured, reason: KINTAI_COMP_ID_UNSET };
-  const { authWorker } = config;
-  if (!authWorker || !config.origin || !config.cfId || !config.cfSecret) return notConfigured;
-  return { ok: true, config: { ...config, authWorker } };
+  const { authWorker, reader } = config;
+  if (!authWorker || !reader) return notConfigured;
+  return { ok: true, config: { ...config, authWorker, reader } };
 }
 
 export interface KintaiRecalcInput {

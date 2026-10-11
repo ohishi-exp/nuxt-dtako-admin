@@ -18,6 +18,7 @@ import {
   buildDeps,
   judgeKintaiGate,
   judgeYTimeShiftsRequest,
+  kintaiReader,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
   relayKintaiShiftOverlaps,
@@ -488,13 +489,12 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
 
   const authWorker = env.AUTH_WORKER;
   const compId = (env.KINTAI_COMP_ID ?? "").trim();
-  const origin = (env.NUXT_ICHIBAN_API_URL ?? "").trim();
-  const cfId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
-  const [proxySecret, cfSecret] = await Promise.all([
+  // オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`kintaiReader`)
+  const [proxySecret, reader] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
-    resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+    kintaiReader(env, compId),
   ]);
-  if (!authWorker || !compId || !origin || !cfId || !proxySecret || !cfSecret) {
+  if (!authWorker || !compId || !proxySecret || !reader) {
     return fail(503, "kintai-relay not configured");
   }
 
@@ -526,9 +526,7 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
   }
 
   const deps = buildDeps({
-    ichibanOrigin: origin,
-    cfAccessClientId: cfId,
-    cfAccessClientSecret: cfSecret,
+    reader,
     authWorker,
     proxySecret,
     tenantId,
@@ -574,13 +572,12 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
 
   const authWorker = env.AUTH_WORKER;
   const compId = (env.KINTAI_COMP_ID ?? "").trim();
-  const origin = (env.NUXT_ICHIBAN_API_URL ?? "").trim();
-  const cfId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
-  const [proxySecret, cfSecret] = await Promise.all([
+  // オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`kintaiReader`)
+  const [proxySecret, reader] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
-    resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+    kintaiReader(env, compId),
   ]);
-  if (!authWorker || !compId || !origin || !cfId || !proxySecret || !cfSecret) {
+  if (!authWorker || !compId || !proxySecret || !reader) {
     return fail(503, "kintai-relay not configured");
   }
 
@@ -614,9 +611,7 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
   }
 
   const deps = buildDeps({
-    ichibanOrigin: origin,
-    cfAccessClientId: cfId,
-    cfAccessClientSecret: cfSecret,
+    reader,
     authWorker,
     proxySecret,
     tenantId,
@@ -735,24 +730,18 @@ async function passKintaiGcpGate(
   | { ok: true; deps: ReturnType<typeof buildDeps>; tenantId: string }
   | { ok: false; status: number; error: string; reason?: string }
 > {
-  const [proxySecret, cfSecret] = await Promise.all([
+  const compIdEnv = (env.KINTAI_COMP_ID ?? "").trim();
+  const [proxySecret, maybeReader] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
-    resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+    kintaiReader(env, compIdEnv),
   ]);
   const verdict = judgeKintaiGate(
-    {
-      authWorker: env.AUTH_WORKER,
-      compId: (env.KINTAI_COMP_ID ?? "").trim(),
-      origin: (env.NUXT_ICHIBAN_API_URL ?? "").trim(),
-      cfId: (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim(),
-      cfSecret,
-      proxySecret,
-    },
+    { authWorker: env.AUTH_WORKER, compId: compIdEnv, reader: maybeReader, proxySecret },
     request.headers.get("X-Alc-Proxy-Secret") ?? "",
     constantTimeEquals,
   );
   if (!verdict.ok) return verdict;
-  const { authWorker, compId, origin, cfId } = verdict.config;
+  const { authWorker, compId, reader } = verdict.config;
 
   const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
   let accounts: unknown = null;
@@ -767,9 +756,7 @@ async function passKintaiGcpGate(
     return { ok: false, status: 503, error: "tenant not resolved from dtako_accounts" };
   }
   const deps = buildDeps({
-    ichibanOrigin: origin,
-    cfAccessClientId: cfId,
-    cfAccessClientSecret: cfSecret,
+    reader,
     authWorker,
     proxySecret,
     tenantId,

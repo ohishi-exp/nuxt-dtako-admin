@@ -21,7 +21,9 @@ import {
   jstMonth,
   tenantForCompId,
   buildDeps,
+  kintaiReader,
   kintaiWorkerFor,
+  KINTAI_READ_ROUTES,
   KintaiRelayError,
   MAX_MONTH_COUNT,
   decideFoldTrigger,
@@ -34,6 +36,7 @@ import {
   checkKyuyoAccess,
   KYUYO_ACCESS_UNIDENTIFIED_STATUS,
   KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+  type KintaiReader,
   type KintaiRelayDeps,
 } from "../src/kintai-relay";
 
@@ -997,9 +1000,7 @@ describe("buildDeps", () => {
 
   function opts(over: Partial<Parameters<typeof buildDeps>[0]> = {}) {
     return {
-      ichibanOrigin: "https://rust-ichiban.example/",
-      cfAccessClientId: "cid",
-      cfAccessClientSecret: "csec",
+      reader: { route: "onprem", read: async () => json({}) } as KintaiReader,
       authWorker: { fetch: vi.fn(async () => json({})) },
       proxySecret: "proxy-secret",
       tenantId: "tenant-a",
@@ -1010,19 +1011,17 @@ describe("buildDeps", () => {
     };
   }
 
-  it("オンプレへは CF Access Service Token を付ける (末尾スラッシュは二重にしない)", async () => {
-    const seen: { url: string; init?: RequestInit }[] = [];
-    globalThis.fetch = vi.fn(async (url: unknown, init: unknown) => {
-      seen.push({ url: String(url), init: init as RequestInit });
-      return json({});
-    }) as unknown as typeof fetch;
-
-    const o = opts();
-    await buildDeps(o).onprem("/api/kintai/timecard/drivers");
-    expect(seen[0]!.url).toBe("https://rust-ichiban.example/api/kintai/timecard/drivers");
-    const h = seen[0]!.init!.headers as Record<string, string>;
-    expect(h["CF-Access-Client-Id"]).toBe("cid");
-    expect(h["CF-Access-Client-Secret"]).toBe("csec");
+  it("オンプレ側は入口 (reader) を通す。呼び手のヘッダーに Accept を足し、method 等はそのまま", async () => {
+    const read = vi.fn(async (_path: string, _init?: RequestInit) => json({}));
+    await buildDeps(opts({ reader: { route: "onprem", read } })).onprem("/api/kintai/timecard/events?months=2026-07", {
+      method: "GET",
+      headers: { "X-Probe": "1" },
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    const [path, init] = read.mock.calls[0]!;
+    expect(path).toBe("/api/kintai/timecard/events?months=2026-07");
+    expect((init as RequestInit).method).toBe("GET");
+    expect((init as RequestInit).headers).toEqual({ "X-Probe": "1", Accept: "application/json" });
   });
 
   it("GCP へは auth-worker の /ichibanboshi-proxy 経由。**SA key は持たない**", async () => {
@@ -1059,9 +1058,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     const authWorker = { fetch: vi.fn(async (url: string, _init?: RequestInit) => respond(url)) };
     const kintai = { fetch: vi.fn(async (url: string, _init?: RequestInit) => respond(url)) };
     const deps = buildDeps({
-      ichibanOrigin: "https://rust-ichiban.example",
-      cfAccessClientId: "cid",
-      cfAccessClientSecret: "csec",
+      reader: { route: "onprem", read: async () => json({}) },
       authWorker,
       proxySecret: "proxy-secret",
       tenantId: "tenant-a",
@@ -1163,6 +1160,103 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
       new Response("読み先のテナントが決まりません (KINTAI_TENANT_ID を設定してください)", { status: 503 }),
     );
     await expect(relayKintaiDaySummaries(deps, { month: MONTH })).rejects.toThrow(/503/);
+  });
+});
+
+describe("kintaiReader — 勤怠の読みの入口 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const CF = {
+    NUXT_ICHIBAN_API_URL: " https://rust-ichiban.example// ",
+    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: " cid ",
+    ICHIBAN_CF_ACCESS_CLIENT_SECRET: "csec",
+  };
+  function stubFetch() {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init: unknown) => {
+      seen.push({ url: String(url), init: init as RequestInit });
+      return json({});
+    }) as unknown as typeof fetch;
+    return seen;
+  }
+  function binding() {
+    return { fetch: vi.fn(async (_url: string, _init?: RequestInit) => json({})) };
+  }
+
+  it("本番の設定 (KINTAI あり・会社 = KINTAI_COMP_ID) では Worker を読み、オンプレを呼ばない。ヘッダーは呼び手のものだけ", async () => {
+    const seen = stubFetch();
+    const kintai = binding();
+    const reader = await kintaiReader({ ...CF, KINTAI: kintai, KINTAI_COMP_ID: "1001" }, "1001");
+    expect(reader!.route).toBe("worker");
+    await reader!.read("/api/kintai/version?month=2026-07", { headers: { Accept: "application/json" } });
+    expect(seen).toEqual([]);
+    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/kintai/version?month=2026-07", {
+      headers: { Accept: "application/json" },
+    });
+  });
+
+  it("binding があれば CF Access が未設定でも Worker から読める (secret は解決しない)", async () => {
+    const kintai = binding();
+    const secret = { get: vi.fn(async () => "x") };
+    const reader = await kintaiReader({ KINTAI: kintai, KINTAI_COMP_ID: "1001", ICHIBAN_CF_ACCESS_CLIENT_SECRET: secret }, "1001");
+    expect(reader!.route).toBe("worker");
+    await reader!.read("/api/kintai/daily?month=2026-07");
+    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/kintai/daily?month=2026-07", undefined);
+    expect(secret.get).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["KINTAI が無い", { KINTAI_COMP_ID: "1001" }, "1001"],
+    ["会社が KINTAI_COMP_ID と違う", { KINTAI_COMP_ID: "1001", withBinding: true }, "2002"],
+    ["KINTAI_COMP_ID が未設定", { withBinding: true }, "1001"],
+  ] as const)("%s ときはオンプレ版 (apiUrl + CF Access)。URL の空白・末尾の / は落とす", async (_label, cfg, compId) => {
+    const seen = stubFetch();
+    const kintai = binding();
+    const reader = await kintaiReader(
+      { ...CF, ...("KINTAI_COMP_ID" in cfg ? { KINTAI_COMP_ID: cfg.KINTAI_COMP_ID } : {}), ...("withBinding" in cfg ? { KINTAI: kintai } : {}) },
+      compId,
+    );
+    expect(reader!.route).toBe("onprem");
+    await reader!.read("/api/kintai/rest-diff?month=2026-07", { method: "GET", headers: { Accept: "application/json" } });
+    expect(kintai.fetch).not.toHaveBeenCalled();
+    expect(seen[0]!.url).toBe("https://rust-ichiban.example/api/kintai/rest-diff?month=2026-07");
+    expect(seen[0]!.init!.method).toBe("GET");
+    expect(seen[0]!.init!.headers).toEqual({
+      Accept: "application/json",
+      "CF-Access-Client-Id": "cid",
+      "CF-Access-Client-Secret": "csec",
+    });
+  });
+
+  it("オンプレ版はヘッダー無しの呼び出しでも CF Access を付ける (Secrets Store binding の get() を読む)", async () => {
+    const seen = stubFetch();
+    const reader = await kintaiReader({ ...CF, ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => "from-store" } }, "1001");
+    await reader!.read("/api/kintai/pdf-json?month=2026-07");
+    expect(seen[0]!.init!.headers).toEqual({ "CF-Access-Client-Id": "cid", "CF-Access-Client-Secret": "from-store" });
+  });
+
+  it.each([
+    ["URL", { NUXT_ICHIBAN_API_URL: "" }],
+    ["client id", { NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: undefined }],
+    ["client secret", { ICHIBAN_CF_ACCESS_CLIENT_SECRET: undefined }],
+  ])("binding が無く CF Access の %s が欠けていれば null", async (_label, missing) => {
+    expect(await kintaiReader({ ...CF, ...missing }, "1001")).toBeNull();
+  });
+
+  it("secret の解決が throw したら onSecretError に渡し、未設定と同じ null (既定の onSecretError は何もしない)", async () => {
+    const boom = new Error("secret store down");
+    const env = { ...CF, ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => Promise.reject(boom) } };
+    const onSecretError = vi.fn();
+    expect(await kintaiReader(env, "1001", onSecretError)).toBeNull();
+    expect(onSecretError).toHaveBeenCalledWith(boom);
+    expect(await kintaiReader(env, "1001")).toBeNull();
+  });
+
+  it("読み先の一覧は worker と onprem (memo の無効化が両方を消すのに使う)", () => {
+    expect(KINTAI_READ_ROUTES).toEqual(["worker", "onprem"]);
   });
 });
 
@@ -1372,7 +1466,8 @@ describe("checkKyuyoAccess — 給与 allowlist の関門 (auth-worker RPC、Ref
 
 describe("judgeKintaiGate — GCP を読むだけの口の関門の順序 (Refs #1133 c1133-40)", () => {
   const SECRET = "shared-secret";
-  const full = { authWorker: { name: "auth" }, compId: "90000001", origin: "https://onprem.invalid", cfId: "cid", cfSecret: "csecret", proxySecret: SECRET };
+  const reader: KintaiReader = { route: "onprem", read: async () => new Response() };
+  const full = { authWorker: { name: "auth" }, compId: "90000001", reader, proxySecret: SECRET };
   const eq = (a: string, b: string) => a === b;
 
   it("全部そろっていて secret が一致すれば通し、配線を返す", () => {
@@ -1393,7 +1488,7 @@ describe("judgeKintaiGate — GCP を読むだけの口の関門の順序 (Refs 
   });
 
   it("secret が違えば、ほかの配線が欠けていても 401 (設定の様子を教えない)", () => {
-    const got = judgeKintaiGate({ ...full, authWorker: undefined, origin: "", cfId: "", cfSecret: "" }, "", eq);
+    const got = judgeKintaiGate({ ...full, authWorker: undefined, reader: null }, "", eq);
     expect(got).toEqual({ ok: false, status: 401, error: "Unauthorized" });
   });
 
@@ -1408,9 +1503,7 @@ describe("judgeKintaiGate — GCP を読むだけの口の関門の順序 (Refs 
 
   it.each([
     ["auth-worker の binding", { authWorker: undefined }],
-    ["オンプレの URL", { origin: "" }],
-    ["CF Access の client id", { cfId: "" }],
-    ["CF Access の client secret", { cfSecret: "" }],
+    ["読み先 (勤怠 Worker の binding もオンプレの CF Access も無い)", { reader: null }],
   ])("secret が一致し %s だけが欠けていれば 503 で、reason は付けない", (_label, missing) => {
     const got = judgeKintaiGate({ ...full, ...missing }, SECRET, eq);
     expect(got).toEqual({ ok: false, status: 503, error: "kintai-relay not configured" });
