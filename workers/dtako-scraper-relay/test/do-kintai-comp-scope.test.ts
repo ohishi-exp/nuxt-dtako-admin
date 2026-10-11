@@ -170,9 +170,10 @@ describe("KINTAI_SINGLE_COMP_PATHS (Refs #1133 c1133-8)", () => {
     });
   });
 
-  it("(b) 一致なら /kintai/stale-months は GCP (auth-worker 経由) まで届く", async () => {
+  // stale-months は勤怠 Worker にしか送らない (binding の無いこの makeDO では 503) ので、auth-worker まで届く口で測る
+  it("(b) 一致なら /kintai/unko-gaps は GCP (auth-worker 経由) まで届く", async () => {
     const { call, authWorkerUpstream } = makeDO();
-    const res = await call("GET", "/restraint-api/kintai/stale-months", OWN_COMP);
+    const res = await call("GET", "/restraint-api/kintai/unko-gaps?month=2026-06", OWN_COMP);
     expect(res.status).not.toBe(403);
     expect(authWorkerUpstream.some((u) => u.includes("/ichibanboshi-proxy/"))).toBe(true);
   });

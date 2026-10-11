@@ -24,7 +24,10 @@ import {
   buildDeps,
   kintaiAutoloader,
   kintaiReader,
+  kintaiRelayFailStatus,
+  KintaiWorkerUnavailableError,
   kintaiWorkerFor,
+  readKintaiWriteToken,
   KINTAI_READ_ROUTES,
   KintaiRelayError,
   MAX_MONTH_COUNT,
@@ -1052,7 +1055,15 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
   });
 
   /** 本番の設定: KINTAI あり・読む会社 = KINTAI_COMP_ID。 */
-  function setup(over: { kintai?: boolean; compId?: string; kintaiCompId?: string | undefined } = {}) {
+  function setup(
+    over: {
+      kintai?: boolean;
+      compId?: string;
+      kintaiCompId?: string | undefined;
+      writeToken?: string;
+      authWorker?: boolean;
+    } = {},
+  ) {
     const respond = async (url: string) =>
       url.includes("/api/kintai/shift-days")
         ? json({ month: new URL(url).searchParams.get("month"), driver_cd: 9001, items: [] })
@@ -1061,12 +1072,13 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     const kintai = { fetch: vi.fn(async (url: string, _init?: RequestInit) => respond(url)) };
     const deps = buildDeps({
       reader: { route: "onprem", read: async () => json({}) },
-      authWorker,
+      authWorker: over.authWorker === false ? undefined : authWorker,
       proxySecret: "proxy-secret",
       tenantId: "tenant-a",
       kintai: over.kintai === false ? undefined : kintai,
       compId: over.compId ?? "1001",
       kintaiCompId: "kintaiCompId" in over ? over.kintaiCompId : "1001",
+      writeToken: "writeToken" in over ? over.writeToken : "write-token",
     });
     return { deps, authWorker, kintai };
   }
@@ -1139,22 +1151,110 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
     expect(authWorker.fetch).not.toHaveBeenCalled();
   });
 
-  it("残す口 (window・recalc・stale-months・wage-snapshot) は本番の設定でも auth-worker 経由のまま", async () => {
+  /** recalc (GET・POST)・window・stale-months を relay の実際の関数で叩き、失敗も含めて結果を並べる。 */
+  async function hitWorkerOnly(deps: KintaiRelayDeps) {
+    const settle = (p: Promise<unknown>) =>
+      p.then(
+        () => "ok",
+        (e: unknown) => (e instanceof KintaiWorkerUnavailableError ? kintaiRelayFailStatus(e) : String(e)),
+      );
+    return [
+      await settle(relayKintaiWindow(deps, { month: MONTH, apply: false })),
+      await settle(relayKintaiRecalc(deps, { month: MONTH })),
+      await settle(relayKintaiRecalc(deps, { month: MONTH, apply: true })),
+      await settle(relayKintaiStaleMonths(deps, {})),
+    ];
+  }
+
+  /** 呼ばれた Worker の path・method・`X-Kintai-Write-Token`。 */
+  function workerCalls(kintai: { fetch: { mock: { calls: unknown[][] } } }) {
+    return kintai.fetch.mock.calls.map((c) => {
+      const init = c[1] as RequestInit | undefined;
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      return [new URL(String(c[0])).pathname, init?.method ?? "GET", h["X-Kintai-Write-Token"] ?? null];
+    });
+  }
+
+  it("本番の設定: recalc の GET・stale-months は token なし、POST の recalc・window は token 付きで Worker。auth-worker は 0 回", async () => {
     globalThis.fetch = vi.fn(async () => json({ drivers: [], events: [] })) as unknown as typeof fetch;
     const { deps, authWorker, kintai } = setup();
-    await relayKintaiWindow(deps, { month: MONTH, apply: false });
-    await relayKintaiRecalc(deps, { month: MONTH });
-    await relayKintaiRecalc(deps, { month: MONTH, apply: true });
-    await relayKintaiStaleMonths(deps, {});
-    await relayWageSnapshotPut(deps, "1001", { month: MONTH, rows: [] });
-    expect(kintai.fetch).not.toHaveBeenCalled();
-    expect(authWorker.fetch.mock.calls.map((c) => new URL(String(c[0])).pathname)).toEqual([
-      "/ichibanboshi-proxy/api/kintai/timecard/window",
-      "/ichibanboshi-proxy/api/kintai/recalc",
-      "/ichibanboshi-proxy/api/kintai/recalc",
-      "/ichibanboshi-proxy/api/kintai/stale-months",
-      "/ichibanboshi-proxy/api/kintai/wage-snapshot",
+    expect(await hitWorkerOnly(deps)).toEqual(["ok", "ok", "ok", "ok"]);
+    expect(workerCalls(kintai)).toEqual([
+      ["/api/kintai/timecard/window", "POST", "write-token"],
+      ["/api/kintai/recalc", "GET", null],
+      ["/api/kintai/recalc", "POST", "write-token"],
+      ["/api/kintai/stale-months", "GET", null],
     ]);
+    for (const c of kintai.fetch.mock.calls) {
+      const h = (c[1] as RequestInit).headers as Record<string, string>;
+      expect(h).not.toHaveProperty("X-Alc-Proxy-Secret");
+      expect(h).not.toHaveProperty("X-Tenant-ID");
+    }
+    expect(authWorker.fetch).not.toHaveBeenCalled();
+  });
+
+  it("書き込みは口ごとの deps: window の POST は window へ、recalc の POST は recalc へ (query 付きでも取り違えない)", async () => {
+    const { deps, kintai } = setup();
+    await deps.gcp("/api/kintai/timecard/window?x=1", { method: "POST" });
+    await deps.gcp("/api/kintai/recalc?x=1", { method: "POST" });
+    expect(kintai.fetch.mock.calls.map((c) => String(c[0]))).toEqual([
+      "https://ichibanboshi-kintai/api/kintai/timecard/window?x=1",
+      "https://ichibanboshi-kintai/api/kintai/recalc?x=1",
+    ]);
+  });
+
+  it("token は auth-worker にも読みの口にも付けない (本番の設定で wage-snapshot は今の auth-worker 経由)", async () => {
+    const { deps, authWorker, kintai } = setup();
+    await relayWageSnapshotPut(deps, "1001", { month: MONTH, rows: [] });
+    await readFive(deps);
+    expect(authWorker.fetch).toHaveBeenCalledTimes(1);
+    for (const c of kintai.fetch.mock.calls) {
+      expect((c[1] as RequestInit | undefined)?.headers ?? {}).not.toHaveProperty("X-Kintai-Write-Token");
+    }
+    for (const c of authWorker.fetch.mock.calls) {
+      expect((c[1] as RequestInit).headers).not.toHaveProperty("X-Kintai-Write-Token");
+    }
+  });
+
+  it.each([
+    ["binding が無い", { kintai: false }],
+    ["別の会社", { compId: "2002" }],
+    ["KINTAI_COMP_ID が未設定", { kintaiCompId: undefined }],
+  ] as const)("%s: 4 本とも 503 (KintaiWorkerUnavailableError)。auth-worker にも Worker にも送らない", async (_l, over) => {
+    globalThis.fetch = vi.fn(async () => json({ drivers: [], events: [] })) as unknown as typeof fetch;
+    const { deps, authWorker, kintai } = setup(over);
+    expect(await hitWorkerOnly(deps)).toEqual([503, 503, 503, 503]);
+    expect(authWorker.fetch).not.toHaveBeenCalled();
+    expect(kintai.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([["token が空", ""], ["token が無い", undefined]] as const)(
+    "%s: POST の recalc・window は 503、recalc の GET・stale-months は token なしで Worker。auth-worker は 0 回",
+    async (_l, writeToken) => {
+      globalThis.fetch = vi.fn(async () => json({ drivers: [], events: [] })) as unknown as typeof fetch;
+      const { deps, authWorker, kintai } = setup({ writeToken });
+      expect(await hitWorkerOnly(deps)).toEqual([503, "ok", 503, "ok"]);
+      expect(workerCalls(kintai)).toEqual([
+        ["/api/kintai/recalc", "GET", null],
+        ["/api/kintai/stale-months", "GET", null],
+      ]);
+      expect(authWorker.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("AUTH_WORKER が無くても 4 本は Worker で動く。auth-worker 経由の口だけが落ちる", async () => {
+    globalThis.fetch = vi.fn(async () => json({ drivers: [], events: [] })) as unknown as typeof fetch;
+    const { deps } = setup({ authWorker: false });
+    expect(await hitWorkerOnly(deps)).toEqual(["ok", "ok", "ok", "ok"]);
+    await expect(relayWageSnapshotPut(deps, "1001", { month: MONTH, rows: [] })).rejects.toThrow(
+      "AUTH_WORKER が未設定です: /api/kintai/wage-snapshot",
+    );
+  });
+
+  it("kintaiRelayFailStatus: 送り先が揃わないときだけ 503、ほか (上流の失敗) は 502", () => {
+    expect(kintaiRelayFailStatus(new KintaiWorkerUnavailableError("x"))).toBe(503);
+    expect(kintaiRelayFailStatus(new Error("gcp kintai recalc 500"))).toBe(502);
+    expect(kintaiRelayFailStatus("x")).toBe(502);
   });
 
   it("Worker の失敗は今の経路と同じく readJson の失敗として投げる (応答の扱いは変えない)", async () => {

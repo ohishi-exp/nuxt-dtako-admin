@@ -165,8 +165,10 @@ import {
   KINTAI_WORKER_BASE,
   kintaiAutoloader,
   kintaiReader,
+  kintaiRelayFailStatus,
   kintaiWorkerFor,
   kintaiWriteDeps,
+  readKintaiWriteToken,
   WAGE_SNAPSHOT_PATH,
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
@@ -2146,16 +2148,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     });
     try {
       // オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`kintaiReader`)。
-      // INTERNAL_SHARED_SECRET は GCP 側 (auth-worker 経由の書き込み) に使うので常に要る
-      const [sharedSecret, reader] = await Promise.all([
-        resolveSecret(this.env.INTERNAL_SHARED_SECRET),
+      // recalc は勤怠 Worker にしか送らない (`buildDeps` の KINTAI_WORKER_ONLY_PATHS) ので
+      // INTERNAL_SHARED_SECRET・AUTH_WORKER は要らない。書き込みの token はここで 1 回だけ読む
+      const [reader, writeToken] = await Promise.all([
         this.kintaiReaderFor(account.comp_id, "kintai_fold"),
+        this.kintaiWriteTokenFor(account.comp_id, "kintai_fold"),
       ]);
-      if (!reader || !sharedSecret) {
+      if (!reader) {
         await this.recordFold(jobKey, {
           fold_state: "not_configured",
           fold_error:
-            "NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET (勤怠 Worker の binding が無いとき) / INTERNAL_SHARED_SECRET のいずれかが未設定",
+            "NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET (勤怠 Worker の binding が無いとき) のいずれかが未設定",
         });
         return ALERT_REASON_FOLD_NOT_CONFIGURED;
       }
@@ -2163,11 +2166,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const deps = buildDeps({
         reader,
         authWorker: this.env.AUTH_WORKER,
-        proxySecret: sharedSecret,
+        proxySecret: "",
         tenantId: account.tenant_id,
         kintai: this.env.KINTAI,
         compId: account.comp_id,
         kintaiCompId: this.env.KINTAI_COMP_ID,
+        writeToken,
       });
 
       let totalPages = 0;
@@ -7563,6 +7567,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     );
   }
 
+  /** `compId` の勤怠 Worker の書き込み token (`kintai-relay.ts` の `readKintaiWriteToken`)。log の作法は `kintaiReaderFor` と同じ。 */
+  private kintaiWriteTokenFor(compId: string, tag: string): Promise<string> {
+    return readKintaiWriteToken(this.env, compId, (err) =>
+      console.error(JSON.stringify({ [tag]: "secret-error", error: describeUnknownError(err) })),
+    );
+  }
+
   /** `compId` の ② 取り込みの送り先 (`kintai-relay.ts` の `kintaiAutoloader`)。log の作法は `kintaiReaderFor` と同じ。 */
   private kintaiAutoloaderFor(compId: string, tag: string): Promise<KintaiAutoloader | null> {
     return kintaiAutoloader(this.env, compId, (err) =>
@@ -7584,20 +7595,28 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * account の tenant_id 解決 + オンプレ側の読み先 (`kintaiReader`) と GCP の資格情報を揃えて
    * `kintai-relay.ts` の deps を組む。揃わなければ理由付きの Response を返す (呼び出し側は
    * `instanceof Response` で分岐する)。
+   *
+   * `workerOnly` は勤怠 Worker にしか送らない口 (recalc・window・stale-months) だけを使う呼び手。
+   * auth-worker を通らないので INTERNAL_SHARED_SECRET・AUTH_WORKER を要求しない。
+   * 書き込みの token (`writeToken`) はここで 1 回だけ読む。
    */
   private async buildKintaiRelayContext(
     compId: string,
     tag: string,
+    workerOnly = false,
   ): Promise<
-    | { deps: KintaiRelayDeps; reader: KintaiReader }
+    | { deps: KintaiRelayDeps; reader: KintaiReader; writeToken: string }
     | Response
   > {
     const reader = await this.kintaiReaderFor(compId, tag);
     if (!reader) return dvrJsonError(503, "オンプレの取得先 (NUXT_ICHIBAN_*) が未設定です");
     const account = await this.resolveAccount(compId);
     if (!account) return dvrJsonError(500, `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません`);
-    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
-    if (!sharedSecret || !this.env.AUTH_WORKER) {
+    const [sharedSecret, writeToken] = await Promise.all([
+      resolveSecret(this.env.INTERNAL_SHARED_SECRET),
+      this.kintaiWriteTokenFor(compId, tag),
+    ]);
+    if (!workerOnly && (!sharedSecret || !this.env.AUTH_WORKER)) {
       return dvrJsonError(503, "GCP の取得先 (INTERNAL_SHARED_SECRET / AUTH_WORKER) が未設定です");
     }
     const deps = buildDeps({
@@ -7608,8 +7627,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       kintai: this.env.KINTAI,
       compId,
       kintaiCompId: this.env.KINTAI_COMP_ID,
+      writeToken,
     });
-    return { deps, reader };
+    return { deps, reader, writeToken };
   }
 
   /**
@@ -7763,7 +7783,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 責務 — ここで丸めない (#620 の教訓: 「無い」と「引けていない」を混同しない)。
    */
   private async handleKintaiStaleMonths(record: TheearthSessionRecord, url: URL): Promise<Response> {
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_stale_months");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_stale_months", true);
     if (ctx instanceof Response) return ctx;
 
     const from = url.searchParams.get("from") || undefined;
@@ -7775,7 +7795,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json(months);
     } catch (err) {
       console.error(JSON.stringify({ kintai_stale_months: "error", error: describeUnknownError(err) }));
-      return dvrJsonError(502, err instanceof Error ? err.message : "月別 stale の取得に失敗しました");
+      return dvrJsonError(kintaiRelayFailStatus(err), err instanceof Error ? err.message : "月別 stale の取得に失敗しました");
     }
   }
 
@@ -7854,7 +7874,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * も dry-run の既定もあちらが持つ。**`apply=true` を明示した時だけ書く。**
    */
   private async handleKintaiRefreshTimecard(record: TheearthSessionRecord, url: URL): Promise<Response> {
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_timecard");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_timecard", true);
     if (ctx instanceof Response) return ctx;
 
     const month = url.searchParams.get("month") || undefined;
@@ -7882,7 +7902,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json(report);
     } catch (err) {
       console.error(JSON.stringify({ kintai_refresh_timecard: "error", error: describeUnknownError(err) }));
-      return dvrJsonError(502, err instanceof Error ? err.message : "打刻の運び直しに失敗しました");
+      return dvrJsonError(kintaiRelayFailStatus(err), err instanceof Error ? err.message : "打刻の運び直しに失敗しました");
     }
   }
 
@@ -7898,7 +7918,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 当たる実測がある (#615-3 決定3)。
    */
   private async handleKintaiRefreshFold(record: TheearthSessionRecord, url: URL): Promise<Response> {
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_fold");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_fold", true);
     if (ctx instanceof Response) return ctx;
 
     const parsed = this.parseMonthParam(url);
@@ -7935,7 +7955,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json(report);
     } catch (err) {
       console.error(JSON.stringify({ kintai_refresh_fold: "error", error: describeUnknownError(err) }));
-      return dvrJsonError(502, err instanceof Error ? err.message : "畳み直しに失敗しました");
+      return dvrJsonError(kintaiRelayFailStatus(err), err instanceof Error ? err.message : "畳み直しに失敗しました");
     }
   }
 
@@ -10008,15 +10028,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // Worker の書き先テナントは自分の KINTAI_TENANT_ID 固定 (relay の KV の tenant は使わない) で、
     // KINTAI_COMP_ID の会社の tenant と一致する前提。それ以外は auth-worker 経由のまま
     const kintai = kintaiWorkerFor(this.env.KINTAI, record.compId, this.env.KINTAI_COMP_ID);
-    let writeToken = "";
-    if (kintai) {
-      try {
-        writeToken = await resolveSecretBinding(this.env.KINTAI_WRITE_TOKEN);
-      } catch (err) {
-        console.error(JSON.stringify({ wage_snapshot: "secret-error", error: describeUnknownError(err) }));
-      }
-    }
-    const deps = kintai && writeToken ? kintaiWriteDeps(kintai, writeToken, WAGE_SNAPSHOT_PATH) : ctx.deps;
+    const deps = kintai && ctx.writeToken ? kintaiWriteDeps(kintai, ctx.writeToken, WAGE_SNAPSHOT_PATH) : ctx.deps;
     try {
       return Response.json(await relayWageSnapshotPut(deps, record.compId, body));
     } catch (err) {

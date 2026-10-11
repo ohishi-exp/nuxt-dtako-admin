@@ -14,7 +14,7 @@ vi.mock("cloudflare:workers", () => ({
 }));
 
 import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
-import type { KintaiReader } from "../src/kintai-relay";
+import { relayKintaiStaleMonths, type KintaiReader, type KintaiRelayDeps } from "../src/kintai-relay";
 
 (globalThis as unknown as { WebSocketRequestResponsePair: unknown }).WebSocketRequestResponsePair =
   class {
@@ -57,6 +57,7 @@ function reply(url: string): Response {
 
 interface Call {
   url: string;
+  method: string;
   headers: Record<string, string>;
 }
 
@@ -69,6 +70,10 @@ interface Setup {
   kintaiBinding?: boolean;
   /** オンプレ版の CF Access の設定を置くか (既定 true)。 */
   cfAccess?: boolean;
+  /** 勤怠 Worker の書き込み token を置くか (既定 true = 本番の形)。 */
+  writeToken?: boolean;
+  /** INTERNAL_SHARED_SECRET・AUTH_WORKER (introspect 以外) を置くか (既定 true)。 */
+  gcpProxy?: boolean;
 }
 
 function makeDO(opts: Setup = {}) {
@@ -82,7 +87,7 @@ function makeDO(opts: Setup = {}) {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      onprem.push({ url, headers: headersOf(init) });
+      onprem.push({ url, method: init?.method ?? "GET", headers: headersOf(init) });
       return reply(url);
     }),
   );
@@ -103,8 +108,9 @@ function makeDO(opts: Setup = {}) {
       list: async () => ({ objects: [], truncated: false }),
     },
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
-    INTERNAL_SHARED_SECRET: "shared-secret",
+    INTERNAL_SHARED_SECRET: opts.gcpProxy === false ? "" : "shared-secret",
     KINTAI_COMP_ID: COMP,
+    ...(opts.writeToken === false ? {} : { KINTAI_WRITE_TOKEN: "write-token" }),
     UPSTREAM_CACHE: "on",
     RELAY: { idFromName: () => "id", get: () => cacheStub },
     ...(opts.cfAccess === false
@@ -119,7 +125,7 @@ function makeDO(opts: Setup = {}) {
       : {
           KINTAI: {
             fetch: vi.fn(async (url: string, init?: RequestInit) => {
-              kintai.push({ url, headers: headersOf(init) });
+              kintai.push({ url, method: init?.method ?? "GET", headers: headersOf(init) });
               return reply(url);
             }),
           },
@@ -213,7 +219,11 @@ const ROUTES: Array<[label: string, method: "GET" | "POST", path: string, body: 
     "GET",
     `/restraint-api/kintai/diff?month=${YM}`,
     undefined,
-    ["/api/kintai/day-summaries?month=2026-06", "/api/kintai/kosoku-daily?month=2026-06"],
+    [
+      "/api/kintai/day-summaries?month=2026-06",
+      "/api/kintai/kosoku-daily?month=2026-06",
+      "/api/kintai/recalc?max_drivers=50&month=2026-06",
+    ],
   ],
   [
     "取り直し ① の保証の判定 (rest-diff)",
@@ -227,7 +237,7 @@ const ROUTES: Array<[label: string, method: "GET" | "POST", path: string, body: 
     "POST",
     `/restraint-api/kintai/refresh/timecard?month=${YM}`,
     undefined,
-    ["/api/kintai/timecard/events?months=2026-05%2C2026-06"],
+    ["/api/kintai/timecard/events?months=2026-05%2C2026-06", "/api/kintai/timecard/window"],
   ],
   [
     "day-events-lookup",
@@ -282,6 +292,10 @@ const ROUTES: Array<[label: string, method: "GET" | "POST", path: string, body: 
 
 const CF_HEADERS = ["cf-access-client-id", "cf-access-client-secret"];
 const SECRET_HEADERS = [...CF_HEADERS, "x-alc-proxy-secret", "x-kintai-write-token"];
+/** 勤怠 Worker にしか送らない口 (recalc・window・stale-months)。binding が無ければオンプレにも auth-worker にも行かない。 */
+const WORKER_ONLY = ["/api/kintai/recalc", "/api/kintai/timecard/window", "/api/kintai/stale-months"];
+/** 書き込み (POST) の口。`X-Kintai-Write-Token` を付けてよいのはこの 2 本の POST だけ。 */
+const WRITE_PATHS = ["/api/kintai/recalc", "/api/kintai/timecard/window"];
 
 describe("DO の勤怠の読み → 勤怠 Worker (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
   describe.each([
@@ -294,9 +308,13 @@ describe("DO の勤怠の読み → 勤怠 Worker (Refs ohishi-exp/rust-ichibanb
       expect(res.status).toBeLessThan(500);
       expect(kintaiReads(onprem)).toEqual([]);
       expect(kintaiReads(kintai)).toEqual(reads);
-      // Worker への要求に CF Access・secret のヘッダーが無い
+      // Worker への要求に CF Access・secret のヘッダーが無い (書き込みの POST の token だけは付く)
       for (const c of kintai) {
-        for (const h of SECRET_HEADERS) expect(c.headers).not.toHaveProperty(h);
+        const write = c.method === "POST" && WRITE_PATHS.includes(new URL(c.url).pathname);
+        for (const h of SECRET_HEADERS) {
+          if (write && h === "x-kintai-write-token") expect(c.headers[h]).toBe("write-token");
+          else expect(c.headers).not.toHaveProperty(h);
+        }
         expect(c.url.startsWith("https://ichibanboshi-kintai/")).toBe(true);
       }
     });
@@ -305,10 +323,14 @@ describe("DO の勤怠の読み → 勤怠 Worker (Refs ohishi-exp/rust-ichibanb
   it.each(ROUTES)("KINTAI が無ければ %s は今のまま CF Access 付きでオンプレを読む", async (_l, method, path, body, reads) => {
     const { call, onprem, kintai } = makeDO({ kintaiBinding: false });
     const res = await call(method, path, body);
-    expect(res.status).toBeLessThan(500);
+    // window は勤怠 Worker にしか送らないので binding が無ければ 503 (オンプレの読みまでは今のまま)
+    expect(res.status).toBe(path.startsWith("/restraint-api/kintai/refresh/timecard") ? 503 : 200);
     expect(kintai).toEqual([]);
-    // diff の GCP (day-summaries) は binding が無いと auth-worker 経由 (オンプレではない)
-    expect(kintaiReads(onprem)).toEqual(reads.filter((r) => !r.startsWith("/api/kintai/day-summaries")));
+    // diff の GCP (day-summaries) は binding が無いと auth-worker 経由 (オンプレではない)。
+    // recalc・window は binding が無ければどこにも送らない
+    expect(kintaiReads(onprem)).toEqual(
+      reads.filter((r) => !r.startsWith("/api/kintai/day-summaries") && !WORKER_ONLY.includes(r.split("?")[0]!)),
+    );
     for (const c of onprem.filter((x) => new URL(x.url).pathname.startsWith("/api/kintai/"))) {
       expect(c.url.startsWith("https://ichiban.invalid/api/kintai/")).toBe(true);
       expect(c.headers["cf-access-client-id"]).toBe("cid");
@@ -332,6 +354,106 @@ describe("DO の勤怠の読み → 勤怠 Worker (Refs ohishi-exp/rust-ichibanb
   });
 });
 
+describe("recalc・window・stale-months は勤怠 Worker だけ (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  /** DO の口と、そこから勤怠 Worker へ送る (path, method, token) の並び。 */
+  const WORKER_ONLY_ROUTES: Array<[label: string, method: "GET" | "POST", path: string, sent: Array<[string, string, string | null]>]> = [
+    ["stale-months", "GET", "/restraint-api/kintai/stale-months", [["/api/kintai/stale-months", "GET", null]]],
+    [
+      "refresh/fold (preview)",
+      "POST",
+      `/restraint-api/kintai/refresh/fold?month=${YM}`,
+      [["/api/kintai/recalc", "GET", null]],
+    ],
+    [
+      "refresh/fold (apply)",
+      "POST",
+      `/restraint-api/kintai/refresh/fold?month=${YM}&apply=true`,
+      [["/api/kintai/recalc", "POST", "write-token"]],
+    ],
+    [
+      "refresh/timecard",
+      "POST",
+      `/restraint-api/kintai/refresh/timecard?month=${YM}`,
+      [["/api/kintai/timecard/window", "POST", "write-token"]],
+    ],
+  ];
+  const sentTo = (kintai: Call[]) =>
+    kintai
+      .filter((c) => WORKER_ONLY.includes(new URL(c.url).pathname))
+      .map((c) => [new URL(c.url).pathname, c.method, c.headers["x-kintai-write-token"] ?? null]);
+
+  it.each(WORKER_ONLY_ROUTES)("本番の設定: %s は勤怠 Worker へ送り、auth-worker を呼ばない", async (_l, method, path, sent) => {
+    const { call, kintai, authWorker } = makeDO();
+    const res = await call(method, path);
+    expect(res.status).toBe(200);
+    expect(sentTo(kintai)).toEqual(sent);
+    expect(authWorker).toEqual([]);
+  });
+
+  it("INTERNAL_SHARED_SECRET・AUTH_WORKER が無くても 3 口の ctx は組める (auth-worker を通らない)。他の口の ctx は今どおり 503", async () => {
+    // 口経由だと viewer の認可 (introspect) が先に secret を使うので、ctx を直接組んで測る
+    type Ctx = { deps: KintaiRelayDeps } | Response;
+    const { relay, kintai } = makeDO({ gcpProxy: false });
+    const env = (relay as unknown as { env: Record<string, unknown> }).env;
+    delete env.AUTH_WORKER;
+    const build = (relay as unknown as { buildKintaiRelayContext(c: string, t: string, w?: boolean): Promise<Ctx> })
+      .buildKintaiRelayContext.bind(relay);
+    const ctx = await build(COMP, "t", true);
+    expect(ctx).not.toBeInstanceOf(Response);
+    await relayKintaiStaleMonths((ctx as { deps: KintaiRelayDeps }).deps, {});
+    expect(sentTo(kintai)).toEqual([["/api/kintai/stale-months", "GET", null]]);
+    const other = await build(COMP, "t");
+    expect((other as Response).status).toBe(503);
+  });
+
+  it.each(WORKER_ONLY_ROUTES)("binding が無ければ %s は 503。auth-worker にもオンプレにも送らない", async (_l, method, path) => {
+    const { call, onprem, authWorker } = makeDO({ kintaiBinding: false });
+    const res = await call(method, path);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toContain("勤怠 Worker の binding が無いか");
+    expect(authWorker).toEqual([]);
+    expect(onprem.filter((c) => WORKER_ONLY.includes(new URL(c.url).pathname))).toEqual([]);
+  });
+
+  it.each(WORKER_ONLY_ROUTES)("token が読めなければ %s の POST だけ 503、GET は Worker", async (_l, method, path, sent) => {
+    const { call, kintai, authWorker } = makeDO({ writeToken: false });
+    const res = await call(method, path);
+    const write = sent.some(([, m]) => m === "POST");
+    expect(res.status).toBe(write ? 503 : 200);
+    expect(sentTo(kintai)).toEqual(write ? [] : sent);
+    expect(authWorker).toEqual([]);
+  });
+
+  it("token の読みで投げたら console.error に残し、POST は 503", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { relay, call, authWorker } = makeDO();
+    (relay as unknown as { env: Record<string, unknown> }).env.KINTAI_WRITE_TOKEN = {
+      get: async () => {
+        throw new Error("secrets store down");
+      },
+    };
+    const res = await call("POST", `/restraint-api/kintai/refresh/fold?month=${YM}&apply=true`);
+    expect(res.status).toBe(503);
+    expect(authWorker).toEqual([]);
+    expect(errors.mock.calls.some(([l]) => String(l).includes("kintai_refresh_fold") && String(l).includes("secrets store down"))).toBe(true);
+    errors.mockRestore();
+  });
+
+  it("突合 (diff) の観測値の recalc (preview) も Worker。binding が無ければ観測値だけ失敗し、auth-worker には送らない", async () => {
+    const withBinding = makeDO();
+    expect((await withBinding.call("GET", `/restraint-api/kintai/diff?month=${YM}`)).status).toBe(200);
+    expect(sentTo(withBinding.kintai)).toEqual([["/api/kintai/recalc", "GET", null]]);
+    expect(withBinding.authWorker).toEqual([]);
+
+    const noBinding = makeDO({ kintaiBinding: false });
+    const res = await noBinding.call("GET", `/restraint-api/kintai/diff?month=${YM}`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { observations_error: string }).observations_error).toContain("勤怠 Worker の binding が無いか");
+    // day-summaries だけは今の auth-worker 経由 (この PR では触らない)
+    expect(noBinding.authWorker.map((u) => new URL(u).pathname)).toEqual(["/ichibanboshi-proxy/api/kintai/day-summaries"]);
+  });
+});
+
 describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
   type Priv = {
     runFoldMonths(account: unknown, jobKey: string, months: string[]): Promise<string | null>;
@@ -346,8 +468,28 @@ describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-
       states.push(patch);
     });
     const run = () => priv.runFoldMonths({ comp_id: COMP, tenant_id: TENANT }, "job", [YM]);
-    return { run, states };
+    return { run, states, made };
   }
+
+  it("本番の設定: recalc の apply は token 付きで勤怠 Worker へ、auth-worker は 0 回", async () => {
+    const { run, made } = fold({});
+    await run();
+    const recalcCalls = made.kintai.filter((c) => new URL(c.url).pathname === "/api/kintai/recalc");
+    expect(recalcCalls.length).toBeGreaterThan(0);
+    for (const c of recalcCalls) {
+      expect(c.method).toBe("POST");
+      expect(c.headers["x-kintai-write-token"]).toBe("write-token");
+    }
+    expect(made.authWorker).toEqual([]);
+  });
+
+  it("token が読めなければ failed (auth-worker へ倒さない)", async () => {
+    const { run, states, made } = fold({ writeToken: false });
+    expect(await run()).not.toBeNull();
+    expect(states.at(-1)).toMatchObject({ fold_state: "failed" });
+    expect(String(states.at(-1)!.fold_error)).toContain("KINTAI_WRITE_TOKEN が読めません");
+    expect(made.authWorker).toEqual([]);
+  });
 
   it("binding があれば CF Access が未設定でも not_configured にならず畳み直しまで進む", async () => {
     const { run, states } = fold({ cfAccess: false });
@@ -362,10 +504,11 @@ describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-
     expect(states.at(-1)!.fold_state).toBe("not_configured");
   });
 
-  it("INTERNAL_SHARED_SECRET が無ければ binding があっても not_configured (GCP 側の担保は残す)", async () => {
+  it("INTERNAL_SHARED_SECRET が無くても binding があれば畳み直しまで進む (recalc は auth-worker を通らない)", async () => {
     const { run, states } = fold({}, false);
-    expect(await run()).not.toBeNull();
-    expect(states.at(-1)!.fold_state).toBe("not_configured");
+    await run();
+    expect(states.map((s) => s.fold_state)).not.toContain("not_configured");
+    expect(states[0]!.fold_state).toBe("running");
   });
 });
 
