@@ -424,12 +424,7 @@ export async function kintaiAutoloader(
 ): Promise<KintaiAutoloader | null> {
   const kintai = kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID);
   if (kintai) {
-    let writeToken = "";
-    try {
-      writeToken = await resolveSecretBinding(env.KINTAI_WRITE_TOKEN);
-    } catch (err) {
-      onSecretError(err);
-    }
+    const writeToken = await readKintaiWriteToken(env, compId, onSecretError);
     if (writeToken) {
       return { route: "worker", autoload: kintaiWriteDeps(kintai, writeToken, DTAKO_AUTOLOAD_PATH).gcp };
     }
@@ -440,8 +435,41 @@ export async function kintaiAutoloader(
 }
 
 /**
+ * `compId` の勤怠 Worker の書き込み token (`KINTAI_WRITE_TOKEN`)。binding が無い・別の会社なら読まずに `""`。
+ * 読めずに投げたら `onSecretError` に渡して `""` (Refs ohishi-exp/rust-ichibanboshi#322)。
+ */
+export async function readKintaiWriteToken(
+  env: KintaiAutoloadEnv,
+  compId: string,
+  onSecretError: (err: unknown) => void,
+): Promise<string> {
+  if (!kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID)) return "";
+  try {
+    return await resolveSecretBinding(env.KINTAI_WRITE_TOKEN);
+  } catch (err) {
+    onSecretError(err);
+    return "";
+  }
+}
+
+/**
+ * 勤怠 Worker にしか送らない口 (Refs ohishi-exp/rust-ichibanboshi#322)。Cloud Run (auth-worker 経由) へは倒さない:
+ * binding が無い・別の会社・書き込みで token が無いときは [`KintaiWorkerUnavailableError`] で落とす。
+ * GET (stale-months・recalc の preview) は token なし、POST (recalc の apply・window) は口ごとの [`kintaiWriteDeps`]。
+ */
+const KINTAI_WORKER_ONLY_PATHS: ReadonlySet<string> = new Set([RECALC_PATH, WINDOW_PATH, STALE_MONTHS_PATH]);
+
+/** [`KINTAI_WORKER_ONLY_PATHS`] の送り先が揃っていない (呼び手は 503 にする)。 */
+export class KintaiWorkerUnavailableError extends Error {}
+
+/** 中継の失敗の HTTP ステータス。送り先が揃っていなければ 503、それ以外 (上流の失敗) は 502。 */
+export function kintaiRelayFailStatus(err: unknown): 502 | 503 {
+  return err instanceof KintaiWorkerUnavailableError ? 503 : 502;
+}
+
+/**
  * 勤怠 Worker (`ichibanboshi-kintai`) に同じ口がある GCP の読み (Refs ohishi-exp/rust-ichibanboshi#322)。
- * window・recalc・stale-months・wage-snapshot は入れない (Worker に無いか、失敗の扱いが違う)。
+ * wage-snapshot は入れない (失敗の扱いが違う)。window・recalc・stale-months は [`KINTAI_WORKER_ONLY_PATHS`]。
  * unko-gaps は入れる: alc の etags が読めないとき Worker は 502 を返す (Cloud Run は 200 + `gcp_etags_available:false`)。
  * relay は畳まず 502 のまま伝播し、画面は「取得できませんでした」を出す。Worker は `elapsed_ms` を付けない。
  */
@@ -483,7 +511,8 @@ export function kintaiWriteDeps(
 export function buildDeps(opts: {
   /** オンプレ側 (`timecard/events`) の読み先。[`kintaiReader`] が返したもの。 */
   reader: KintaiReader;
-  authWorker: FetcherLike;
+  /** 無ければ auth-worker 経由の口は落ちる ([`KINTAI_WORKER_ONLY_PATHS`] だけを使う呼び手は要らない)。 */
+  authWorker: FetcherLike | undefined;
   proxySecret: string;
   tenantId: string;
   /** 勤怠 Worker への Service Binding (`env.KINTAI`。本番にだけある)。 */
@@ -492,9 +521,19 @@ export function buildDeps(opts: {
   compId: string;
   /** `env.KINTAI_COMP_ID`。 */
   kintaiCompId: string | undefined;
+  /** 勤怠 Worker の書き込み token ([`readKintaiWriteToken`])。無ければ POST の recalc・window は落ちる。 */
+  writeToken?: string;
 }): KintaiRelayDeps {
   // 他の会社の読みは auth-worker 経由のまま (`kintaiWorkerFor`)
   const kintai = kintaiWorkerFor(opts.kintai, opts.compId, opts.kintaiCompId);
+  // 書き込みは口ごとに別の deps (recalc 用の deps で window を叩けない。その逆も)
+  const writes =
+    kintai && opts.writeToken
+      ? new Map([
+          [RECALC_PATH, kintaiWriteDeps(kintai, opts.writeToken, RECALC_PATH)],
+          [WINDOW_PATH, kintaiWriteDeps(kintai, opts.writeToken, WINDOW_PATH)],
+        ])
+      : undefined;
   return {
     onprem(path, init) {
       return opts.reader.read(path, {
@@ -503,13 +542,26 @@ export function buildDeps(opts: {
       });
     },
     gcp(path, init) {
-      if (kintai && KINTAI_WORKER_READ_PATHS.has(path.split("?")[0]!)) {
+      const base = path.split("?")[0]!;
+      const workerOnly = KINTAI_WORKER_ONLY_PATHS.has(base);
+      if (workerOnly && !kintai) {
+        return Promise.reject(
+          new KintaiWorkerUnavailableError(`勤怠 Worker の binding が無いか KINTAI_COMP_ID 以外の会社です: ${base}`),
+        );
+      }
+      if (workerOnly && init?.method === "POST") {
+        const write = writes?.get(base);
+        if (!write) return Promise.reject(new KintaiWorkerUnavailableError(`KINTAI_WRITE_TOKEN が読めません: ${base}`));
+        return write.gcp(path, init);
+      }
+      if (kintai && (workerOnly || KINTAI_WORKER_READ_PATHS.has(base))) {
         // secret・テナント・CF Access は付けない (Worker は見ない。読みの口は認可なし)
         return kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, {
           ...init,
           headers: { ...(init?.headers as Record<string, string>), Accept: "application/json" },
         });
       }
+      if (!opts.authWorker) return Promise.reject(new Error(`AUTH_WORKER が未設定です: ${base}`));
       return opts.authWorker.fetch(`${PROXY_BASE}${PROXY_PREFIX}${path}`, {
         ...init,
         headers: {
@@ -602,8 +654,8 @@ export interface KintaiRecalcInput {
  * 窓の中継 ([`relayKintaiWindow`]) と違って**続きがある** — `after_driver_cd` で
  * 呼び出し側がページングする。応答 (`fold` / `stale` / `next_after_driver_cd`) は
  * 受け側の形をそのまま返す。ここで reshape すると、受け側がフィールドを足したときに
- * 中継だけ直し忘れて情報が欠ける (`.gcp()` は auth-worker `/ichibanboshi-proxy`
- * 経由、`buildDeps` と同じ資格情報)。
+ * 中継だけ直し忘れて情報が欠ける (`.gcp()` は勤怠 Worker だけ。`buildDeps` の
+ * `KINTAI_WORKER_ONLY_PATHS`)。
  *
  * `apply` が無ければ `GET` (受け側は絶対に書かない口)、`apply: true` なら `POST`。
  */

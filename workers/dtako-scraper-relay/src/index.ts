@@ -19,6 +19,8 @@ import {
   judgeKintaiGate,
   judgeYTimeShiftsRequest,
   kintaiReader,
+  kintaiRelayFailStatus,
+  readKintaiWriteToken,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
   relayKintaiShiftOverlaps,
@@ -91,6 +93,8 @@ export interface RelayWorkerEnv {
   AUTH_WORKER_RPC?: AlcTenantDataForwarder;
   /** consumer worker proof (`X-Alc-Proxy-Secret`)。未設定なら打刻の中継は 503。 */
   INTERNAL_SHARED_SECRET?: unknown;
+  /** 勤怠 Worker の書き込みの口の token (`X-Kintai-Write-Token`)。 */
+  KINTAI_WRITE_TOKEN?: unknown;
   /** オンプレ rust-ichibanboshi (CF Tunnel) の origin と CF Access Service Token。 */
   NUXT_ICHIBAN_API_URL?: string;
   NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
@@ -469,40 +473,36 @@ export default {
 };
 
 /**
- * `POST /kintai-relay/run` — 打刻を**窓ぶんまるごと** 1 回で運ぶ。
- *
- * body は `{month?, month_count?, apply?}`。`month` 省略で JST の当月、
- * `month_count` 省略で 2 か月 (当月 + 前月)。**呼び直しは要らない** —
- * 乗務員でも日でも刻まないので 1 回で運びきる。
- * **`apply` を付けない限り 1 行も書かない** (受け側に `dry_run` を立てて渡す)。
+ * `/kintai-relay/run`・`/kintai-relay/recalc` の共通の関門 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
  * 宣言が欠けていれば **503 で fail-closed** — 「走ったが実は何も運んでいない」を
  * 作らない。tenant は KV の `dtako_accounts` から `KINTAI_COMP_ID` で引く
- * (呼び出し元に名乗らせない)。
+ * (呼び出し元に名乗らせない)。窓も recalc も勤怠 Worker にしか送らない (`buildDeps` の
+ * `KINTAI_WORKER_ONLY_PATHS`) ので AUTH_WORKER は要らない。書き込みの token はここで 1 回だけ読む。
  */
-async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise<Response> {
-  const fail = (status: number, error: string) =>
-    new Response(JSON.stringify({ error }), {
-      status,
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-    });
-
-  const authWorker = env.AUTH_WORKER;
+async function passKintaiWriteGate(
+  request: Request,
+  env: RelayWorkerEnv,
+  logKey: string,
+): Promise<{ deps: ReturnType<typeof buildDeps> } | Response> {
   const compId = (env.KINTAI_COMP_ID ?? "").trim();
   // オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`kintaiReader`)
-  const [proxySecret, reader] = await Promise.all([
+  const [proxySecret, reader, writeToken] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
     kintaiReader(env, compId),
+    readKintaiWriteToken(env, compId, (err) =>
+      console.error(JSON.stringify({ [logKey]: "secret-error", error: err instanceof Error ? err.message : String(err) })),
+    ),
   ]);
-  if (!authWorker || !compId || !proxySecret || !reader) {
-    return fail(503, "kintai-relay not configured");
+  if (!compId || !proxySecret || !reader) {
+    return kintaiGcpFail(503, "kintai-relay not configured");
   }
 
   // **呼び出し元の proof。** この口は app (worker/index.ts) が素通しするので外から
-  // 到達しうる。書き込みを起動する機械経路なので、下流と同じ shared secret を
+  // 到達しうる。書き込みを起動する機械経路なので、shared secret を
   // constant-time で検証する (`alc-internal-proxy` の consumer proof と同じ関門)。
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
-  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+  if (!constantTimeEquals(caller, proxySecret)) return kintaiGcpFail(401, "Unauthorized");
 
   const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
   let accounts: unknown = null;
@@ -514,28 +514,46 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
   const tenantId = tenantForCompId(accounts, compId);
   if (!tenantId) {
     // KV から消えた時に静かに別テナントへ書かないよう loud fail (Refs #367 の実害)
-    console.error(JSON.stringify({ kintai_relay: "tenant not resolved", comp_id: compId }));
-    return fail(503, "tenant not resolved from dtako_accounts");
-  }
-
-  let body: { month?: unknown; month_count?: unknown; apply?: unknown };
-  try {
-    body = (await request.json()) as typeof body;
-  } catch {
-    return fail(400, "body must be JSON");
+    console.error(JSON.stringify({ [logKey]: "tenant not resolved", comp_id: compId }));
+    return kintaiGcpFail(503, "tenant not resolved from dtako_accounts");
   }
 
   const deps = buildDeps({
     reader,
-    authWorker,
+    authWorker: env.AUTH_WORKER,
     proxySecret,
     tenantId,
     kintai: env.KINTAI,
     compId,
     kintaiCompId: env.KINTAI_COMP_ID,
+    writeToken,
   });
+  return { deps };
+}
+
+/**
+ * `POST /kintai-relay/run` — 打刻を**窓ぶんまるごと** 1 回で運ぶ。
+ *
+ * body は `{month?, month_count?, apply?}`。`month` 省略で JST の当月、
+ * `month_count` 省略で 2 か月 (当月 + 前月)。**呼び直しは要らない** —
+ * 乗務員でも日でも刻まないので 1 回で運びきる。
+ * **`apply` を付けない限り 1 行も書かない** (受け側に `dry_run` を立てて渡す)。
+ *
+ * 関門は [`passKintaiWriteGate`]。勤怠 Worker の binding・token が無ければ 503。
+ */
+async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const gate = await passKintaiWriteGate(request, env, "kintai_relay");
+  if (gate instanceof Response) return gate;
+
+  let body: { month?: unknown; month_count?: unknown; apply?: unknown };
   try {
-    const report = await relayKintaiWindow(deps, {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return kintaiGcpFail(400, "body must be JSON");
+  }
+
+  try {
+    const report = await relayKintaiWindow(gate.deps, {
       // month 省略 = JST の当月。窓は既定で当月 + 前月
       month: typeof body.month === "string" && body.month ? body.month : undefined,
       monthCount: typeof body.month_count === "number" ? body.month_count : undefined,
@@ -548,7 +566,7 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(JSON.stringify({ kintai_relay: "failed", message }));
-    return fail(502, message);
+    return kintaiGcpFail(kintaiRelayFailStatus(e), message);
   }
 }
 
@@ -560,42 +578,11 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
  * 応答 (`fold` / `stale` / `next_after_driver_cd`) はそのまま返す — 窓の中継と
  * 違い、続きの位置を呼び出し側が運ぶだけなのでこちらでは reshape しない。
  *
- * 認証・tenant 解決は `/kintai-relay/run` と同じ関門 (`X-Alc-Proxy-Secret` の
- * constant-time 検証 → KV `dtako_accounts` から `KINTAI_COMP_ID` で引く)。
+ * 関門は `/kintai-relay/run` と同じ ([`passKintaiWriteGate`])。
  */
 async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promise<Response> {
-  const fail = (status: number, error: string) =>
-    new Response(JSON.stringify({ error }), {
-      status,
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-    });
-
-  const authWorker = env.AUTH_WORKER;
-  const compId = (env.KINTAI_COMP_ID ?? "").trim();
-  // オンプレを読むための CF Access は勤怠 Worker の binding が無いときだけ要る (`kintaiReader`)
-  const [proxySecret, reader] = await Promise.all([
-    resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
-    kintaiReader(env, compId),
-  ]);
-  if (!authWorker || !compId || !proxySecret || !reader) {
-    return fail(503, "kintai-relay not configured");
-  }
-
-  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
-  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
-
-  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
-  let accounts: unknown = null;
-  try {
-    accounts = JSON.parse(accountsRaw || "null");
-  } catch {
-    accounts = null;
-  }
-  const tenantId = tenantForCompId(accounts, compId);
-  if (!tenantId) {
-    console.error(JSON.stringify({ kintai_recalc: "tenant not resolved", comp_id: compId }));
-    return fail(503, "tenant not resolved from dtako_accounts");
-  }
+  const gate = await passKintaiWriteGate(request, env, "kintai_recalc");
+  if (gate instanceof Response) return gate;
 
   let body: {
     month?: unknown;
@@ -607,20 +594,11 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
   try {
     body = (await request.json()) as typeof body;
   } catch {
-    return fail(400, "body must be JSON");
+    return kintaiGcpFail(400, "body must be JSON");
   }
 
-  const deps = buildDeps({
-    reader,
-    authWorker,
-    proxySecret,
-    tenantId,
-    kintai: env.KINTAI,
-    compId,
-    kintaiCompId: env.KINTAI_COMP_ID,
-  });
   try {
-    const report = await relayKintaiRecalc(deps, {
+    const report = await relayKintaiRecalc(gate.deps, {
       month: typeof body.month === "string" && body.month ? body.month : undefined,
       afterDriverCd: typeof body.after_driver_cd === "number" ? body.after_driver_cd : undefined,
       maxDrivers: typeof body.max_drivers === "number" ? body.max_drivers : undefined,
@@ -634,7 +612,7 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(JSON.stringify({ kintai_recalc: "failed", message }));
-    return fail(502, message);
+    return kintaiGcpFail(kintaiRelayFailStatus(e), message);
   }
 }
 
