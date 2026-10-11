@@ -1628,6 +1628,8 @@ describe("ALL_TOOLS", () => {
     run_kintai_recalc: "mcp.write",
     // 拘束サマリの R2 アーカイブ (kintai/ prefix) を書き換えうる (Refs #606-6)
     run_kintai_restraint_sync: "mcp.write",
+    // R2 の summary・勤怠 Worker の D1・オンプレ版を書き換える (Refs ohishi-exp/rust-ichibanboshi#322)
+    run_kintai_restraint_resummarize: "mcp.write",
     // theearth 乗務員マスタ → alc employees の一括 upsert (Refs ippoan/alc-app-s3#125)
     run_driver_master_sync: "mcp.write",
     // 本番の R2 / DB を書き換えうる (Refs ohishi-exp/rust-ichibanboshi#205 の 42)

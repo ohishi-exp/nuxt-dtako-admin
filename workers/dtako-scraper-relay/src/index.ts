@@ -271,6 +271,14 @@ export default {
       return handleRestraintSync(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/restraint-resummarize" && request.method === "POST") {
+      // theearth の拘束サマリを R2 の生 CSV から作り直す (theearth には触らない) 口を
+      // 機械から叩く (Refs ohishi-exp/rust-ichibanboshi#322)。画面の
+      // POST /restraint-api/archive/resummarize と同じ処理を DO 内部
+      // (/cron/restraint-resummarize) へ転送するだけ — restraint-sync と同じ型
+      return handleRestraintResummarize(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/driver-master-run" && request.method === "POST") {
       // theearth 乗務員マスタ → alc employees の同期を、cron (JST 7/12/15/17/19 時)
       // を待たずに 1 回走らせる (Refs ippoan/alc-app-s3#125)。cron 経路と同じ DO
@@ -1220,6 +1228,56 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
 
   const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
   const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/restraint-sync", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ comp_id: compId, month }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/restraint-resummarize` — theearth の拘束サマリを、R2 に保存済みの
+ * 生 CSV から指定した年月ぶん作り直す (theearth には触らない。Refs ohishi-exp/rust-ichibanboshi#322)。
+ * 書き先は R2 の summary・D1・拘束サマリの写しの push 先 (オンプレ版と勤怠 Worker)。
+ *
+ * body は `{month, comp_id?}`。**`month` は必須。** `comp_id` 省略時は `KINTAI_COMP_ID`。
+ * `month` の形式チェック (YYYY-MM) は DO 側 (`handleArchiveResummarize` の
+ * `parseMonthParam`) が持つ — ここでは素通しする (`handleRestraintSync` と同じ)。
+ *
+ * **`/restraint-api/archive/resummarize` (viewer 名前空間) は経由しない。** DO 内部の
+ * `/cron/restraint-resummarize` へ直接転送する。この経路は `scraper-comp-{comp}` の DO で
+ * 走るので、viewer 側の DO が持つ上流キャッシュ (`invalidateKintaiUpstreamCache`) は消さない。
+ */
+export async function handleRestraintResummarize(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { month?: unknown; comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const month = typeof body.month === "string" ? body.month : "";
+  if (!month) return fail(400, "month は必須です");
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/restraint-resummarize", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ comp_id: compId, month }),

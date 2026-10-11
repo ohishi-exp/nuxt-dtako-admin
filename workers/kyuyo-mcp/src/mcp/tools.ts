@@ -2015,6 +2015,46 @@ export const runKintaiRestraintSyncTool = {
   },
 };
 
+// ── run_kintai_restraint_resummarize ────────────────────────────────────────
+
+const runKintaiRestraintResummarizeArgs = z
+  .object({
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("作り直す年月 (YYYY-MM)。省略値は無い"),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * theearth の拘束サマリを、R2 に保存済みの生 CSV から指定した年月ぶん作り直す
+ * (Refs ohishi-exp/rust-ichibanboshi#322)。画面の再計算 (`POST /restraint-api/archive/resummarize`)
+ * と同じ本体を無人で叩けるようにしたもの — あちらは viewer 認証前提で機械から叩けない。
+ *
+ * **運ぶロジックはここに無い。** relay の `POST /kintai-relay/restraint-resummarize` を
+ * 叩くだけ (`run_kintai_restraint_sync` と同じ `X-Alc-Proxy-Secret` 方式)。
+ */
+export const runKintaiRestraintResummarizeTool = {
+  name: "run_kintai_restraint_resummarize",
+  description:
+    "theearth の拘束サマリを指定した年月ぶん作り直す (Refs ohishi-exp/rust-ichibanboshi#322)。" +
+    "**R2 に保存済みの生 CSV から再計算し、theearth には触らない** (ログインもしない)。" +
+    "**書き先は R2 の summary と、拘束サマリの写しの push 先 — 勤怠 Worker の D1 とオンプレ版の両方。**" +
+    "応答の `restraint_push` に宛先ごとの結果 (onprem / kintai) が載る。" +
+    "**機械経路は relay の `scraper-comp-{comp}` の DO で走るので、viewer 側の DO が持つ上流キャッシュ " +
+    "(invalidateKintaiUpstreamCache) は消さない** (画面の再計算ボタンとの違い)。" +
+    "**month は必須、省略値は無い。** timecard の月は run_kintai_restraint_sync を使う。" +
+    "`/restraint-api/*` ではなく `/kintai-relay/*` (機械用の名前空間、X-Alc-Proxy-Secret 方式) を叩く。",
+  inputSchema: runKintaiRestraintResummarizeArgs,
+  // **write tool。** R2 の summary・勤怠 Worker の D1・オンプレ版を書き換える
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runKintaiRestraintResummarizeArgs>) => {
+    return await callRelay(
+      env,
+      "/kintai-relay/restraint-resummarize",
+      { month: args.month, comp_id: args.comp_id },
+    );
+  },
+};
+
 // ── run_driver_master_sync ───────────────────────────────────────────────────
 
 /** 乗務員マスタ同期の失敗本文をエラーに載せるときの上限。relay が返すのは
@@ -3481,6 +3521,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runKintaiRestraintResummarizeTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
