@@ -2028,14 +2028,15 @@ export const runKintaiRestraintResummarizeTool = {
   description:
     "theearth の拘束サマリを指定した年月ぶん作り直す (Refs ohishi-exp/rust-ichibanboshi#322)。" +
     "**R2 に保存済みの生 CSV から再計算し、theearth には触らない** (ログインもしない)。" +
-    "**書き先は R2 の summary と、拘束サマリの写しの push 先 — 勤怠 Worker の D1 とオンプレ版の両方。**" +
-    "応答の `restraint_push` に宛先ごとの結果 (onprem / kintai) が載る。" +
+    "**書き先は R2 の summary と、拘束サマリの写しの push 先 — 勤怠 Worker の D1。**" +
+    "応答の `restraint_push.kintai` に push の結果が載る (旧版の relay は `onprem` キーも返すが、読まなくてよい)。" +
     "**機械経路は relay の `scraper-comp-{comp}` の DO で走るので、viewer 側の DO が持つ上流キャッシュ " +
     "(invalidateKintaiUpstreamCache) は消さない** (画面の再計算ボタンとの違い)。" +
     "**month は必須、省略値は無い。** timecard の月は run_kintai_restraint_sync を使う。" +
     "`/restraint-api/*` ではなく `/kintai-relay/*` (機械用の名前空間、X-Alc-Proxy-Secret 方式) を叩く。",
   inputSchema: runKintaiRestraintResummarizeArgs,
-  // **write tool。** R2 の summary・勤怠 Worker の D1・オンプレ版を書き換える
+  // **write tool。** R2 の summary・勤怠 Worker の D1 を書き換える。応答は relay のものをそのまま返す
+  // (`restraint_push` のキーを決め打ちしない — relay と別に deploy されるので `onprem` の有無どちらでも通す)
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runKintaiRestraintResummarizeArgs>) => {
     return await callRelay(

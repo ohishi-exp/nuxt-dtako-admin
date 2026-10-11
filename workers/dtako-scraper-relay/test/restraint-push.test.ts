@@ -148,8 +148,8 @@ describe('sendRestraintPushBodies', () => {
         throw 'unreachable' // eslint-disable-line no-throw-literal
       },
     }
-    expect(await sendRestraintPushBodies('onprem', t, bodies)).toStrictEqual({ outcome: 'error', error: 'unreachable' })
-    expect(JSON.parse(String(err.mock.calls[0]![0]))).toMatchObject({ restraint_push: 'error', target: 'onprem' })
+    expect(await sendRestraintPushBodies('kintai', t, bodies)).toStrictEqual({ outcome: 'error', error: 'unreachable' })
+    expect(JSON.parse(String(err.mock.calls[0]![0]))).toMatchObject({ restraint_push: 'error', target: 'kintai' })
   })
 
   it('宛先が null (未設定) なら叩かずに skipped-not-configured', async () => {
@@ -164,7 +164,7 @@ describe('sendRestraintPushBodies', () => {
   it('body が無ければ宛先を問わず skipped-empty (ログも出さない)', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     const { t, calls } = target([])
-    expect(await sendRestraintPushBodies('onprem', t, [])).toStrictEqual({ outcome: 'skipped-empty' })
+    expect(await sendRestraintPushBodies('kintai', t, [])).toStrictEqual({ outcome: 'skipped-empty' })
     expect(await sendRestraintPushBodies('kintai', null, [])).toStrictEqual({ outcome: 'skipped-empty' })
     expect(calls).toHaveLength(0)
     expect(log).not.toHaveBeenCalled()
