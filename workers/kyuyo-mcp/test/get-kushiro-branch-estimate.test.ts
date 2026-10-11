@@ -47,9 +47,7 @@ function env(over: Partial<Env> = {}, master: unknown = MIN_WAGE_MASTER): Env {
         : { "restraint/27324455/min-wage/latest.json": { value: JSON.stringify(master) } },
     ),
     RESTRAINT_R2_PREFIX: "restraint",
-    NUXT_ICHIBAN_API_URL: "https://rust-ichiban.example.com",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid.access",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => "csecret" },
+    KINTAI: { fetch: async (req: Request) => await fetch(req.url) },
     // 一番星の sales/costs は Worker の Service Binding で取る (Refs ohishi-exp/rust-ichibanboshi#322)
     ICHIBAN_DB: {
       fetch: async (req: Request) => {

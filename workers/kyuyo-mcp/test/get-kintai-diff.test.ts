@@ -41,9 +41,8 @@ function env(over: Partial<Record<string, unknown>> = {}): Env {
   return {
     SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(gcpBody({})))) },
     INTERNAL_SHARED_SECRET: SECRET,
-    NUXT_ICHIBAN_API_URL: "https://rust-ichiban.example.com",
-    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid.access",
-    ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => "csecret" },
+    // 勤怠 Worker (`KINTAI`) の fetch は global fetch の stub へ流す (URL は https://ichibanboshi-kintai<path>)
+    KINTAI: { fetch: async (req: Request) => await fetch(req.url) },
     ...over,
   } as unknown as Env;
 }
@@ -74,7 +73,7 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("SCRAPER_RELAY が無ければ fail-closed (オンプレも叩かない)", async () => {
+  it("SCRAPER_RELAY が無ければ fail-closed (勤怠 Worker も叩かない)", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     await expect(
@@ -110,13 +109,13 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     await expect(getKintaiDiffTool.execute(e, { month: "2026-06" })).rejects.toThrow(/parse failed/);
   });
 
-  it("オンプレ側の接続不能はそのまま上げる (fetchIchibanJson の握り潰さない挙動)", async () => {
+  it("勤怠 Worker の接続不能はそのまま上げる (fetchIchibanJson の握り潰さない挙動)", async () => {
     vi.stubGlobal("fetch", async () => {
       throw new Error("network down");
     });
     const e = env();
     await expect(getKintaiDiffTool.execute(e, { month: "2026-06" })).rejects.toThrow(
-      /rust-ichibanboshi へ接続できません/,
+      /勤怠 Worker へ接続できません/,
     );
   });
 
@@ -129,7 +128,7 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     const e = env();
     await getKintaiDiffTool.execute(e, { month: "2026-06", driver: "1051" });
     expect(onpremCalls[0]).toBe(
-      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-06&driver=1051",
+      "https://ichibanboshi-kintai/api/kintai/kosoku-daily?month=2026-06&driver=1051",
     );
     const gcpUrl = new URL(relayFetch(e).mock.calls[0]![0] as string);
     expect(gcpUrl.searchParams.get("driver")).toBe("1051");
@@ -137,20 +136,15 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     const e2 = env();
     await getKintaiDiffTool.execute(e2, { month: "2026-06" });
     expect(onpremCalls[1]).toBe(
-      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-06",
+      "https://ichibanboshi-kintai/api/kintai/kosoku-daily?month=2026-06",
     );
     const gcpUrl2 = new URL(relayFetch(e2).mock.calls[0]![0] as string);
     expect(gcpUrl2.searchParams.has("driver")).toBe(false);
   });
 
-  it("KINTAI binding があればオンプレ側も勤怠 Worker で読み、オンプレ版と CF Access は使わない", async () => {
-    const onprem = vi.fn();
-    vi.stubGlobal("fetch", onprem);
+  it("オンプレ側の読みは KINTAI binding の GET (Accept だけ) で、無ければ上げる", async () => {
     const requests: Request[] = [];
     const e = env({
-      NUXT_ICHIBAN_API_URL: "",
-      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "",
-      ICHIBAN_CF_ACCESS_CLIENT_SECRET: undefined,
       KINTAI: {
         fetch: async (req: Request) => {
           requests.push(req);
@@ -159,11 +153,14 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
       },
     });
     await getKintaiDiffTool.execute(e, { month: "2026-06", driver: "1051" });
-    expect(onprem).not.toHaveBeenCalled();
     expect(requests.map((r) => r.url)).toEqual([
       "https://ichibanboshi-kintai/api/kintai/kosoku-daily?month=2026-06&driver=1051",
     ]);
     expect([...requests[0]!.headers.keys()]).toEqual(["accept"]);
+
+    await expect(
+      getKintaiDiffTool.execute(env({ KINTAI: undefined }), { month: "2026-06" }),
+    ).rejects.toThrow(/KINTAI/);
   });
 
   it("5 分類 (only_gcp / only_onprem_driver0 / only_onprem_other / restraint一致 / restraint不一致) に振り分け、値が完全一致する行は落とす", async () => {
