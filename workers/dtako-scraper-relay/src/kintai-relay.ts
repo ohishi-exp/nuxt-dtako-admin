@@ -312,7 +312,20 @@ export function tenantForCompId(accounts: unknown, compId: string): string | nul
 }
 
 /** 勤怠 Worker の Service Binding 用の絶対 URL base。host は binding が無視する。 */
-const KINTAI_WORKER_BASE = "https://ichibanboshi-kintai";
+export const KINTAI_WORKER_BASE = "https://ichibanboshi-kintai";
+
+/**
+ * `compId` の読みを勤怠 Worker へ回してよければ binding を、だめなら `undefined` を返す。
+ * Worker のテナントは自分の `KINTAI_TENANT_ID` で固定 (`X-Tenant-ID` を読まない)。それと一致するのは
+ * `KINTAI_COMP_ID` の会社の tenant だけ (D1 の拘束サマリも同じ会社のぶんしか無い) なので、他の会社は今の経路のまま。
+ */
+export function kintaiWorkerFor<T>(
+  kintai: T | undefined,
+  compId: string,
+  kintaiCompId: string | undefined,
+): T | undefined {
+  return compId && compId === (kintaiCompId ?? "").trim() ? kintai : undefined;
+}
 
 /**
  * 勤怠 Worker (`ichibanboshi-kintai`) に同じ口がある GCP の読み (Refs ohishi-exp/rust-ichibanboshi#322)。
@@ -342,10 +355,8 @@ export function buildDeps(opts: {
   kintaiCompId: string | undefined;
 }): KintaiRelayDeps {
   const base = opts.ichibanOrigin.replace(/\/$/, "");
-  // Worker のテナントは自分の `KINTAI_TENANT_ID` で固定 (`X-Tenant-ID` を読まない)。それと一致するのは
-  // `KINTAI_COMP_ID` の会社の tenant だけなので、他の会社の読みは auth-worker 経由のまま
-  const kintai =
-    opts.compId && opts.compId === (opts.kintaiCompId ?? "").trim() ? opts.kintai : undefined;
+  // 他の会社の読みは auth-worker 経由のまま (`kintaiWorkerFor`)
+  const kintai = kintaiWorkerFor(opts.kintai, opts.compId, opts.kintaiCompId);
   return {
     onprem(path, init) {
       return fetch(`${base}${path}`, {

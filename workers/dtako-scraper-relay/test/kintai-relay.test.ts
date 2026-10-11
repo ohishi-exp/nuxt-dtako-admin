@@ -20,6 +20,7 @@ import {
   jstMonth,
   tenantForCompId,
   buildDeps,
+  kintaiWorkerFor,
   KintaiRelayError,
   MAX_MONTH_COUNT,
   decideFoldTrigger,
@@ -1161,6 +1162,22 @@ describe("buildDeps — 勤怠 Worker (KINTAI) へ回す読み (Refs ohishi-exp/
       new Response("読み先のテナントが決まりません (KINTAI_TENANT_ID を設定してください)", { status: 503 }),
     );
     await expect(relayKintaiDaySummaries(deps, { month: MONTH })).rejects.toThrow(/503/);
+  });
+});
+
+describe("kintaiWorkerFor (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  const binding = { fetch: async () => new Response() };
+  it("会社が KINTAI_COMP_ID (前後の空白は落とす) と一致すれば binding を返す", () => {
+    expect(kintaiWorkerFor(binding, "1001", "1001")).toBe(binding);
+    expect(kintaiWorkerFor(binding, "1001", " 1001 ")).toBe(binding);
+  });
+  it.each([
+    ["binding が無い", undefined, "1001", "1001"],
+    ["会社が違う", binding, "2002", "1001"],
+    ["KINTAI_COMP_ID が未設定", binding, "1001", undefined],
+    ["会社も KINTAI_COMP_ID も空", binding, "", ""],
+  ] as const)("%s ときは undefined", (_label, kintai, compId, kintaiCompId) => {
+    expect(kintaiWorkerFor(kintai, compId, kintaiCompId)).toBeUndefined();
   });
 });
 
