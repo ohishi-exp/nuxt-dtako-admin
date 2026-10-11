@@ -9007,9 +9007,14 @@ watch([compMap, kyuyoSyncedKeys], () => {
                           </ul>
                         </details>
 
-                        <p class="text-xs text-gray-400 mt-2">
-                          所要 {{ unkoGapsResult.elapsedMs ?? '?' }} ms
-                          {{ unkoGapsResult.driversTruncated ? ' / 乗務員一覧は上限で打ち切りあり' : '' }}
+                        <p
+                          v-if="unkoGapsResult.elapsedMs != null || unkoGapsResult.driversTruncated"
+                          class="text-xs text-gray-400 mt-2"
+                        >
+                          <!-- 勤怠 Worker は elapsed_ms を付けない: 値が無いときは「所要」ごと出さない -->
+                          <template v-if="unkoGapsResult.elapsedMs != null">所要 {{ unkoGapsResult.elapsedMs }} ms</template>
+                          <template v-if="unkoGapsResult.elapsedMs != null && unkoGapsResult.driversTruncated"> / </template>
+                          <template v-if="unkoGapsResult.driversTruncated">乗務員一覧は上限で打ち切りあり</template>
                         </p>
                       </template>
                     </div>
