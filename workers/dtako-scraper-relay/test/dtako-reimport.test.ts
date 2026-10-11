@@ -96,7 +96,7 @@ function depsOf(over: Partial<DtakoReimportDeps> = {}): DtakoReimportDeps {
   return {
     recalculateWork: vi.fn(async () => {}),
     fetchZip: vi.fn(async () => minimalZip()),
-    onpremAutoload: vi.fn(async () => new Response(JSON.stringify({ http_status: 200, http_ok: true }))),
+    autoload: vi.fn(async () => new Response(JSON.stringify({ http_status: 200, http_ok: true }))),
     ...over,
   };
 }
@@ -112,8 +112,8 @@ describe("runDtakoReimport", () => {
   });
 
   it("22桁 + reset_timecard省略 (①②のみ) は通す (Refs #625、取り込み漏れ候補は対象CDが作れない)", async () => {
-    const onpremAutoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
-    const deps = depsOf({ onpremAutoload });
+    const autoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
+    const deps = depsOf({ autoload });
     const report = await runDtakoReimport(deps, {
       opeNo: OPE_NO,
       startOpe: START_OPE,
@@ -121,7 +121,7 @@ describe("runDtakoReimport", () => {
     });
     expect(report.unko_no).toBe(UNKO_NO_22);
     expect(deps.fetchZip).toHaveBeenCalled();
-    const call = (onpremAutoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const call = (autoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(call[0]).toBe(`/api/dtako/autoload?unko_no=${UNKO_NO_22}&reset_timecard=false`);
   });
 
@@ -139,7 +139,7 @@ describe("runDtakoReimport", () => {
   });
 
   it("① zip 取得 → ② push まで完結し、entries / bytes / autoload をまとめて返す", async () => {
-    const onpremAutoload = vi.fn(async () =>
+    const autoload = vi.fn(async () =>
       new Response(
         JSON.stringify({
           http_status: 200,
@@ -150,7 +150,7 @@ describe("runDtakoReimport", () => {
         }),
       ),
     );
-    const deps = depsOf({ onpremAutoload });
+    const deps = depsOf({ autoload });
     const report = await runDtakoReimport(deps, {
       opeNo: OPE_NO,
       startOpe: START_OPE,
@@ -171,61 +171,94 @@ describe("runDtakoReimport", () => {
     });
 
     // push は unko_no/reset_timecard 付きの相対パスへ、zip を body に POST する
-    const call = (onpremAutoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const call = (autoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(call[0]).toBe(`/api/dtako/autoload?unko_no=${UNKO_NO_23}&reset_timecard=false`);
     expect((call[1] as RequestInit).method).toBe("POST");
     expect((call[1] as RequestInit).body).toBeInstanceOf(ArrayBuffer);
   });
 
   it("reset_timecard=true を渡すと push の query にも反映する", async () => {
-    const onpremAutoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
-    const deps = depsOf({ onpremAutoload });
+    const autoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
+    const deps = depsOf({ autoload });
     await runDtakoReimport(deps, {
       opeNo: OPE_NO,
       startOpe: START_OPE,
       unkoNo: UNKO_NO_23,
       resetTimecard: true,
     });
-    const call = (onpremAutoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const call = (autoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(call[0]).toBe(`/api/dtako/autoload?unko_no=${UNKO_NO_23}&reset_timecard=true`);
   });
 
   it("resetTimecard 省略時は false 扱い (既定は破壊的操作を増やさない)", async () => {
-    const onpremAutoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
-    const deps = depsOf({ onpremAutoload });
+    const autoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
+    const deps = depsOf({ autoload });
     await runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
-    const call = (onpremAutoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const call = (autoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(call[0]).toContain("reset_timecard=false");
   });
 
   it("zip が壊れていれば push せずに拒否する (push 直前の健全性検証)", async () => {
-    const onpremAutoload = vi.fn(async () => new Response("unused"));
+    const autoload = vi.fn(async () => new Response("unused"));
     const deps = depsOf({
       fetchZip: vi.fn(async () => new Uint8Array([0x00, 0x00, 0x00, 0x00]).buffer),
-      onpremAutoload,
+      autoload,
     });
     await expect(
       runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
     ).rejects.toThrow(DtakoReimportError);
-    expect(onpremAutoload).not.toHaveBeenCalled();
+    expect(autoload).not.toHaveBeenCalled();
   });
 
   it("オンプレの応答が JSON でなければ握り潰さず raw_excerpt に畳む", async () => {
     const deps = depsOf({
-      onpremAutoload: vi.fn(async () => new Response("<html>502 Bad Gateway</html>", { status: 502 })),
+      autoload: vi.fn(async () => new Response("<html>500 Internal Server Error</html>", { status: 500 })),
     });
     const report = await runDtakoReimport(deps, {
       opeNo: OPE_NO,
       startOpe: START_OPE,
       unkoNo: UNKO_NO_23,
     });
-    expect(report.http_status).toBe(502);
-    expect(report.autoload).toEqual({ parse_error: true, raw_excerpt: "<html>502 Bad Gateway</html>" });
+    expect(report.http_status).toBe(500);
+    expect(report.autoload).toEqual({ parse_error: true, raw_excerpt: "<html>500 Internal Server Error</html>" });
+  });
+
+  // 502 は勤怠 Worker・オンプレ版とも ② を送った後の失敗からだけ出る (Refs ohishi-exp/rust-ichibanboshi#322)。
+  // 本文が JSON でも HTML でも、文言が何でも uncertain (parse_error に畳まない)
+  it.each([
+    ["JSON の本文", JSON.stringify({ error: "cakephp autoload: upstream timeout" })],
+    ["HTML の本文", "<html>502 Bad Gateway</html>"],
+    ["空の本文", ""],
+  ])("送り先の 502 は %s でも DtakoReimportPushUncertainError (取り込み済みかもしれない)", async (_label, body) => {
+    const deps = depsOf({ autoload: vi.fn(async () => new Response(body, { status: 502 })) });
+    const run = runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
+    await expect(run).rejects.toThrow(DtakoReimportPushUncertainError);
+    await expect(run).rejects.toThrow(/502 を返しました.*再実行の前に dtako_events/);
+  });
+
+  it.each([400, 401, 403, 413, 500, 503, 504])(
+    "502 以外の %i は uncertain にせず、応答をそのまま返す (今の失敗の扱い)",
+    async (status) => {
+      const deps = depsOf({
+        autoload: vi.fn(async () => new Response(JSON.stringify({ error: "x" }), { status })),
+      });
+      const report = await runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
+      expect(report.http_status).toBe(status);
+      expect(report.autoload).toEqual({ error: "x" });
+    },
+  );
+
+  it("HTTP 200 の本文が http_status:307 (CakePHP の redirect) なら取り込み済みとしてそのまま返す", async () => {
+    const body = { http_status: 307, http_ok: false, location: "/" };
+    const deps = depsOf({ autoload: vi.fn(async () => new Response(JSON.stringify(body))) });
+    const report = await runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
+    expect(report.http_status).toBe(200);
+    expect(report.autoload).toEqual(body);
   });
 
   it("push (fetch) 自体が例外を投げたら DtakoReimportPushUncertainError で区別する (取り込み済みかもしれない)", async () => {
     const deps = depsOf({
-      onpremAutoload: vi.fn(async () => {
+      autoload: vi.fn(async () => {
         throw new Error("network reset");
       }),
     });
@@ -239,7 +272,7 @@ describe("runDtakoReimport", () => {
 
   it("push が Error でない値を throw しても文字列化して区別する", async () => {
     const deps = depsOf({
-      onpremAutoload: vi.fn(async () => {
+      autoload: vi.fn(async () => {
         // eslint-disable-next-line @typescript-eslint/no-throw-literal
         throw "boom";
       }),
@@ -252,7 +285,7 @@ describe("runDtakoReimport", () => {
   it("push は成功したが応答本文の読み出しで例外が起きても同様に区別する", async () => {
     const badRes = new Response("body");
     vi.spyOn(badRes, "text").mockRejectedValue(new Error("stream error"));
-    const deps = depsOf({ onpremAutoload: vi.fn(async () => badRes) });
+    const deps = depsOf({ autoload: vi.fn(async () => badRes) });
     await expect(
       runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
     ).rejects.toThrow(DtakoReimportPushUncertainError);
@@ -294,7 +327,7 @@ describe("runDtakoReimport", () => {
     const report = await runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
     expect(report.recalculate).toEqual({ ok: false, error: "btnScore が見つかりません" });
     expect(deps.fetchZip).toHaveBeenCalled();
-    expect(deps.onpremAutoload).toHaveBeenCalled();
+    expect(deps.autoload).toHaveBeenCalled();
   });
 
   it("再集計が VenusSessionExpiredError を投げたら伝播し、zip 取得も push も行わない (受け入れ条件6)", async () => {
@@ -307,6 +340,6 @@ describe("runDtakoReimport", () => {
       runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
     ).rejects.toThrow(VenusSessionExpiredError);
     expect(deps.fetchZip).not.toHaveBeenCalled();
-    expect(deps.onpremAutoload).not.toHaveBeenCalled();
+    expect(deps.autoload).not.toHaveBeenCalled();
   });
 });

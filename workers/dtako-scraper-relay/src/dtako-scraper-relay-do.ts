@@ -157,14 +157,17 @@ import {
   relayKintaiUnkoGaps,
   relayKintaiWindow,
   type FoldTriggerDecision,
+  type KintaiAutoloader,
   type KintaiReader,
   type KintaiRelayDeps,
   type KyuyoAuthorizer,
   KINTAI_READ_ROUTES,
   KINTAI_WORKER_BASE,
+  kintaiAutoloader,
   kintaiReader,
   kintaiWorkerFor,
   kintaiWriteDeps,
+  WAGE_SNAPSHOT_PATH,
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
@@ -561,6 +564,10 @@ interface StoredZip {
 }
 
 const ZIP_TTL_MS = 10 * 60 * 1000;
+
+/** ② 取り込み (`kintaiAutoloader`) の送り先が無いときの 503 の本文。勤怠 Worker へ送れない会社ではオンプレ版が要る。 */
+const KINTAI_AUTOLOAD_NOT_CONFIGURED =
+  "オンプレの取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です";
 
 /** performEtcScrape の結果 (cron ログ出力 / WS result イベントの両方の素になる)。 */
 interface EtcScrapeOutcome {
@@ -2774,38 +2781,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ error: `comp_id=${parsed.compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
 
-    // オンプレの資格情報 (Refs #280 の条件1 — kosoku-daily/pdf-json 等の既存経路と
-    // 同じ CF Access Service Token、新しい credential/allowlist 登録は不要)。
-    // Secrets Store binding は「宣言はあるが解決できない」時に throw するので、
-    // 素通しせず未設定と同じ扱いに倒す (`handleKintaiKosokuDaily` と同じ)。
-    const origin = (this.env.NUXT_ICHIBAN_API_URL ?? "").trim();
-    const cfAccessClientId = (this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
-    let cfAccessClientSecret = "";
-    try {
-      cfAccessClientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-    } catch (err) {
-      console.error(JSON.stringify({ dtako_reimport: "secret-error", error: describeUnknownError(err) }));
-    }
-    if (!origin || !cfAccessClientId || !cfAccessClientSecret) {
-      return Response.json(
-        {
-          error:
-            "オンプレの取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
-        },
-        { status: 503 },
-      );
+    // ② の送り先 (勤怠 Worker かオンプレ版、`kintaiAutoloader`)。CF Access は Worker へ送れないときだけ要る
+    const autoloader = await this.kintaiAutoloaderFor(parsed.compId, "dtako_reimport");
+    if (!autoloader) {
+      return Response.json({ error: KINTAI_AUTOLOAD_NOT_CONFIGURED }, { status: 503 });
     }
 
     if (!parsed.isBatch) {
       const { opeNo, startOpe, unkoNo, resetTimecard } = parsed.items[0];
       return this.enqueueScrape(() =>
-        this.runDtakoReimportJob(
-          account,
-          { opeNo, startOpe, unkoNo, resetTimecard },
-          origin,
-          cfAccessClientId,
-          cfAccessClientSecret,
-        ),
+        this.runDtakoReimportJob(account, { opeNo, startOpe, unkoNo, resetTimecard }, autoloader),
       );
     }
     try {
@@ -2815,18 +2800,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       throw err;
     }
     return this.enqueueScrape(() =>
-      this.runDtakoReimportBatch(account, parsed.items, origin, cfAccessClientId, cfAccessClientSecret),
+      this.runDtakoReimportBatch(account, parsed.items, autoloader),
     );
   }
 
   private async runDtakoReimportJob(
     account: DtakoAccountRaw,
     input: { opeNo: string; startOpe: string; unkoNo: string; resetTimecard: boolean },
-    origin: string,
-    cfAccessClientId: string,
-    cfAccessClientSecret: string,
+    autoloader: KintaiAutoloader,
   ): Promise<Response> {
-    const base = origin.replace(/\/+$/, "");
     // 自前ログインセッションは再集計 (recalculateWork) と zip 取得
     // (downloadOperationCsvZip) で使い回す — DO インスタンス内キャッシュ経由
     // (`withTheearthLoginSession`、Refs #633-20)。login() はどちらの呼び出しに
@@ -2855,15 +2837,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         this.withTheearthLoginSession(account, jobState, (jar) =>
           downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
         ),
-      onpremAutoload: (path, init) =>
-        fetch(`${base}${path}`, {
-          ...init,
-          headers: {
-            ...(init.headers as Record<string, string> | undefined),
-            "CF-Access-Client-Id": cfAccessClientId,
-            "CF-Access-Client-Secret": cfAccessClientSecret,
-          },
-        }),
+      autoload: autoloader.autoload,
     };
     try {
       const report = await runDtakoReimportPure(deps, {
@@ -2885,6 +2859,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.log(
         JSON.stringify({
           dtako_reimport: "ok",
+          autoload_route: autoloader.route,
           comp_id: account.comp_id,
           unko_no: input.unkoNo,
           recalculate_ok: report.recalculate.ok,
@@ -2943,11 +2918,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async runDtakoReimportBatch(
     account: DtakoAccountRaw,
     items: DtakoReimportItem[],
-    origin: string,
-    cfAccessClientId: string,
-    cfAccessClientSecret: string,
+    autoloader: KintaiAutoloader,
   ): Promise<Response> {
-    const base = origin.replace(/\/+$/, "");
     const jobState = this.makeTheearthLoginJobState();
     const batch = await runBatchSequential(items, async (item, index) => {
       const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
@@ -2968,15 +2940,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           this.withTheearthLoginSession(account, jobState, (jar) =>
             downloadOperationCsvZip(jar, { opeNo: item.opeNo, startOpe: item.startOpe }),
           ),
-        onpremAutoload: (path, init) =>
-          fetch(`${base}${path}`, {
-            ...init,
-            headers: {
-              ...(init.headers as Record<string, string> | undefined),
-              "CF-Access-Client-Id": cfAccessClientId,
-              "CF-Access-Client-Secret": cfAccessClientSecret,
-            },
-          }),
+        autoload: autoloader.autoload,
       };
       const report = await runDtakoReimportPure(deps, {
         opeNo: item.opeNo,
@@ -2998,6 +2962,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.log(
         JSON.stringify({
           dtako_reimport_batch: "ok",
+          autoload_route: autoloader.route,
           comp_id: account.comp_id,
           unko_no: item.unkoNo,
           index,
@@ -7598,6 +7563,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     );
   }
 
+  /** `compId` の ② 取り込みの送り先 (`kintai-relay.ts` の `kintaiAutoloader`)。log の作法は `kintaiReaderFor` と同じ。 */
+  private kintaiAutoloaderFor(compId: string, tag: string): Promise<KintaiAutoloader | null> {
+    return kintaiAutoloader(this.env, compId, (err) =>
+      console.error(JSON.stringify({ [tag]: "secret-error", error: describeUnknownError(err) })),
+    );
+  }
+
   // -------------------------------------------------------------------------
   // オンプレ vs GCP 比較 + 取り直し3口 (viewer 認可、既定 dry-run。Refs #615-4)
   //
@@ -8087,29 +8059,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!account) {
       return dvrJsonError(500, `comp_id=${record.compId} が DTAKO_ACCOUNTS に見つかりません`);
     }
-    const origin = (this.env.NUXT_ICHIBAN_API_URL ?? "").trim();
-    const cfAccessClientId = (this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
-    let cfAccessClientSecret = "";
-    try {
-      cfAccessClientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-    } catch (err) {
-      console.error(JSON.stringify({ kintai_refresh_mysql: "secret-error", error: describeUnknownError(err) }));
-    }
-    if (!origin || !cfAccessClientId || !cfAccessClientSecret) {
-      return dvrJsonError(
-        503,
-        "オンプレの取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
-      );
+    const autoloader = await this.kintaiAutoloaderFor(record.compId, "kintai_refresh_mysql");
+    if (!autoloader) {
+      return dvrJsonError(503, KINTAI_AUTOLOAD_NOT_CONFIGURED);
     }
 
     const res = await this.enqueueScrape(() =>
-      this.runDtakoReimportJob(
-        account,
-        { opeNo, startOpe, unkoNo, resetTimecard },
-        origin,
-        cfAccessClientId,
-        cfAccessClientSecret,
-      ),
+      this.runDtakoReimportJob(account, { opeNo, startOpe, unkoNo, resetTimecard }, autoloader),
     );
     // runDtakoReimportJob は成否を Response で返す (成功 json / エラー json どちらも)。
     // 保証の判定結果をここで合成する — 応答が JSON で読めなければそのまま素通しする
@@ -10060,7 +10016,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         console.error(JSON.stringify({ wage_snapshot: "secret-error", error: describeUnknownError(err) }));
       }
     }
-    const deps = kintai && writeToken ? kintaiWriteDeps(kintai, writeToken) : ctx.deps;
+    const deps = kintai && writeToken ? kintaiWriteDeps(kintai, writeToken, WAGE_SNAPSHOT_PATH) : ctx.deps;
     try {
       return Response.json(await relayWageSnapshotPut(deps, record.compId, body));
     } catch (err) {
