@@ -188,12 +188,21 @@ function makeDO(opts: Setup = {}) {
         },
       }) as never,
     );
+  /** 機械経路 (Refs ohishi-exp/rust-ichibanboshi#322)。viewer の認証ヘッダーは付けない。 */
+  const cron = (path: string, body: unknown) =>
+    relay.fetch(
+      new Request(`https://relay.internal${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      }) as never,
+    );
   /** private の送り手を直に呼ぶ (取り込み 4 経路はどれもこの 1 か所を呼ぶ)。 */
   const push = (entries: unknown[]) =>
     (relay as unknown as {
       pushRestraintSummariesToIchiban(c: string, s: string, ym: string, e: unknown[]): Promise<unknown>;
     }).pushRestraintSummariesToIchiban(COMP, "theearth", "2026-06", entries);
-  return { resummarize, push, onpremCalls, kintaiCalls };
+  return { resummarize, cron, push, onpremCalls, kintaiCalls, env };
 }
 
 const META = { sha256: "a".repeat(64), fetchedAt: "f", lastVerifiedAt: "l" };
@@ -245,6 +254,46 @@ describe("resummarize の拘束サマリ push (Refs ohishi-exp/rust-ichibanboshi
     });
     expect(onpremCalls).toHaveLength(1);
     expect(kintaiCalls).toHaveLength(0);
+  });
+});
+
+describe("/cron/restraint-resummarize (機械経路、Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  it("★ viewer 認証なしで resummarize の本体を走らせ、応答に restraint_push が載る", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { cron, onpremCalls, kintaiCalls, env } = makeDO();
+    const res = await cron("/cron/restraint-resummarize", { comp_id: COMP, month: "2026-06" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ month: "2026-06", csv_processed: 1, summaries_written: 2, errors: [] });
+    expect(body.restraint_push).toEqual({
+      onprem: { outcome: "done", puts: 1 },
+      kintai: { outcome: "done", puts: 1 },
+    });
+    expect(onpremCalls).toHaveLength(1);
+    expect(kintaiCalls[0]!.body).toMatchObject({ comp_id: COMP, source: "theearth", month: "2026-06" });
+    // viewer の認証 (auth-worker introspect) は経由しない
+    expect(env.AUTH_WORKER.fetch).not.toHaveBeenCalled();
+  });
+
+  it("month が YYYY-MM でなければ 400 (本体の parseMonthParam)", async () => {
+    const { cron, onpremCalls } = makeDO();
+    const res = await cron("/cron/restraint-resummarize", { comp_id: COMP, month: "2026-6" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "month は YYYY-MM で指定してください" });
+    expect(onpremCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ["/cron/restraint-resummarize", "JSON でない", "not json", "body must be JSON"],
+    ["/cron/restraint-resummarize", "comp_id 無し", { month: "2026-06" }, "comp_id / month は必須です"],
+    ["/cron/restraint-resummarize", "month 無し", { comp_id: COMP }, "comp_id / month は必須です"],
+    ["/cron/restraint-sync", "JSON でない", "not json", "body must be JSON"],
+    ["/cron/restraint-sync", "comp_id が空白だけ", { comp_id: "  ", month: "2026-06" }, "comp_id / month は必須です"],
+  ])("%s: body が%sなら 400 (restraint-sync と同じ helper)", async (path, _l, body, error) => {
+    const { cron } = makeDO();
+    const res = await cron(path, body);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error });
   });
 });
 

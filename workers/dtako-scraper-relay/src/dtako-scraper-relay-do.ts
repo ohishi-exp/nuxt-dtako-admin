@@ -714,6 +714,40 @@ function dvrJsonError(status: number, message: string): Response {
 }
 
 /**
+ * 機械経路の `/cron/restraint-*` (body `{comp_id, month}`) を、viewer 経路の handler へ渡す
+ * 形に組み直す。theearth セッションを持たない synthetic record (`token: "cron"`) と、month を
+ * query string に載せた URL を返す。渡す先の handler は `record.compId` だけを読むこと
+ * (theearth cookie・viewer を読む handler には使えない)。month の形式チェックは渡す先の
+ * `parseMonthParam` が持つ。
+ */
+async function parseCronCompMonthBody(
+  request: Request,
+  pathname: string,
+): Promise<{ record: TheearthSessionRecord; url: URL } | Response> {
+  let body: { comp_id?: unknown; month?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return dvrJsonError(400, "body must be JSON");
+  }
+  const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+  const month = typeof body.month === "string" ? body.month : "";
+  if (!compId || !month) {
+    return dvrJsonError(400, "comp_id / month は必須です");
+  }
+  const record: TheearthSessionRecord = {
+    token: "cron",
+    compId,
+    userName: "",
+    cookies: [],
+    createdAt: Date.now(),
+    expiresAt: Date.now(),
+  };
+  const url = new URL(`https://relay.internal${pathname}?month=${encodeURIComponent(month)}`);
+  return { record, url };
+}
+
+/**
  * **1 社ぶんの勤怠しか持たない口** (Refs #1133 c1133-8)。`dispatchRestraintApi` が
  * record 確定直後に `judgeFoldScope` へ訊き、`KINTAI_COMP_ID` の会社でなければ
  * (未設定・空・不一致とも) 403 にする。method は問わない。
@@ -1251,6 +1285,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 自身からしか到達できない) は /cron/dtako/* と同じなのでこの並びに置く。
     if (url.pathname === "/cron/restraint-sync" && request.method === "POST") {
       return this.handleCronRestraintSync(request);
+    }
+    // theearth の拘束サマリを R2 の生 CSV から作り直す (Refs ohishi-exp/rust-ichibanboshi#322)。
+    // 認証は index.ts の /kintai-relay/restraint-resummarize 側 (X-Alc-Proxy-Secret)。
+    if (url.pathname === "/cron/restraint-resummarize" && request.method === "POST") {
+      return this.handleCronRestraintResummarize(request);
     }
 
     // theearth 乗務員マスタ (F-MMS0320) を読んで alc の employees へ流す
@@ -6470,8 +6509,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (R2 `kintai/` prefix) を無人で押し直す (Refs #606-6)。
    *
    * **処理は `handleKintaiFetch` をそのまま呼ぶだけ (変更しない)。** theearth
-   * セッションを持たない synthetic record を組み立て、month を query string に
-   * 載せ替えて渡す。`handleKintaiFetch` は `record.compId` / `record.viewerEmail`
+   * セッションを持たない synthetic record を組み立て (`parseCronCompMonthBody`)、
+   * month を query string に載せ替えて渡す。`handleKintaiFetch` は `record.compId` / `record.viewerEmail`
    * しか読まない (theearth cookie には触れない R2-only 処理、Refs #606-6 調査済み)
    * ので、theearth ログインは不要。
    *
@@ -6498,29 +6537,26 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * ⇒ 表の金額・時間は動かないが、**月タブの見え方は動く。**
    */
   private async handleCronRestraintSync(request: Request): Promise<Response> {
-    let body: { comp_id?: unknown; month?: unknown };
-    try {
-      body = (await request.json()) as typeof body;
-    } catch {
-      return dvrJsonError(400, "body must be JSON");
-    }
-    const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
-    const month = typeof body.month === "string" ? body.month : "";
-    if (!compId || !month) {
-      return dvrJsonError(400, "comp_id / month は必須です");
-    }
-    const record: TheearthSessionRecord = {
-      token: "cron",
-      compId,
-      userName: "",
-      cookies: [],
-      createdAt: Date.now(),
-      expiresAt: Date.now(),
-    };
-    const url = new URL(
-      `https://relay.internal/restraint-api/kintai/fetch?month=${encodeURIComponent(month)}`,
-    );
-    return this.handleKintaiFetch(record, url);
+    const parsed = await parseCronCompMonthBody(request, "/restraint-api/kintai/fetch");
+    if (parsed instanceof Response) return parsed;
+    return this.handleKintaiFetch(parsed.record, parsed.url);
+  }
+
+  /**
+   * POST /cron/restraint-resummarize — body {comp_id, month}。theearth の拘束サマリを
+   * R2 に保存済みの生 CSV から作り直す (Refs ohishi-exp/rust-ichibanboshi#322)。
+   *
+   * **処理は `handleArchiveResummarize` をそのまま呼ぶだけ (変更しない)。** 本体が読むのは
+   * `record.compId` だけ (theearth cookie にも viewer にも触れない R2-only 処理) なので、
+   * `handleCronRestraintSync` と同じ synthetic record で足りる。
+   *
+   * この DO は `scraper-comp-{comp}` なので、本体末尾の `invalidateKintaiUpstreamCache` が
+   * 消すのはこの DO の上流キャッシュだけ — viewer 側の DO のキャッシュは消えない。
+   */
+  private async handleCronRestraintResummarize(request: Request): Promise<Response> {
+    const parsed = await parseCronCompMonthBody(request, "/restraint-api/archive/resummarize");
+    if (parsed instanceof Response) return parsed;
+    return this.handleArchiveResummarize(parsed.record, parsed.url);
   }
 
   /**
