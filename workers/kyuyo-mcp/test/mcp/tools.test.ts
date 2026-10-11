@@ -1582,6 +1582,104 @@ describe("get_ichiban_sales", () => {
   });
 });
 
+// ===== 勤怠 Worker (KINTAI) への振り分け =======================================
+//
+// `fetchIchibanJson` の 1 か所で振り分ける (Refs ohishi-exp/rust-ichibanboshi#322)。
+// binding があれば勤怠 Worker を Service Binding で読み、オンプレ版 (global fetch) は呼ばない。
+// binding が無いときのオンプレ版の挙動は上の get_kosoku_events / get_rest_diff /
+// get_timecard_diff (kosokuEnv は KINTAI を持たない) で見ている。
+
+/** URL で応答を切り替える勤怠 Worker の既定の応答 (`stubIchiban` と同じ切り替え)。 */
+function kintaiWorkerBody(url: string): Response {
+  if (url.includes("/api/kintai/pdf-json")) return new Response(JSON.stringify(PDF_JSON));
+  if (url.includes("month=2026-03")) {
+    return new Response(JSON.stringify({ month: "2026-03", drivers: [] }));
+  }
+  if (url.includes("/api/kintai/kosoku-daily")) return new Response(JSON.stringify(KOSOKU_CURRENT));
+  return new Response(JSON.stringify({ rows: [EVENT_ROW] }));
+}
+
+/** `KINTAI` を持たせた env。global fetch (オンプレ版) は呼ばれたら落とす。 */
+function stubKintaiWorker(
+  respond: (url: string) => Response = kintaiWorkerBody,
+  over: Partial<Env> = {},
+): { env: Env; requests: Request[]; onprem: ReturnType<typeof vi.fn> } {
+  const onprem = vi.fn(async () => {
+    throw new Error("オンプレ版は呼ばれないはず (勤怠は KINTAI で取る)");
+  });
+  vi.stubGlobal("fetch", onprem);
+  const requests: Request[] = [];
+  const env = kosokuEnv({
+    KINTAI: {
+      fetch: async (req: Request) => {
+        requests.push(req);
+        return respond(req.url);
+      },
+    },
+    ...over,
+  });
+  return { env, requests, onprem };
+}
+
+describe("勤怠の読みの振り分け (KINTAI)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("binding があれば events・rest-diff・pdf-json・kosoku-daily を全部勤怠 Worker で読み、オンプレを呼ばない", async () => {
+    const { env, requests, onprem } = stubKintaiWorker();
+
+    const events = (await getKosokuEventsTool.execute(env, { driver: "1051", month: "2026-06" })) as {
+      rows: unknown[];
+    };
+    expect(events.rows).toEqual([EVENT_ROW]);
+    await getRestDiffTool.execute(env, { month: "2026-06", driver: "1445" });
+    const diff = (await getTimecardDiffTool.execute(env, {
+      month: "2026-04",
+      driver: "1021",
+      only_anomalies: false,
+    })) as DiffResult;
+    expect(diff.drivers).toBe(1);
+
+    expect(onprem).not.toHaveBeenCalled();
+    expect(requests.map((r) => r.url).sort()).toEqual([
+      "https://ichibanboshi-kintai/api/kintai/events?month=2026-06&driver=1051",
+      "https://ichibanboshi-kintai/api/kintai/kosoku-daily?month=2026-03&view=compare",
+      "https://ichibanboshi-kintai/api/kintai/kosoku-daily?month=2026-04&view=compare",
+      "https://ichibanboshi-kintai/api/kintai/pdf-json?month=2026-04&driver=1021",
+      "https://ichibanboshi-kintai/api/kintai/rest-diff?month=2026-06&driver=1445",
+    ]);
+    // CF Access・secret・Authorization は付けない (ヘッダーは Accept だけ)
+    for (const req of requests) {
+      expect(req.method).toBe("GET");
+      expect([...req.headers.keys()]).toEqual(["accept"]);
+    }
+  });
+
+  it("binding があれば CF Access が未設定でも読める", async () => {
+    const { env, requests } = stubKintaiWorker(undefined, {
+      NUXT_ICHIBAN_API_URL: "",
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "",
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: undefined,
+    });
+    const res = (await getKosokuEventsTool.execute(env, { driver: "1051", month: "2026-06" })) as {
+      rows: unknown[];
+    };
+    expect(res.rows).toEqual([EVENT_ROW]);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("勤怠 Worker の失敗は勤怠 Worker の名前で上げる (握り潰さない)", async () => {
+    const { env } = stubKintaiWorker(
+      () => new Response("kosoku-daily の応答が上限を超えました", { status: 503 }),
+    );
+    await expect(getRestDiffTool.execute(env, { month: "2026-06" })).rejects.toThrow(
+      "勤怠 Worker が 503 を返しました: kosoku-daily の応答が上限を超えました",
+    );
+  });
+});
+
 describe("ALL_TOOLS", () => {
   /** 読むだけの tool。scope を要求しない (binding_jwt が valid なら誰でも呼べる)。 */
   const READ_ONLY = [

@@ -486,6 +486,9 @@ function describeError(err: unknown): string {
  * 同じ扱いに倒す — relay の `handleKintaiFetch` と同じ判断。
  */
 async function fetchIchibanJson(env: Env, pathWithQuery: string, tag: string): Promise<unknown> {
+  // 勤怠 Worker の binding があればそちら (CF Access も secret も要らない)。無ければオンプレ版。
+  // オンプレ版への経路はオンプレ版の撤去の段で消す (Refs ohishi-exp/rust-ichibanboshi#322)
+  if (env.KINTAI) return fetchIchibanWorkerJson(env.KINTAI, KINTAI_WORKER, pathWithQuery);
   const apiUrl = (env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
   const clientId = env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
   let clientSecret = "";
@@ -533,29 +536,45 @@ async function readUpstreamJson(doFetch: () => Promise<Response>, label: string)
   }
 }
 
+type WorkerTarget = { binding: string; host: string; label: string };
+
+/** 一番星 Worker。一番星 6 本 (health / employees / vehicles / sales/departments / sales・costs の
+ *  vehicle-daily) を読む。 */
+const ICHIBAN_WORKER: WorkerTarget = {
+  binding: "ICHIBAN_DB",
+  host: "ichibanboshi-ichiban",
+  label: "一番星 Worker",
+};
+
+/** 勤怠 Worker。`fetchIchibanJson` の読み (`/api/kintai/*`) を binding があればこちらで読む。 */
+const KINTAI_WORKER: WorkerTarget = {
+  binding: "KINTAI",
+  host: "ichibanboshi-kintai",
+  label: "勤怠 Worker",
+};
+
 /**
- * 一番星 (rust-ichibanboshi) の Worker `ichibanboshi-ichiban` を Service Binding
- * (`ICHIBAN_DB`) で叩いて JSON を返す。CF Access ヘッダ・Authorization は付けない
- * (Service Binding 専用 Worker で認可なし)。
- *
- * 一番星 6 本 (health / employees / vehicles / sales/departments / sales・costs の
- * vehicle-daily) は Worker (Refs ohishi-exp/rust-ichibanboshi#322)、勤怠は
- * `fetchIchibanJson` でオンプレ。
+ * rust-ichibanboshi の Worker を Service Binding で叩いて JSON を返す (一番星と勤怠で共用)。
+ * CF Access ヘッダ・Authorization は付けない (Service Binding 専用 Worker で認可なし、
+ * Refs ohishi-exp/rust-ichibanboshi#322)。host は binding では使われないダミー。
  */
-async function fetchIchibanWorkerJson(env: Env, pathWithQuery: string): Promise<unknown> {
-  const binding = env.ICHIBAN_DB;
+async function fetchIchibanWorkerJson(
+  binding: Env["ICHIBAN_DB"],
+  target: WorkerTarget,
+  pathWithQuery: string,
+): Promise<unknown> {
   if (!binding || typeof binding.fetch !== "function") {
-    throw new Error("一番星 Worker の Service Binding (ICHIBAN_DB) が未設定です");
+    throw new Error(`${target.label} の Service Binding (${target.binding}) が未設定です`);
   }
   return readUpstreamJson(
     () =>
       binding.fetch(
-        new Request(`https://ichibanboshi-ichiban${pathWithQuery}`, {
+        new Request(`https://${target.host}${pathWithQuery}`, {
           method: "GET",
           headers: { Accept: "application/json" },
         }),
       ),
-    "一番星 Worker",
+    target.label,
   );
 }
 
@@ -2705,7 +2724,8 @@ export const getIchibanCostsTool = {
   execute: async (env: Env, args) => {
     requireVehicleOrDriver(args);
     const parsed = await fetchIchibanWorkerJson(
-      env,
+      env.ICHIBAN_DB,
+      ICHIBAN_WORKER,
       ichibanRangeQuery("/api/costs/vehicle-daily", args.from, args.to, {
         vehicle: args.vehicle,
         driver: args.driver,
@@ -2822,7 +2842,8 @@ export const getIchibanSalesTool = {
   execute: async (env: Env, args) => {
     requireVehicleOrDriver(args);
     const parsed = await fetchIchibanWorkerJson(
-      env,
+      env.ICHIBAN_DB,
+      ICHIBAN_WORKER,
       ichibanRangeQuery("/api/sales/vehicle-daily", args.from, args.to, {
         vehicle: args.vehicle,
         driver: args.driver,
@@ -3285,7 +3306,8 @@ export const getKushiroBranchEstimateTool = {
       const rows = await Promise.all(
         drivers.map(async (driverCd) => {
           const body = await fetchIchibanWorkerJson(
-            env,
+            env.ICHIBAN_DB,
+            ICHIBAN_WORKER,
             ichibanRangeQuery("/api/sales/vehicle-daily", args.from, args.to, { driver: driverCd }),
           );
           const list = ichibanRows(body);
@@ -3314,7 +3336,8 @@ export const getKushiroBranchEstimateTool = {
         const costs = await Promise.all(
           drivers.map(async (driverCd) => {
             const body = await fetchIchibanWorkerJson(
-              env,
+              env.ICHIBAN_DB,
+              ICHIBAN_WORKER,
               ichibanRangeQuery("/api/costs/vehicle-daily", args.from, args.to, {
                 driver: driverCd,
                 kind: ICHIBAN_LABOR_COST_KIND,

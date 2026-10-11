@@ -42,6 +42,10 @@ export interface Env {
   /** 一番星 Worker `ichibanboshi-ichiban` への service binding。sales/costs の
    *  vehicle-daily をこちらで取る (認可なし・Service Binding 専用、Refs ohishi-exp/rust-ichibanboshi#322)。 */
   ICHIBAN_DB?: { fetch(req: Request): Promise<Response> };
+  /** 勤怠 Worker `ichibanboshi-kintai` への service binding。勤怠の読み (`/api/kintai/*`) を
+   *  あればこちらで取り、無ければオンプレ版 (`NUXT_ICHIBAN_API_URL` + CF Access) で取る
+   *  (認可なし・Service Binding 専用、Refs ohishi-exp/rust-ichibanboshi#322)。 */
+  KINTAI?: { fetch(req: Request): Promise<Response> };
   /** relay が要求する consumer proof (`X-Alc-Proxy-Secret`)。 */
   INTERNAL_SHARED_SECRET?: unknown;
 }

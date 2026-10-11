@@ -143,6 +143,29 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     expect(gcpUrl2.searchParams.has("driver")).toBe(false);
   });
 
+  it("KINTAI binding があればオンプレ側も勤怠 Worker で読み、オンプレ版と CF Access は使わない", async () => {
+    const onprem = vi.fn();
+    vi.stubGlobal("fetch", onprem);
+    const requests: Request[] = [];
+    const e = env({
+      NUXT_ICHIBAN_API_URL: "",
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "",
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: undefined,
+      KINTAI: {
+        fetch: async (req: Request) => {
+          requests.push(req);
+          return new Response(JSON.stringify(onpremBody([])), { status: 200 });
+        },
+      },
+    });
+    await getKintaiDiffTool.execute(e, { month: "2026-06", driver: "1051" });
+    expect(onprem).not.toHaveBeenCalled();
+    expect(requests.map((r) => r.url)).toEqual([
+      "https://ichibanboshi-kintai/api/kintai/kosoku-daily?month=2026-06&driver=1051",
+    ]);
+    expect([...requests[0]!.headers.keys()]).toEqual(["accept"]);
+  });
+
   it("5 分類 (only_gcp / only_onprem_driver0 / only_onprem_other / restraint一致 / restraint不一致) に振り分け、値が完全一致する行は落とす", async () => {
     const KEY_ONLY_GCP = "2001|2026-06-01|2026-06-01 08:00:00";
     const KEY_ONLY_ONPREM_0 = "0|2026-06-02|2026-06-02 09:00:00";

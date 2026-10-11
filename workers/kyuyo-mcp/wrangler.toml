@@ -47,10 +47,16 @@ binding = "SCRAPER_RELAY"
 service = "nuxt-dtako-admin-scraper-relay"
 
 # 一番星 Worker (sales/costs の vehicle-daily、Refs ohishi-exp/rust-ichibanboshi#322)。
-# Service Binding 専用・認可なし。勤怠 (/api/kintai/*) はオンプレのまま NUXT_ICHIBAN_API_URL。
+# Service Binding 専用・認可なし。勤怠 (/api/kintai/*) は下の KINTAI。
 [[services]]
 binding = "ICHIBAN_DB"
 service = "ichibanboshi-ichiban"
+
+# 勤怠 Worker (/api/kintai/* の読み、Refs ohishi-exp/rust-ichibanboshi#322)。
+# Service Binding 専用・認可なし。あればオンプレ版 (NUXT_ICHIBAN_API_URL + CF Access) は使わない。
+[[services]]
+binding = "KINTAI"
+service = "ichibanboshi-kintai"
 
 # relay が要求する consumer proof (X-Alc-Proxy-Secret)。**既存 entry を binding するだけ**。
 [[secrets_store_secrets]]
