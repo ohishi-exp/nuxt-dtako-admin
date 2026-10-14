@@ -2892,9 +2892,10 @@ export const getIchibanColumnsTool = {
       ICHIBAN_WORKER,
       `/api/schema/columns?table=${encodeURIComponent(ICHIBAN_COLUMNS_TABLE)}`,
     );
+    // 上流は包まない素の配列を返す (`{ source_table, data }` ではない)。表名は上流に無いので定数。
     return {
-      source_table: fieldOf(parsed, "source_table") ?? null,
-      columns: ichibanRows(parsed),
+      source_table: ICHIBAN_COLUMNS_TABLE,
+      columns: Array.isArray(parsed) ? parsed : [],
     };
   },
 } satisfies ToolEntry<typeof getIchibanColumnsArgs>;

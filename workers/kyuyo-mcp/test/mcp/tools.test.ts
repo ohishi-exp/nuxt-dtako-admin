@@ -1509,12 +1509,12 @@ describe("get_ichiban_columns", () => {
     vi.restoreAllMocks();
   });
 
-  it("calls /api/schema/columns with the table and returns the upstream columns", async () => {
+  it("calls /api/schema/columns with the table and returns the upstream bare array", async () => {
     const cols = [
       { column_name: "運行年月日", data_type: "datetime", is_nullable: "NO", max_length: null },
       { column_name: "備考", data_type: "nvarchar", is_nullable: "YES", max_length: 100 },
     ];
-    const { env, urls } = stubIchibanJson({ source_table: "運転日報明細", data: cols });
+    const { env, urls } = stubIchibanJson(cols);
     const res = (await getIchibanColumnsTool.execute(env)) as {
       source_table: string;
       columns: unknown[];
@@ -1527,14 +1527,16 @@ describe("get_ichiban_columns", () => {
     expect(res.columns).toEqual(cols);
   });
 
-  it("falls back to null / empty when the upstream body has no known shape", async () => {
-    const { env } = stubIchibanJson({});
-    const res = (await getIchibanColumnsTool.execute(env)) as {
-      source_table: unknown;
-      columns: unknown[];
-    };
-    expect(res.source_table).toBeNull();
-    expect(res.columns).toEqual([]);
+  it("returns empty columns for a wrapped or non-array upstream body", async () => {
+    for (const body of [{ data: [{ column_name: "x" }] }, {}, "x", null]) {
+      const { env } = stubIchibanJson(body);
+      const res = (await getIchibanColumnsTool.execute(env)) as {
+        source_table: string;
+        columns: unknown[];
+      };
+      expect(res.source_table).toBe("運転日報明細");
+      expect(res.columns).toEqual([]);
+    }
   });
 
   it("surfaces a non-2xx Worker response as a throw", async () => {
