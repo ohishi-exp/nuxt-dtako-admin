@@ -2871,6 +2871,35 @@ export const getIchibanSalesTool = {
   },
 } satisfies ToolEntry<typeof getIchibanSalesArgs>;
 
+// ===== get_ichiban_columns ===================================================
+
+/** 列一覧を引く上流の表。上流 (`/api/schema/columns`) はこの 1 表しか許さない。 */
+const ICHIBAN_COLUMNS_TABLE = "運転日報明細";
+
+const getIchibanColumnsArgs = z.object({}).strict();
+
+export const getIchibanColumnsTool = {
+  name: "get_ichiban_columns",
+  description:
+    "一番星 (販売管理) の 運転日報明細 の列の一覧 (INFORMATION_SCHEMA.COLUMNS) を返す。" +
+    "行のデータは返さない。上流はこの 1 表だけを許す。" +
+    "列ごとの `column_name` / `data_type` / `is_nullable` / `max_length` は上流の pass-through。" +
+    "read-only (`GET /api/schema/columns`)。",
+  inputSchema: getIchibanColumnsArgs,
+  execute: async (env: Env) => {
+    const parsed = await fetchIchibanWorkerJson(
+      env.ICHIBAN_DB,
+      ICHIBAN_WORKER,
+      `/api/schema/columns?table=${encodeURIComponent(ICHIBAN_COLUMNS_TABLE)}`,
+    );
+    // 上流は包まない素の配列を返す (`{ source_table, data }` ではない)。表名は上流に無いので定数。
+    return {
+      source_table: ICHIBAN_COLUMNS_TABLE,
+      columns: Array.isArray(parsed) ? parsed : [],
+    };
+  },
+} satisfies ToolEntry<typeof getIchibanColumnsArgs>;
+
 // ===== get_kushiro_branch_estimate ===========================================
 
 /**
@@ -3535,5 +3564,6 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runDtakoAlcUploadDriverTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanCostsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanSalesTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getIchibanColumnsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKushiroBranchEstimateTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

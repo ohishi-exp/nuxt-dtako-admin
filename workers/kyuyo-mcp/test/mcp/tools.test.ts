@@ -4,6 +4,7 @@ import {
   getKosokuEventsTool,
   getIchibanCostsTool,
   getIchibanSalesTool,
+  getIchibanColumnsTool,
   getRestDiffTool,
   runDtakoScrapeTool,
   getTimecardDiffTool,
@@ -1502,6 +1503,57 @@ describe("get_ichiban_sales", () => {
   });
 });
 
+describe("get_ichiban_columns", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("calls /api/schema/columns with the table and returns the upstream bare array", async () => {
+    const cols = [
+      { column_name: "運行年月日", data_type: "datetime", is_nullable: "NO", max_length: null },
+      { column_name: "備考", data_type: "nvarchar", is_nullable: "YES", max_length: 100 },
+    ];
+    const { env, urls } = stubIchibanJson(cols);
+    const res = (await getIchibanColumnsTool.execute(env)) as {
+      source_table: string;
+      columns: unknown[];
+    };
+    expect(urls).toEqual([
+      "https://ichibanboshi-ichiban/api/schema/columns?table=" +
+        encodeURIComponent("運転日報明細"),
+    ]);
+    expect(res.source_table).toBe("運転日報明細");
+    expect(res.columns).toEqual(cols);
+  });
+
+  it("returns empty columns for a wrapped or non-array upstream body", async () => {
+    for (const body of [{ data: [{ column_name: "x" }] }, {}, "x", null]) {
+      const { env } = stubIchibanJson(body);
+      const res = (await getIchibanColumnsTool.execute(env)) as {
+        source_table: string;
+        columns: unknown[];
+      };
+      expect(res.source_table).toBe("運転日報明細");
+      expect(res.columns).toEqual([]);
+    }
+  });
+
+  it("surfaces a non-2xx Worker response as a throw", async () => {
+    const env = ichibanEnv(async () => new Response("bad table", { status: 400 }));
+    await expect(getIchibanColumnsTool.execute(env)).rejects.toThrow(
+      "一番星 Worker が 400 を返しました: bad table",
+    );
+  });
+
+  it("throws when the ICHIBAN_DB binding is missing", async () => {
+    const env = kosokuEnv({ ICHIBAN_DB: undefined });
+    await expect(getIchibanColumnsTool.execute(env)).rejects.toThrow(
+      "一番星 Worker の Service Binding (ICHIBAN_DB) が未設定です",
+    );
+  });
+});
+
 // ===== 勤怠 Worker (KINTAI) への振り分け =======================================
 //
 // `fetchIchibanJson` の 1 か所で振り分ける (Refs ohishi-exp/rust-ichibanboshi#322)。
@@ -1594,6 +1646,8 @@ describe("ALL_TOOLS", () => {
     // 一番星の経費/売上明細を読むだけ (Refs #760 の 12)。上流は GET のみ
     "get_ichiban_costs",
     "get_ichiban_sales",
+    // 一番星の 運転日報明細 の列一覧 (INFORMATION_SCHEMA) を読むだけ。上流は GET のみ
+    "get_ichiban_columns",
     // 釧路営業所 (暫定) の試算 (Refs #760 の 34)。**pure な計算 + R2 の最低賃金マスタと
     // 一番星の売上を読むだけ**で、上流に POST を 1 本も投げない
     "get_kushiro_branch_estimate",
