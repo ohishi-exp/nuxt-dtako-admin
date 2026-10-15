@@ -5546,7 +5546,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   v-if="monthTheearthSync(selectedYear, m) === 'unsynced'"
                   type="button"
                   class="flex items-center cursor-pointer text-orange-500 hover:text-orange-400"
-                  title="この月はデジタコ拘束時間管理表を一度も取り込んでいません — 打刻を持たない乗務員 (本社以外の営業所) が表に 1 行も出ていません。無人で埋まる経路はありません: クリックで『拘束CSV取得』へ (対象年月を選択済みで開きます)"
+                  title="この月はデジタコ拘束時間管理表を一度も取り込んでいません — 打刻を持たない乗務員 (本社以外の営業所) が表に 1 行も出ていません。自動では埋まりません (MCP の run_theearth_restraint_fetch でも取り込めます): クリックで『拘束CSV取得』へ (対象年月を選択済みで開きます)"
                   @click="jumpToRestraintFetch(selectedYear, m)"
                 >
                   <UIcon name="i-lucide-x" class="size-3" />

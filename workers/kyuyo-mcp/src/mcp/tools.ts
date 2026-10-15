@@ -2047,6 +2047,42 @@ export const runKintaiRestraintResummarizeTool = {
   },
 };
 
+// ── run_theearth_restraint_fetch ────────────────────────────────────────────
+
+const runTheearthRestraintFetchArgs = z
+  .object({
+    comp_id: z.string().regex(/^\d{8}$/).describe("会社 (dtako の comp_id、8 桁)。DTAKO_ACCOUNTS に載っている会社だけ"),
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("取り込む年月 (YYYY-MM)。1 回 1 か月"),
+  })
+  .strict();
+
+/**
+ * theearth の拘束時間管理表 (F-ERS2010) を DTAKO_ACCOUNTS の資格情報で 1 か月ぶん取り込む。
+ * 画面「拘束CSV取得」の無人版で、人の theearth ログインが要らない。
+ *
+ * **運ぶロジックはここに無い。** relay の `POST /kintai-relay/theearth-restraint-run` を叩くだけ
+ * (`run_kintai_restraint_resummarize` と同じ `X-Alc-Proxy-Secret` 方式)。
+ */
+export const runTheearthRestraintFetchTool = {
+  name: "run_theearth_restraint_fetch",
+  description:
+    "theearth の拘束時間管理表 (F-ERS2010) を、relay が DTAKO_ACCOUNTS の資格情報で自前ログインして " +
+    "**全乗務員一括で 1 か月ぶん取り込む** (画面「拘束CSV取得」の無人版。人の theearth ログインは要らない)。" +
+    "**書き先は R2 の拘束サマリ (版管理。中身が同じなら新しい版は作らない)・D1・拘束サマリの写しの push 先 (勤怠 Worker)。**" +
+    "拘束×賃金 (wage-report の既定ソース) はこの R2 を読むので、取り込んだ月はすぐ画面に出る。" +
+    "応答は `{comp_id, month, no_data, drivers, theearth_logins, theearth_kicked}`。" +
+    "**`no_data: true` は失敗ではない** (未集計の月・在籍者なし。「確認した結果データなし」として記録する)。" +
+    "**無人ログインは同じ theearth アカウントを使っている人のセッションを蹴りうる** — `theearth_kicked: true` が続くなら人が使っている。" +
+    "theearth は同一アカウントの並行アクセスで固まるので、**並列に呼ばない** (relay 側でも直列化する)。" +
+    "comp_id・month とも必須で、1 回 1 社 1 か月。`/kintai-relay/*` (機械用の名前空間、X-Alc-Proxy-Secret 方式) を叩く。",
+  inputSchema: runTheearthRestraintFetchArgs,
+  // **write tool。** R2・D1・勤怠 Worker の D1 を書き、theearth へログインする
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runTheearthRestraintFetchArgs>) => {
+    return await callRelay(env, "/kintai-relay/theearth-restraint-run", { month: args.month, comp_id: args.comp_id });
+  },
+};
+
 // ── run_driver_master_sync ───────────────────────────────────────────────────
 
 /** 乗務員マスタ同期の失敗本文をエラーに載せるときの上限。relay が返すのは
@@ -3605,6 +3641,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintResummarizeTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runTheearthRestraintFetchTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,

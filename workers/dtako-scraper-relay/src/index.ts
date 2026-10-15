@@ -282,6 +282,12 @@ export default {
       return handleRestraintResummarize(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/theearth-restraint-run" && request.method === "POST") {
+      // theearth の拘束時間管理表を DTAKO_ACCOUNTS の資格情報で 1 か月ぶん取り込む
+      // (画面「拘束CSV取得」の無人版)。DO 内部 (/cron/theearth-restraint) へ転送するだけ
+      return handleTheearthRestraintRun(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/driver-master-run" && request.method === "POST") {
       // theearth 乗務員マスタ → alc employees の同期を、cron (JST 7/12/15/17/19 時)
       // を待たずに 1 回走らせる (Refs ippoan/alc-app-s3#125)。cron 経路と同じ DO
@@ -1138,6 +1144,17 @@ export async function handleNet780Archive(request: Request, env: RelayWorkerEnv)
  * (Refs #981。DO 側 `handleCronRestraintSync` の docstring に読み手の一覧がある)。
  */
 async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardCompMonthToDo(request, env, "/cron/restraint-sync");
+}
+
+/**
+ * `/kintai-relay/{restraint-sync,restraint-resummarize,theearth-restraint-run}` の共通の関門と転送。
+ * `X-Alc-Proxy-Secret` を constant-time で検証し (未設定は 503)、body `{month, comp_id?}` を
+ * `scraper-comp-{comp}` の DO の `doPath` へ `{comp_id, month}` で渡す。**`month` は必須**、
+ * `comp_id` 省略時は `KINTAI_COMP_ID`。`month` の形式 (YYYY-MM) は DO 側が見る — ここでは素通し。
+ * DO の応答 (成功も失敗も) はそのまま返し、ここで reshape しない。
+ */
+async function forwardCompMonthToDo(request: Request, env: RelayWorkerEnv, doPath: string): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -1162,12 +1179,11 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
   if (!compId) return fail(503, "comp_id が解決できません");
 
   const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
-  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/restraint-sync", {
+  const res = await env.RELAY.get(id).fetch(`https://relay.internal${doPath}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ comp_id: compId, month }),
   });
-  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -1188,40 +1204,18 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
  * 走るので、viewer 側の DO が持つ上流キャッシュ (`invalidateKintaiUpstreamCache`) は消さない。
  */
 export async function handleRestraintResummarize(request: Request, env: RelayWorkerEnv): Promise<Response> {
-  const fail = (status: number, error: string) =>
-    new Response(JSON.stringify({ error }), {
-      status,
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-    });
+  return forwardCompMonthToDo(request, env, "/cron/restraint-resummarize");
+}
 
-  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-  if (!proxySecret) return fail(503, "kintai-relay not configured");
-  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
-  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
-
-  let body: { month?: unknown; comp_id?: unknown };
-  try {
-    body = (await request.json()) as typeof body;
-  } catch {
-    return fail(400, "body must be JSON");
-  }
-  const month = typeof body.month === "string" ? body.month : "";
-  if (!month) return fail(400, "month は必須です");
-  const compId =
-    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
-  if (!compId) return fail(503, "comp_id が解決できません");
-
-  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
-  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/restraint-resummarize", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ comp_id: compId, month }),
-  });
-  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
-  return new Response(res.body, {
-    status: res.status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-  });
+/**
+ * `POST /kintai-relay/theearth-restraint-run` — theearth の拘束時間管理表 (F-ERS2010) を
+ * DTAKO_ACCOUNTS の資格情報で 1 か月ぶん取り込む (画面「拘束CSV取得」の無人版。人の theearth
+ * ログインが要らない)。body は `{month, comp_id?}` で、関門と転送は `forwardCompMonthToDo`。
+ * 処理は DO の `/cron/theearth-restraint` (`handleCronTheearthRestraint`)。cron には載せない
+ * (必要なときに会社・月を指定して呼ぶ、2026-10-15 ユーザー判断)。
+ */
+export async function handleTheearthRestraintRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardCompMonthToDo(request, env, "/cron/theearth-restraint");
 }
 
 /**
