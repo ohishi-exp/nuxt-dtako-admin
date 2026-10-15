@@ -377,12 +377,20 @@ function at(columns: string[], index: number): string {
  * クォート無しの素朴な生成のため、主要列 (日付〜時間外深夜、index 0..21) を
  * 位置で読み、22 以降を摘要として結合する。
  */
+/** CSV の年 ("2025" / "令和 8" / "令和元") を西暦にする。令和 N 年 = 2018 + N。 */
+function westernYearOf(raw: string): number {
+  const reiwa = raw.match(/^令和\s*(\d{1,2}|元)$/);
+  if (!reiwa) return parseInt(raw, 10);
+  return 2018 + (reiwa[1] === "元" ? 1 : parseInt(reiwa[1]!, 10));
+}
+
 export function parseRestraintCsv(text: string): RestraintReport {
   const lines = text.split(/\r\n|\n/);
   if (!lines[0]?.startsWith("拘束時間管理表")) {
     throw new TheearthClientError("拘束時間管理表 CSV の 1 行目が想定と異なります (パース不能)");
   }
-  const titleMatch = lines[0].match(/\((\d{4})年\s*(\d{1,2})月分\)/);
+  // 年は企業設定で西暦 ("2025年") か和暦 ("令和 8年") になる (和暦の実物: comp 75700192)
+  const titleMatch = lines[0].match(/\((\d{4}|令和\s*(?:\d{1,2}|元))年\s*(\d{1,2})月分\)/);
   if (!titleMatch) {
     throw new TheearthClientError(`拘束時間管理表 CSV のタイトルから年月を読めません: ${lines[0]}`);
   }
@@ -391,7 +399,7 @@ export function parseRestraintCsv(text: string): RestraintReport {
   const limitMatch = maxRestraintNote.match(/最大拘束時間\s*[:：]\s*(\d+)\s*時間/);
   const report: RestraintReport = {
     title: lines[0],
-    year: parseInt(titleMatch[1], 10),
+    year: westernYearOf(titleMatch[1]),
     month: parseInt(titleMatch[2], 10),
     maxRestraintNote,
     maxRestraintHours: limitMatch ? parseInt(limitMatch[1], 10) : null,
@@ -483,8 +491,8 @@ export function parseRestraintCsv(text: string): RestraintReport {
         : null;
       continue;
     }
-    if (/^\d{4}年度/.test(first)) {
-      // 例: "2025年度　拘束時間,3300時間"
+    if (/^(?:\d{4}|令和\s*(?:\d{1,2}|元))年度/.test(first)) {
+      // 例: "2025年度　拘束時間,3300時間" (和暦設定の企業は "令和 8年度…")
       const m = (cols[1] ?? "").match(/(\d+)時間/);
       current.fiscalLimitHours = m ? parseInt(m[1], 10) : null;
       continue;
