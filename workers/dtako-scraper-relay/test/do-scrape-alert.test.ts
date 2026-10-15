@@ -84,7 +84,12 @@ function makeDO(
   const env = {
     DTAKO_CONFIG_KV: {
       get: async (key: string) =>
-        key === "scrape_alert_email" ? ("emailConfig" in opts ? opts.emailConfig : EMAIL_CONFIG) : null,
+        key === "scrape_alert_email"
+          ? ("emailConfig" in opts ? opts.emailConfig : EMAIL_CONFIG)
+          : // 畳み先へ名乗る会社のテナント (kintaiWorkerFor) の引き先
+            key === "dtako_accounts" && opts.fold === "configured"
+            ? JSON.stringify([ACCOUNT])
+            : null,
     },
     ALERT_EMAIL: opts.noEmailBinding
       ? undefined

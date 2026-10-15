@@ -68,6 +68,23 @@ describe("run_kintai_recalc (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
     });
   });
 
+  it("comp_id を body に載せる。省略すると載せない (既定の会社は relay が決める)", async () => {
+    const e = env();
+    await runKintaiRecalcTool.execute(e, { month: "2026-06", comp_id: "75700192" });
+    const call = (e.SCRAPER_RELAY as { fetch: ReturnType<typeof vi.fn> }).fetch.mock.calls[0]!;
+    expect(JSON.parse((call[1] as RequestInit).body as string).comp_id).toBe("75700192");
+
+    const e2 = env();
+    await runKintaiRecalcTool.execute(e2, { month: "2026-06" });
+    const call2 = (e2.SCRAPER_RELAY as { fetch: ReturnType<typeof vi.fn> }).fetch.mock.calls[0]!;
+    expect(JSON.parse((call2[1] as RequestInit).body as string)).not.toHaveProperty("comp_id");
+  });
+
+  it.each(["7570019", "757001920", "abcdefgh"])("comp_id は 8 桁の数字だけ受ける (%s は拒否)", (compId) => {
+    expect(runKintaiRecalcTool.inputSchema.safeParse({ comp_id: compId }).success).toBe(false);
+    expect(runKintaiRecalcTool.inputSchema.safeParse({ comp_id: "75700192" }).success).toBe(true);
+  });
+
   it("**month は省略できる** — 当月は relay 側が決める", async () => {
     const e = env();
     await runKintaiRecalcTool.execute(e, {});

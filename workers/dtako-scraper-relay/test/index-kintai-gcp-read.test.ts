@@ -120,7 +120,7 @@ describe("勤怠 Worker (KINTAI) だけから読む (Refs ohishi-exp/rust-ichiba
     return { env, authCalls, kintaiCalls };
   }
 
-  it("day-summaries・shift-overlaps は Worker に飛び、auth-worker を一度も呼ばない。secret・テナントを付けない", async () => {
+  it("day-summaries・shift-overlaps は Worker に飛び、auth-worker を一度も呼ばない。secret を付けず、会社のテナントだけを名乗る", async () => {
     const { env, authCalls, kintaiCalls } = withKintai(() => Response.json(OVERLAPS));
     expect((await worker.fetch(get("/kintai-relay/day-summaries?month=2026-06"), env)).status).toBe(200);
     const res = await worker.fetch(get("/kintai-relay/shift-overlaps?month=2026-06"), env);
@@ -130,7 +130,7 @@ describe("勤怠 Worker (KINTAI) だけから読む (Refs ohishi-exp/rust-ichiba
       "https://ichibanboshi-kintai/api/kintai/day-summaries?month=2026-06",
       "https://ichibanboshi-kintai/api/kintai/shift-overlaps?month=2026-06",
     ]);
-    for (const c of kintaiCalls) expect(Object.keys(c.headers)).toEqual(["Accept"]);
+    for (const c of kintaiCalls) expect(c.headers).toEqual({ accept: "application/json", "x-kintai-tenant-id": "tenant" });
   });
 
   it("KINTAI binding が無ければ 503 で、auth-worker へ倒さない", async () => {

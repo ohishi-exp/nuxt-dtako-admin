@@ -220,6 +220,15 @@ NET780_R2_PREFIX = "net780"
 # こちらだけで、給与比較アーカイブに居る会社もこの 1 社 (D1 `comp_payroll_map` 参照)。
 KINTAI_COMP_ID = "27324455"
 
+# 勤怠 (Supabase / alc) の対象会社の集合 (カンマ区切りの comp_id。KINTAI_COMP_ID は常に含む扱い)。
+# ここに足した会社は fold・stale-months・unko-gaps・change-log・refresh/fold・wage-report の
+# source=gcp・/kintai-relay/{recalc,day-summaries,shift-overlaps} の comp_id で開く。打刻・社内
+# MariaDB・D1 の口は KINTAI_COMP_ID の 1 社のまま (`kintai-relay.ts` の kintaiCompSet / kintaiWorkerFor)。
+# **空 = KINTAI_COMP_ID の 1 社だけ。** 会社を足すのは、勤怠 Worker が X-Kintai-Tenant-Id を読む版で
+# 本番に出ていることを確かめてから — 読まない版だとヘッダーが無視され既定テナントの勤怠が返る。
+# staging / preview は KINTAI_COMP_ID と同じく置かない (KINTAI_COMP_ID が空なら集合も空)。
+KINTAI_COMP_IDS = ""
+
 # kintai 系上流応答の DO SQLite キャッシュ + 条件付き再検証 (Refs #543 PR-2)。
 # "on" のときだけ有効。off = 完全に従来経路。version エンドポイント
 # (rust-ichibanboshi#185) の本番デプロイ + kintai_reader への GRANT 4 テーブル
@@ -352,7 +361,7 @@ database_id = "81dd4136-b5c8-4c1b-93c8-28fdafbe1a8d"
 migrations_dir = "../../migrations"
 
 [env.staging.vars]
-# **KINTAI_COMP_ID は staging に置かない** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+# **KINTAI_COMP_ID・KINTAI_COMP_IDS は staging に置かない** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
 # 打刻の書き先は tenant で決まり、staging も本番も同じ KV / 同じ tenant を見るので、
 # 入れると staging から本番の kintai.* に書ける。未設定なら POST /kintai-relay/run は
 # 503 で fail-closed。top-level [vars] は named environment に継承されないので、

@@ -250,7 +250,7 @@ describe('runScheduledCron: restraint', () => {
     const skipped = results.filter((r) => !r.target.includes('|'))
     expect(skipped).toHaveLength(1)
     expect(skipped[0]).toMatchObject({ kind: 'restraint', target: '99999999', ok: true })
-    expect(skipped[0].detail).toContain('KINTAI_COMP_ID の宣言 (27324455) と一致しません')
+    expect(skipped[0].detail).toContain('勤怠の対象会社の宣言 (27324455) に入っていません')
     expect(results.filter((r) => r.target.includes('|')).every((r) => r.ok)).toBe(true)
   })
 
@@ -271,7 +271,7 @@ describe('runScheduledCron: restraint', () => {
         expect(r.kind).toBe('restraint')
         expect(r.ok).toBe(false) // 設定の穴 → index.ts が console.error に落とす
         expect(r.detail).toContain('KINTAI_COMP_ID が未設定です')
-        expect(r.detail).not.toContain('一致しません') // 2 つの理由を同じ文言に畳まない
+        expect(r.detail).not.toContain('入っていません') // 2 つの理由を同じ文言に畳まない
       }
     }
   })

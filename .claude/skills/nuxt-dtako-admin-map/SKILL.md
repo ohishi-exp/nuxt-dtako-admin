@@ -440,6 +440,25 @@ fail することが本番で発覚 → revert。
   (`litigation-output-version.ts` の `parseResult`)
 - Excel の中の式の結果とは一致しないことが在る (Excel に書く行の作り方が別。統一は別の作業)
 
+### 勤怠の会社の絞り方 (`KINTAI_COMP_ID` / `KINTAI_COMP_IDS`)
+
+relay は勤怠 Worker の口を**取得先で 2 つに分けて**会社で絞る (`dtako-scraper-relay-do.ts` の
+`KINTAI_COMPS_PATHS` / `KINTAI_SINGLE_COMP_PATHS`、判定は `kintai-relay.ts` の `judgeFoldScope`):
+
+- **集合 (`KINTAI_COMP_ID` + `KINTAI_COMP_IDS`) に開く** — Supabase / alc だけを読み書きする口:
+  `kintai/stale-months`・`unko-gaps`・`change-log`・`refresh/fold`、wage-report の `source=gcp`、
+  スクレイプ後の fold、機械用の `/kintai-relay/{recalc,day-summaries,shift-overlaps}` の `comp_id`
+  (外なら 400。省略は `KINTAI_COMP_ID`)
+- **`KINTAI_COMP_ID` の 1 社だけ** — 社内 MariaDB・D1・打刻に依存する口 (`kintai/diff`・`refresh/timecard`・
+  `wage-snapshot`・`wage-range`・打刻/デジタコ系・写し)、`/kintai-relay/run`・`y-time-shifts`・② 取り込み
+- `KINTAI_COMP_ID` が空なら集合も空 (`KINTAI_COMP_IDS` だけでは開かない)。本番の `KINTAI_COMP_IDS` は空、
+  staging / preview は宣言しない
+- **勤怠 Worker へ名乗るテナント (`X-Kintai-Tenant-Id`) は `kintaiWorkerFor` の 1 か所だけが付ける。**
+  値は会社から `dtako_accounts` で引き、呼び手の同名ヘッダーは上書きする。引けなければ送らない (503)。
+  `KINTAI_COMP_ID` 以外の会社が書けるのは recalc だけ (`buildDeps` の `KINTAI_COMPS_WRITE_PATHS`)
+- 会社を `KINTAI_COMP_IDS` に足すのは、勤怠 Worker がそのヘッダーを読む版で本番に出ていることを
+  確かめてから (読まない版だとヘッダーが無視され、既定テナントの勤怠が返る)
+
 ### Y時間 の Excel の入力にする勤務を relay が読む口 (Refs #1133 c1133-40)
 
 relay の機械用の口 `POST /kintai-relay/y-time-shifts` — body `{driver_cd, from, to, tenant_id}` →

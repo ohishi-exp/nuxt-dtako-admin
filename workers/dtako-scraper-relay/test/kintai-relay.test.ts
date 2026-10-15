@@ -27,6 +27,8 @@ import {
   kintaiRelayFailStatus,
   KintaiWorkerUnavailableError,
   kintaiWorkerFor,
+  kintaiWorkerScope,
+  kintaiCompSet,
   readKintaiWriteToken,
   KintaiRelayError,
   MAX_MONTH_COUNT,
@@ -43,6 +45,7 @@ import {
   type KintaiReader,
   type KintaiRelayDeps,
 } from "../src/kintai-relay";
+import type { KintaiReaderEnv } from "../src/kintai-relay";
 
 const MONTH = "2026-07";
 const SIG = "a".repeat(64);
@@ -412,6 +415,28 @@ describe("judgeFoldScope (Refs #633-22 / #944)", () => {
   it("前後の空白は両側とも無視する (var の書き間違いで静かに全社 skip にしない)", () => {
     expect(judgeFoldScope({ compId: " 27324455 ", kintaiCompId: " 27324455 " })).toEqual({
       inScope: true,
+    });
+  });
+
+  it("KINTAI_COMP_IDS を渡すと集合 (KINTAI_COMP_ID を含む) で判定する", () => {
+    const scope = { kintaiCompId: "27324455", kintaiCompIds: " 75700192 ," };
+    expect(judgeFoldScope({ compId: "75700192", ...scope })).toEqual({ inScope: true });
+    expect(judgeFoldScope({ compId: "27324455", ...scope })).toEqual({ inScope: true });
+    const other = judgeFoldScope({ compId: "11112222", ...scope });
+    expect(other).toMatchObject({ inScope: false, reason: "out_of_scope" });
+    if (other.inScope) throw new Error("unreachable");
+    expect(other.detail).toContain("27324455,75700192");
+    expect(other.detail).toContain("KINTAI_COMP_IDS");
+  });
+
+  it("★ KINTAI_COMP_IDS を渡さない呼び手 (打刻・MariaDB・D1 の口) は KINTAI_COMP_ID の 1 社のまま", () => {
+    expect(judgeFoldScope({ compId: "75700192", kintaiCompId: "27324455" })).toMatchObject({ reason: "out_of_scope" });
+  });
+
+  it("★ KINTAI_COMP_ID が未設定なら KINTAI_COMP_IDS があっても not_configured (集合だけでは開かない)", () => {
+    expect(judgeFoldScope({ compId: "75700192", kintaiCompId: undefined, kintaiCompIds: "75700192" })).toMatchObject({
+      inScope: false,
+      reason: "not_configured",
     });
   });
 });
@@ -996,6 +1021,13 @@ describe("tenantForCompId", () => {
   });
 });
 
+/** 会社 → テナントの表 (架空の値)。 */
+const KINTAI_ACCOUNTS = [
+  { comp_id: "1001", tenant_id: "tenant-1001" },
+  { comp_id: "2002", tenant_id: "tenant-2002" },
+  { comp_id: "3003" },
+];
+
 describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
   const originalFetch = globalThis.fetch;
   afterEach(() => {
@@ -1008,6 +1040,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
       kintai?: boolean;
       compId?: string;
       kintaiCompId?: string | undefined;
+      kintaiCompIds?: string;
       writeToken?: string;
     } = {},
   ) {
@@ -1023,7 +1056,11 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     const deps = buildDeps({
       kintai: over.kintai === false ? undefined : kintai,
       compId: over.compId ?? "1001",
-      kintaiCompId: "kintaiCompId" in over ? over.kintaiCompId : "1001",
+      scope: {
+        kintaiCompId: "kintaiCompId" in over ? over.kintaiCompId : "1001",
+        kintaiCompIds: over.kintaiCompIds,
+        accounts: KINTAI_ACCOUNTS,
+      },
       writeToken: "writeToken" in over ? over.writeToken : "write-token",
     });
     return { deps, kintai, rawFetch };
@@ -1049,14 +1086,18 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     "/api/kintai/unko-gaps",
   ];
 
-  it("打刻の読み (onprem) も Worker へ。呼び手のヘッダーに Accept を足し、method 等はそのまま", async () => {
+  it("打刻の読み (onprem) も Worker へ。呼び手のヘッダーに Accept とテナントを足し、method 等はそのまま", async () => {
     const { deps, kintai, rawFetch } = setup();
     await deps.onprem("/api/kintai/timecard/events?months=2026-07", { method: "GET", headers: { "X-Probe": "1" } });
     expect(kintai.fetch).toHaveBeenCalledTimes(1);
     const [url, init] = kintai.fetch.mock.calls[0]!;
     expect(url).toBe("https://ichibanboshi-kintai/api/kintai/timecard/events?months=2026-07");
     expect((init as RequestInit).method).toBe("GET");
-    expect((init as RequestInit).headers).toEqual({ "X-Probe": "1", Accept: "application/json" });
+    expect((init as RequestInit).headers).toEqual({
+      "x-probe": "1",
+      accept: "application/json",
+      "x-kintai-tenant-id": "tenant-1001",
+    });
     expect(rawFetch).not.toHaveBeenCalled();
   });
 
@@ -1072,15 +1113,41 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     expect(urls[6]).toBe("https://ichibanboshi-kintai/api/kintai/unko-gaps?month=2026-07&driver_cd=9001");
   });
 
-  it("Worker への読みには Accept だけ (secret・テナント・token を付けない)", async () => {
+  it("Worker への読みには Accept と会社のテナントだけ (secret・token を付けない)", async () => {
     const { deps, kintai } = setup();
     await readFive(deps);
     expect(kintai.fetch).toHaveBeenCalledTimes(FIVE_PATHS.length);
     for (const call of kintai.fetch.mock.calls) {
       const h = (call[1] as RequestInit).headers as Record<string, string>;
-      const names = Object.keys(h).map((k) => k.toLowerCase());
-      expect(names).toEqual(["accept"]);
+      expect(h).toEqual({ accept: "application/json", "x-kintai-tenant-id": "tenant-1001" });
     }
+  });
+
+  it("★ 呼び手が同名のヘッダーを渡しても (大文字小文字違いでも) 写さず、会社から引いたテナント 1 つだけを名乗る", async () => {
+    const { deps, kintai } = setup();
+    await deps.gcp("/api/kintai/day-summaries?month=2026-07", { headers: { "X-Kintai-Tenant-Id": "browser-value" } });
+    await deps.gcp("/api/kintai/day-summaries?month=2026-07", { headers: { "x-kintai-tenant-id": "browser-value" } });
+    for (const call of kintai.fetch.mock.calls) {
+      expect((call[1] as RequestInit).headers).toEqual({ accept: "application/json", "x-kintai-tenant-id": "tenant-1001" });
+    }
+  });
+
+  it("★ KINTAI_COMP_IDS の会社: 読みと recalc の POST はその会社のテナントで Worker へ。窓・賃金スナップショットは書けない (503)", async () => {
+    const { deps, kintai, rawFetch } = setup({ compId: "2002", kintaiCompIds: "2002" });
+    expect(await hitWorkerOnly(deps)).toEqual([503, "ok", "ok", "ok"]);
+    const err = await relayWageSnapshotPut(deps, "2002", { month: MONTH, rows: [] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KintaiWorkerUnavailableError);
+    expect(String((err as Error).message)).toBe("この会社では書けない口です: /api/kintai/wage-snapshot");
+    expect(workerCalls(kintai)).toEqual([
+      ["/api/kintai/timecard/events", "GET", null],
+      ["/api/kintai/recalc", "GET", null],
+      ["/api/kintai/recalc", "POST", "write-token"],
+      ["/api/kintai/stale-months", "GET", null],
+    ]);
+    for (const c of kintai.fetch.mock.calls) {
+      expect(((c[1] as RequestInit).headers as Record<string, string>)["x-kintai-tenant-id"]).toBe("tenant-2002");
+    }
+    expect(rawFetch).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1088,6 +1155,9 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     ["読む会社が KINTAI_COMP_ID と違う", { compId: "2002" }],
     ["KINTAI_COMP_ID が未設定", { kintaiCompId: undefined }],
     ["会社が空 (KINTAI_COMP_ID も空)", { compId: "", kintaiCompId: "" }],
+    ["会社が KINTAI_COMP_IDS に入っているが KINTAI_COMP_ID が未設定", { compId: "2002", kintaiCompId: undefined, kintaiCompIds: "2002" }],
+    ["会社のテナントが dtako_accounts に無い", { compId: "3003", kintaiCompIds: "3003" }],
+    ["KINTAI_COMP_ID の会社でもテナントが無い", { compId: "3003", kintaiCompId: "3003" }],
   ] as const)("%s ときは読み・打刻とも 503 (KintaiWorkerUnavailableError)。どこにも送らない", async (_label, over) => {
     const { deps, kintai, rawFetch } = setup(over);
     const err = await relayKintaiDaySummaries(deps, { month: MONTH }).catch((e: unknown) => e);
@@ -1125,7 +1195,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     return kintai.fetch.mock.calls.map((c) => {
       const init = c[1] as RequestInit | undefined;
       const h = (init?.headers ?? {}) as Record<string, string>;
-      return [new URL(String(c[0])).pathname, init?.method ?? "GET", h["X-Kintai-Write-Token"] ?? null];
+      return [new URL(String(c[0])).pathname, init?.method ?? "GET", h["x-kintai-write-token"] ?? null];
     });
   }
 
@@ -1141,8 +1211,8 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     ]);
     for (const c of kintai.fetch.mock.calls) {
       const h = (c[1] as RequestInit).headers as Record<string, string>;
-      expect(h).not.toHaveProperty("X-Alc-Proxy-Secret");
-      expect(h).not.toHaveProperty("X-Tenant-ID");
+      expect(h).not.toHaveProperty("x-alc-proxy-secret");
+      expect(h).not.toHaveProperty("x-tenant-id");
     }
     expect(rawFetch).not.toHaveBeenCalled();
   });
@@ -1168,7 +1238,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     const { deps, kintai } = setup();
     const err = await deps.gcp("/api/kintai/day-summaries", { method: "POST" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(KintaiWorkerUnavailableError);
-    expect(String((err as Error).message)).toBe("KINTAI_WRITE_TOKEN が読めません: /api/kintai/day-summaries");
+    expect(String((err as Error).message)).toBe("この会社では書けない口です: /api/kintai/day-summaries");
     expect(kintai.fetch).not.toHaveBeenCalled();
   });
 
@@ -1178,7 +1248,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     await readFive(deps);
     expect(workerCalls(kintai)[0]).toEqual(["/api/kintai/wage-snapshot", "POST", "write-token"]);
     for (const c of kintai.fetch.mock.calls.slice(1)) {
-      expect((c[1] as RequestInit | undefined)?.headers ?? {}).not.toHaveProperty("X-Kintai-Write-Token");
+      expect((c[1] as RequestInit | undefined)?.headers ?? {}).not.toHaveProperty("x-kintai-write-token");
     }
   });
 
@@ -1186,6 +1256,7 @@ describe("buildDeps — 勤怠 Worker (KINTAI) だけへ送る (Refs ohishi-exp/
     ["binding が無い", { kintai: false }],
     ["別の会社", { compId: "2002" }],
     ["KINTAI_COMP_ID が未設定", { kintaiCompId: undefined }],
+    ["会社のテナントが引けない", { compId: "3003", kintaiCompIds: "3003" }],
   ] as const)("%s: 4 本とも 503 (KintaiWorkerUnavailableError)。Worker にも素の fetch にも送らない", async (_l, over) => {
     const { deps, kintai, rawFetch } = setup(over);
     expect(await hitWorkerOnly(deps)).toEqual([503, 503, 503, 503]);
@@ -1249,32 +1320,50 @@ describe("kintaiReader — 勤怠の読みの入口 (Refs ohishi-exp/rust-ichiba
     return { fetch: vi.fn(async (_url: string, _init?: RequestInit) => json({})) };
   }
 
-  it("本番の設定 (KINTAI あり・会社 = KINTAI_COMP_ID) では Worker を読む。ヘッダーは呼び手のものだけ", async () => {
+  /** env から読みの入口を組む (DO の `kintaiReaderFor` と同じ組み方)。 */
+  function readerFor(env: KintaiReaderEnv, compId: string, comps = false) {
+    return kintaiReader(env, compId, kintaiWorkerScope(env, KINTAI_ACCOUNTS, comps));
+  }
+
+  it("本番の設定 (KINTAI あり・会社 = KINTAI_COMP_ID) では Worker を読む。ヘッダーは呼び手のものと会社のテナント", async () => {
     const seen = stubFetch();
     const kintai = binding();
-    const reader = kintaiReader({ KINTAI: kintai, KINTAI_COMP_ID: "1001" }, "1001");
+    const reader = readerFor({ KINTAI: kintai, KINTAI_COMP_ID: "1001" }, "1001");
     await reader!.read("/api/kintai/version?month=2026-07", { headers: { Accept: "application/json" } });
     expect(seen).toEqual([]);
     expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/kintai/version?month=2026-07", {
-      headers: { Accept: "application/json" },
+      headers: { accept: "application/json", "x-kintai-tenant-id": "tenant-1001" },
     });
   });
 
-  it("init 無しの呼び出しは init 無しのまま Worker へ", async () => {
+  it("init 無しの呼び出しもテナントだけは付けて Worker へ", async () => {
     const kintai = binding();
-    const reader = kintaiReader({ KINTAI: kintai, KINTAI_COMP_ID: " 1001 " }, "1001");
+    const reader = readerFor({ KINTAI: kintai, KINTAI_COMP_ID: " 1001 " }, "1001");
     await reader!.read("/api/kintai/daily?month=2026-07");
-    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/kintai/daily?month=2026-07", undefined);
+    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/kintai/daily?month=2026-07", {
+      headers: { "x-kintai-tenant-id": "tenant-1001" },
+    });
+  });
+
+  it("kintaiWorkerScope: comps を立てたときだけ KINTAI_COMP_IDS の会社に開く", async () => {
+    const kintai = binding();
+    const env = { KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_COMP_IDS: "2002" };
+    expect(readerFor(env, "2002")).toBeNull();
+    await readerFor(env, "2002", true)!.read("/api/kintai/day-summaries?month=2026-07");
+    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/kintai/day-summaries?month=2026-07", {
+      headers: { "x-kintai-tenant-id": "tenant-2002" },
+    });
   });
 
   it.each([
     ["KINTAI が無い", { KINTAI_COMP_ID: "1001" }, "1001"],
     ["会社が KINTAI_COMP_ID と違う", { KINTAI_COMP_ID: "1001", withBinding: true }, "2002"],
     ["KINTAI_COMP_ID が未設定", { withBinding: true }, "1001"],
+    ["会社のテナントが dtako_accounts に無い", { KINTAI_COMP_ID: "3003", withBinding: true }, "3003"],
   ] as const)("%s ときは null (呼び手が 503 にする)。どこにも送らない", (_label, cfg, compId) => {
     const seen = stubFetch();
     const kintai = binding();
-    const reader = kintaiReader(
+    const reader = readerFor(
       { ...("KINTAI_COMP_ID" in cfg ? { KINTAI_COMP_ID: cfg.KINTAI_COMP_ID } : {}), ...("withBinding" in cfg ? { KINTAI: kintai } : {}) },
       compId,
     );
@@ -1311,12 +1400,13 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
     const loader = await kintaiAutoloader(
       { KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: { get: async () => "wt" } },
       "1001",
+      KINTAI_ACCOUNTS,
       onSecretError,
     );
     await loader!.autoload(PATH, INIT);
     expect(kintai.fetch).toHaveBeenCalledWith(`https://ichibanboshi-kintai${PATH}`, {
       ...INIT,
-      headers: { "content-type": "application/zip", "X-Kintai-Write-Token": "wt" },
+      headers: { "content-type": "application/zip", "x-kintai-write-token": "wt", "x-kintai-tenant-id": "tenant-1001" },
     });
     expect(seen).toEqual([]);
     expect(onSecretError).not.toHaveBeenCalled();
@@ -1327,14 +1417,21 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
   it.each([
     ["KINTAI が無い", { KINTAI_COMP_ID: "1001" }, "1001"],
     ["会社が KINTAI_COMP_ID と違う", { KINTAI_COMP_ID: "1001", withBinding: true }, "2002"],
-  ] as const)("%s ときは null、token は読まない", async (_label, cfg, compId) => {
+    ["会社が KINTAI_COMP_IDS に入っていても (取り込みは 1 社だけ)", { KINTAI_COMP_ID: "1001", KINTAI_COMP_IDS: "2002", withBinding: true }, "2002"],
+  ] as const)("%s ときは null、Worker に送らない", async (_label, cfg, compId) => {
     const seen = stubFetch();
     const kintai = binding();
     const token = { get: vi.fn(async () => "wt") };
     const onSecretError = vi.fn();
     const loader = await kintaiAutoloader(
-      { KINTAI_COMP_ID: cfg.KINTAI_COMP_ID, KINTAI_WRITE_TOKEN: token, ...("withBinding" in cfg ? { KINTAI: kintai } : {}) },
+      {
+        KINTAI_COMP_ID: cfg.KINTAI_COMP_ID,
+        KINTAI_WRITE_TOKEN: token,
+        ...("KINTAI_COMP_IDS" in cfg ? { KINTAI_COMP_IDS: cfg.KINTAI_COMP_IDS } : {}),
+        ...("withBinding" in cfg ? { KINTAI: kintai } : {}),
+      },
       compId,
+      KINTAI_ACCOUNTS,
       onSecretError,
     );
     expect(loader).toBeNull();
@@ -1353,7 +1450,12 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
     const seen = stubFetch();
     const kintai = binding();
     const onSecretError = vi.fn();
-    const loader = await kintaiAutoloader({ KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: token }, "1001", onSecretError);
+    const loader = await kintaiAutoloader(
+      { KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: token },
+      "1001",
+      KINTAI_ACCOUNTS,
+      onSecretError,
+    );
     expect(loader).toBeNull();
     expect(seen).toEqual([]);
     expect(kintai.fetch).not.toHaveBeenCalled();
@@ -1362,19 +1464,88 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
   });
 });
 
-describe("kintaiWorkerFor (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
-  const binding = { fetch: async () => new Response() };
-  it("会社が KINTAI_COMP_ID (前後の空白は落とす) と一致すれば binding を返す", () => {
-    expect(kintaiWorkerFor(binding, "1001", "1001")).toBe(binding);
-    expect(kintaiWorkerFor(binding, "1001", " 1001 ")).toBe(binding);
+describe("kintaiWorkerFor — 送り先とテナントのヘッダー (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  const binding = () => ({ fetch: vi.fn(async (_url: string, _init?: RequestInit) => new Response()) });
+  const scope = (kintaiCompId: string | undefined, kintaiCompIds?: string) => ({
+    kintaiCompId,
+    kintaiCompIds,
+    accounts: KINTAI_ACCOUNTS,
   });
+
   it.each([
-    ["binding が無い", undefined, "1001", "1001"],
-    ["会社が違う", binding, "2002", "1001"],
-    ["KINTAI_COMP_ID が未設定", binding, "1001", undefined],
-    ["会社も KINTAI_COMP_ID も空", binding, "", ""],
-  ] as const)("%s ときは undefined", (_label, kintai, compId, kintaiCompId) => {
-    expect(kintaiWorkerFor(kintai, compId, kintaiCompId)).toBeUndefined();
+    ["会社が KINTAI_COMP_ID と一致", "1001", scope("1001"), "tenant-1001"],
+    ["KINTAI_COMP_ID の前後の空白は落とす", "1001", scope(" 1001 "), "tenant-1001"],
+    ["会社が KINTAI_COMP_IDS に入っている", "2002", scope("1001", "2002"), "tenant-2002"],
+    ["会社の前後の空白も落とす", " 2002 ", scope("1001", " 2002 ,"), "tenant-2002"],
+  ] as const)("%s ときは、その会社のテナントを名乗る fetcher を返す", async (_label, compId, sc, tenant) => {
+    const kintai = binding();
+    const worker = kintaiWorkerFor(kintai, compId, sc);
+    await worker!.fetch("https://ichibanboshi-kintai/api/x", { method: "POST", body: "b" });
+    expect(kintai.fetch).toHaveBeenCalledWith("https://ichibanboshi-kintai/api/x", {
+      method: "POST",
+      body: "b",
+      headers: { "x-kintai-tenant-id": tenant },
+    });
+  });
+
+  it("★ init の同名ヘッダー (ブラウザ由来の値でも) は上書きして写さない", async () => {
+    const kintai = binding();
+    const worker = kintaiWorkerFor(kintai, "2002", scope("1001", "2002"));
+    await worker!.fetch("https://ichibanboshi-kintai/api/x", {
+      headers: new Headers({ "X-Kintai-Tenant-Id": "tenant-1001", Accept: "application/json" }),
+    });
+    expect(kintai.fetch.mock.calls[0]![1]!.headers).toEqual({
+      accept: "application/json",
+      "x-kintai-tenant-id": "tenant-2002",
+    });
+  });
+
+  it.each([
+    ["binding が無い", false, "1001", scope("1001")],
+    ["会社が違う", true, "2002", scope("1001")],
+    ["KINTAI_COMP_ID が未設定", true, "1001", scope(undefined)],
+    ["KINTAI_COMP_ID が未設定 (KINTAI_COMP_IDS だけでは開かない)", true, "2002", scope(undefined, "2002")],
+    ["会社も KINTAI_COMP_ID も空", true, "", scope("")],
+    ["会社のテナントが dtako_accounts に無い", true, "3003", scope("1001", "3003")],
+    ["dtako_accounts が読めない", true, "1001", { kintaiCompId: "1001", accounts: null }],
+  ] as const)("%s ときは undefined (呼び手は 503)", (_label, withBinding, compId, sc) => {
+    expect(kintaiWorkerFor(withBinding ? binding() : undefined, compId, sc)).toBeUndefined();
+  });
+});
+
+describe("kintaiCompSet — 勤怠の対象会社の集合", () => {
+  it("KINTAI_COMP_ID と KINTAI_COMP_IDS の和。空白・空要素は落とす", () => {
+    expect([...kintaiCompSet(" 1001 ", " 2002, ,3003 ,")]).toEqual(["1001", "2002", "3003"]);
+    expect([...kintaiCompSet("1001", undefined)]).toEqual(["1001"]);
+    expect([...kintaiCompSet("1001", "")]).toEqual(["1001"]);
+    expect([...kintaiCompSet("1001", "1001")]).toEqual(["1001"]);
+  });
+  it.each([undefined, "", "  "])("KINTAI_COMP_ID が %j なら KINTAI_COMP_IDS があっても空集合", (head) => {
+    expect(kintaiCompSet(head, "2002").size).toBe(0);
+  });
+});
+
+describe("readKintaiWriteToken — 集合の会社だけ token を読む", () => {
+  it.each([
+    ["KINTAI_COMP_ID の会社", { KINTAI_COMP_ID: "1001" }, "1001", "wt"],
+    ["KINTAI_COMP_IDS の会社", { KINTAI_COMP_ID: "1001", KINTAI_COMP_IDS: "2002" }, " 2002 ", "wt"],
+    ["集合の外の会社", { KINTAI_COMP_ID: "1001" }, "2002", ""],
+  ] as const)("%s", async (_label, cfg, compId, expected) => {
+    const token = { get: vi.fn(async () => "wt") };
+    const onSecretError = vi.fn();
+    const got = await readKintaiWriteToken(
+      { KINTAI: { fetch: async () => new Response() }, KINTAI_WRITE_TOKEN: token, ...cfg },
+      compId,
+      onSecretError,
+    );
+    expect(got).toBe(expected);
+    expect(token.get).toHaveBeenCalledTimes(expected ? 1 : 0);
+    expect(onSecretError).not.toHaveBeenCalled();
+  });
+  it("binding が無ければ読まない", async () => {
+    const token = { get: vi.fn(async () => "wt") };
+    expect(await readKintaiWriteToken({ KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: token }, "1001", vi.fn())).toBe("");
+    expect(token.get).not.toHaveBeenCalled();
   });
 });
 
