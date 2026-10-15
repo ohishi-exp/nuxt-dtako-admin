@@ -566,6 +566,21 @@ describe('parseRestraintCsv', () => {
     expect(noLimit.maxRestraintHours).toBeNull()
   })
 
+  it('和暦設定の企業 ("令和 8年 8月分" / "令和 8年度") も西暦に直して読む', () => {
+    const wareki = SAMPLE_CSV
+      .replace('拘束時間管理表 (2025年 4月分)', '拘束時間管理表 (令和 8年 8月分)')
+      .replace('2025年度　拘束時間,3300時間', '令和 8年度　拘束時間,3300時間')
+    const r = parseRestraintCsv(wareki)
+    expect(r.year).toBe(2026)
+    expect(r.month).toBe(8)
+    expect(r.drivers[0]!.fiscalLimitHours).toBe(3300)
+    expect(parseRestraintCsv(SAMPLE_CSV.replace('(2025年 4月分)', '(令和元年 5月分)')).year).toBe(2019)
+  })
+
+  it('タイトルの年が西暦・和暦のどちらでもなければ throw', () => {
+    expect(() => parseRestraintCsv('拘束時間管理表 (平成 30年 4月分)\n注記')).toThrow(/タイトルから年月を読めません/)
+  })
+
   it('年度累計 (空欄 = null / 値あり = 分)・年度拘束時間をパースする', () => {
     expect(report.drivers[0]!.fiscalCumulativeMinutes).toBeNull()
     expect(report.drivers[0]!.fiscalLimitHours).toBe(3300)
