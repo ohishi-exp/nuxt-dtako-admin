@@ -227,7 +227,7 @@ KINTAI_COMP_ID = "27324455"
 # **空 = KINTAI_COMP_ID の 1 社だけ。** 会社を足すのは、勤怠 Worker が X-Kintai-Tenant-Id を読む版で
 # 本番に出ていることを確かめてから — 読まない版だとヘッダーが無視され既定テナントの勤怠が返る。
 # staging / preview は KINTAI_COMP_ID と同じく置かない (KINTAI_COMP_ID が空なら集合も空)。
-KINTAI_COMP_IDS = ""
+KINTAI_COMP_IDS = "75700192"
 
 # kintai 系上流応答の DO SQLite キャッシュ + 条件付き再検証 (Refs #543 PR-2)。
 # "on" のときだけ有効。off = 完全に従来経路。version エンドポイント
