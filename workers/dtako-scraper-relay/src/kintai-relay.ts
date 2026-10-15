@@ -31,7 +31,8 @@
  * `DTAKO_ACCOUNTS` (KV `dtako-relay-config` の `dtako_accounts`) の
  * `comp_id → tenant_id`。**呼び出し元に名乗らせない** — `alc-internal-upload.ts` が
  * `alc-proxy` (browser JWT の tenant 逆引き) を不採用にしたのと同じで、この経路は
- * 無人で走り、comp_id は複数 tenant にまたがりうる。
+ * 無人で走り、comp_id は複数 tenant にまたがりうる。引いた tenant は [`kintaiWorkerFor`] が
+ * `X-Kintai-Tenant-Id` で勤怠 Worker に名乗る (付けるのはそこだけ)。
  *
  * ## 経路と資格情報
  *
@@ -309,37 +310,77 @@ export function tenantForCompId(accounts: unknown, compId: string): string | nul
 /** 勤怠 Worker の Service Binding 用の絶対 URL base。host は binding が無視する。 */
 export const KINTAI_WORKER_BASE = "https://ichibanboshi-kintai";
 
+/** 勤怠 Worker にどの会社 (テナント) の読み書きかを名乗るヘッダー。[`kintaiWorkerFor`] だけが付ける。 */
+export const KINTAI_TENANT_HEADER = "X-Kintai-Tenant-Id";
+
+/** 勤怠 Worker の送り先を決める材料 ([`kintaiWorkerFor`])。 */
+export interface KintaiWorkerScope {
+  /** `env.KINTAI_COMP_ID`。 */
+  kintaiCompId: string | undefined;
+  /**
+   * `env.KINTAI_COMP_IDS`。**渡した呼び手だけ**集合の会社にも開く (Supabase / alc だけを読み書きする口)。
+   * 省略は `KINTAI_COMP_ID` の 1 社だけ (社内 MariaDB・D1・打刻に依存する口)。
+   */
+  kintaiCompIds?: string | undefined;
+  /** `dtako_accounts` (parse 済み)。会社のテナントを引く ([`tenantForCompId`])。 */
+  accounts: unknown;
+}
+
 /**
- * `compId` の読みを勤怠 Worker へ回してよければ binding を、だめなら `undefined` を返す。
- * Worker のテナントは自分の `KINTAI_TENANT_ID` で固定 (`X-Tenant-ID` を読まない)。それと一致するのは
- * `KINTAI_COMP_ID` の会社の tenant だけ (D1 の拘束サマリも同じ会社のぶんしか無い) なので、他の会社は送り先が無い。
+ * `compId` の読み書きを勤怠 Worker へ回してよければ、その会社のテナントを名乗る fetcher を、だめなら
+ * `undefined` を返す (呼び手は 503)。
+ *
+ * **テナントのヘッダーはここでしか付けない。** 勤怠 Worker はヘッダーのテナントで読み書きするので、
+ * 呼び手ごとに付ける形だと付け忘れた口で `KINTAI_COMP_ID` の会社の勤怠が別の会社の閲覧者に自社として出る
+ * (`dtako-scraper-relay-do.ts` の `KINTAI_SINGLE_COMP_PATHS` の doc にある漏れと同じ型)。
+ * 値は必ず `compId` から `dtako_accounts` で引く — `init` に同名のヘッダーが来ても (ブラウザ由来の値でも)
+ * 上書きして写さない。会社のテナントが引けなければ送らない。
  */
-export function kintaiWorkerFor<T>(
-  kintai: T | undefined,
+export function kintaiWorkerFor(
+  kintai: FetcherLike | undefined,
   compId: string,
-  kintaiCompId: string | undefined,
-): T | undefined {
-  return compId && compId === (kintaiCompId ?? "").trim() ? kintai : undefined;
+  scope: KintaiWorkerScope,
+): FetcherLike | undefined {
+  if (!kintai || !judgeFoldScope({ compId, ...scope }).inScope) return undefined;
+  const tenantId = tenantForCompId(scope.accounts, compId.trim());
+  if (!tenantId) return undefined;
+  return {
+    fetch(input, init) {
+      const headers = new Headers(init?.headers);
+      headers.set(KINTAI_TENANT_HEADER, tenantId);
+      return kintai.fetch(input, { ...init, headers: Object.fromEntries(headers) });
+    },
+  };
 }
 
 /** 勤怠の読みの入口 ([`kintaiReader`]) が見る env。DO と index.ts の env の共通部分。 */
 export interface KintaiReaderEnv {
   KINTAI?: FetcherLike;
   KINTAI_COMP_ID?: string;
+  /** 勤怠の対象会社の集合 (カンマ区切り。`KINTAI_COMP_ID` は常に含む)。[`kintaiCompSet`]。 */
+  KINTAI_COMP_IDS?: string;
+}
+
+/**
+ * env から [`KintaiWorkerScope`] を組む。`comps` を立てた呼び手だけ `KINTAI_COMP_IDS` の会社に開く。
+ * 既定は `KINTAI_COMP_ID` の 1 社 (社内 MariaDB・D1・打刻を読む口)。
+ */
+export function kintaiWorkerScope(env: KintaiReaderEnv, accounts: unknown, comps = false): KintaiWorkerScope {
+  return { kintaiCompId: env.KINTAI_COMP_ID, kintaiCompIds: comps ? env.KINTAI_COMP_IDS : undefined, accounts };
 }
 
 export interface KintaiReader {
-  /** `path` は `/api/...` (クエリ込み)。`init` のヘッダーはそのまま送る。 */
+  /** `path` は `/api/...` (クエリ込み)。`init` のヘッダーはそのまま送る (テナントだけ上書き)。 */
   read(path: string, init?: RequestInit): Promise<Response>;
 }
 
 /**
- * 勤怠の読みの入口 (Refs ohishi-exp/rust-ichibanboshi#322)。`kintaiWorkerFor` が binding を返せば勤怠 Worker を
- * 読み、それ以外 (binding の無い staging・preview、別の会社) は `null` (呼び手は 503)。Worker の読みの口は
- * 認可なしなので secret は付けない。書き込み (autoload・restraint の PUT) は使わない。
+ * 勤怠の読みの入口 (Refs ohishi-exp/rust-ichibanboshi#322)。`kintaiWorkerFor` が送り先を返せば勤怠 Worker を
+ * 読み、それ以外 (binding の無い staging・preview、対象外の会社、テナントが引けない) は `null` (呼び手は 503)。
+ * Worker の読みの口は認可なしなので secret は付けない。書き込み (autoload・restraint の PUT) は使わない。
  */
-export function kintaiReader(env: KintaiReaderEnv, compId: string): KintaiReader | null {
-  const kintai = kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID);
+export function kintaiReader(env: KintaiReaderEnv, compId: string, scope: KintaiWorkerScope): KintaiReader | null {
+  const kintai = kintaiWorkerFor(env.KINTAI, compId, scope);
   return kintai ? { read: (path, init) => kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, init) } : null;
 }
 
@@ -356,15 +397,17 @@ export interface KintaiAutoloader {
 /**
  * `run_dtako_reimport` の ② 取り込み (`POST /api/dtako/autoload`) の送り先 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
- * `KINTAI_COMP_ID` の会社で `KINTAI_WRITE_TOKEN` が読めれば勤怠 Worker へ。binding が無い・別の会社・
- * token が読めないときは `null` (呼び手は 503)。token が読めないときは `onSecretError` に渡す (黙って落とさない)。
+ * 社内 CakePHP への取り込みなので `KINTAI_COMP_ID` の 1 社だけ。その会社で `KINTAI_WRITE_TOKEN` が読めれば
+ * 勤怠 Worker へ。binding が無い・別の会社・テナントが引けない・token が読めないときは `null` (呼び手は 503)。
+ * token が読めないときは `onSecretError` に渡す (黙って落とさない)。
  */
 export async function kintaiAutoloader(
   env: KintaiAutoloadEnv,
   compId: string,
+  accounts: unknown,
   onSecretError: (err: unknown) => void,
 ): Promise<KintaiAutoloader | null> {
-  const kintai = kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID);
+  const kintai = kintaiWorkerFor(env.KINTAI, compId, kintaiWorkerScope(env, accounts));
   if (!kintai) return null;
   const writeToken = await readKintaiWriteToken(env, compId, onSecretError);
   if (writeToken) return { autoload: kintaiWriteDeps(kintai, writeToken, DTAKO_AUTOLOAD_PATH).gcp };
@@ -373,7 +416,8 @@ export async function kintaiAutoloader(
 }
 
 /**
- * `compId` の勤怠 Worker の書き込み token (`KINTAI_WRITE_TOKEN`)。binding が無い・別の会社なら読まずに `""`。
+ * `compId` の勤怠 Worker の書き込み token (`KINTAI_WRITE_TOKEN`)。binding が無い・勤怠の対象会社の集合
+ * ([`kintaiCompSet`]) に居ない会社なら読まずに `""`。どの口に書けるかは token ではなく [`buildDeps`] が決める。
  * 読めずに投げたら `onSecretError` に渡して `""` (Refs ohishi-exp/rust-ichibanboshi#322)。
  */
 export async function readKintaiWriteToken(
@@ -381,7 +425,7 @@ export async function readKintaiWriteToken(
   compId: string,
   onSecretError: (err: unknown) => void,
 ): Promise<string> {
-  if (!kintaiWorkerFor(env.KINTAI, compId, env.KINTAI_COMP_ID)) return "";
+  if (!env.KINTAI || !kintaiCompSet(env.KINTAI_COMP_ID, env.KINTAI_COMP_IDS).has(compId.trim())) return "";
   try {
     return await resolveSecretBinding(env.KINTAI_WRITE_TOKEN);
   } catch (err) {
@@ -401,7 +445,7 @@ export function kintaiRelayFailStatus(err: unknown): 502 | 503 {
 /**
  * 勤怠 Worker の書き込みの口 (recalc・window・wage-snapshot・autoload) へ送る `gcp` (Refs ohishi-exp/rust-ichibanboshi#322)。
  * 書き込みの口は `X-Kintai-Write-Token` を照合するので、読みと分けて呼び手が token を読めたときだけ使う。
- * secret・テナントは付けない (Worker は見ない)。
+ * `kintai` は [`kintaiWorkerFor`] の返り値 (テナントはそちらが付ける)。secret は付けない。
  * 送ってよい口は呼び手ごとに `allowedPath` で 1 本だけ渡す (wage-snapshot 用の deps で autoload を叩けない)。
  */
 export function kintaiWriteDeps(
@@ -425,42 +469,51 @@ export function kintaiWriteDeps(
 
 /** 勤怠 Worker の書き込みの口 (POST で token を付ける口)。口ごとに別の deps にする。 */
 const KINTAI_WRITE_PATHS: readonly string[] = [RECALC_PATH, WINDOW_PATH, WAGE_SNAPSHOT_PATH];
+/**
+ * `KINTAI_COMP_ID` 以外の会社 (`KINTAI_COMP_IDS` で開いた会社) が書ける口。畳み直し (recalc) は Supabase / alc
+ * だけを読んで書く。窓 (打刻) と賃金スナップショット (D1) は `KINTAI_COMP_ID` の会社のぶんしか無い。
+ */
+const KINTAI_COMPS_WRITE_PATHS: readonly string[] = [RECALC_PATH];
 
 /**
- * [`relayKintaiWindow`] などに渡す実体を組む。読み書きとも勤怠 Worker だけへ送る
- * (Refs ohishi-exp/rust-ichibanboshi#322)。binding が無い・別の会社 → [`KintaiWorkerUnavailableError`]。
- * POST は [`KINTAI_WRITE_PATHS`] の口だけで、token が無ければ同じく落とす。
+ * [`relayKintaiWindow`] などに渡す実体を組む。読み書きとも勤怠 Worker だけへ、[`kintaiWorkerFor`] を通して
+ * 送る (テナントのヘッダーはそちらが付ける。Refs ohishi-exp/rust-ichibanboshi#322)。binding が無い・対象外の会社・
+ * テナントが引けない → [`KintaiWorkerUnavailableError`]。POST は [`KINTAI_WRITE_PATHS`] の口だけ
+ * (`KINTAI_COMP_ID` 以外の会社は [`KINTAI_COMPS_WRITE_PATHS`] だけ) で、token が無ければ同じく落とす。
  */
 export function buildDeps(opts: {
   /** 勤怠 Worker への Service Binding (`env.KINTAI`。本番にだけある)。 */
   kintai: FetcherLike | undefined;
   /** この deps で読み書きする会社。 */
   compId: string;
-  /** `env.KINTAI_COMP_ID`。 */
-  kintaiCompId: string | undefined;
+  /** 会社の判定とテナントの引き先 ([`kintaiWorkerScope`])。 */
+  scope: KintaiWorkerScope;
   /** 勤怠 Worker の書き込み token ([`readKintaiWriteToken`])。無ければ POST は落ちる。 */
   writeToken?: string;
 }): KintaiRelayDeps {
-  const kintai = kintaiWorkerFor(opts.kintai, opts.compId, opts.kintaiCompId);
+  const kintai = kintaiWorkerFor(opts.kintai, opts.compId, opts.scope);
   const writeToken = opts.writeToken;
+  const writePaths =
+    opts.compId.trim() === (opts.scope.kintaiCompId ?? "").trim() ? KINTAI_WRITE_PATHS : KINTAI_COMPS_WRITE_PATHS;
   // 書き込みは口ごとに別の deps (recalc 用の deps で window を叩けない。その逆も)
   const writes =
     kintai && writeToken
-      ? new Map(KINTAI_WRITE_PATHS.map((p) => [p, kintaiWriteDeps(kintai, writeToken, p)]))
+      ? new Map(writePaths.map((p) => [p, kintaiWriteDeps(kintai, writeToken, p)]))
       : undefined;
   const send = (path: string, init?: RequestInit): Promise<Response> => {
     const base = path.split("?")[0]!;
     if (!kintai) {
       return Promise.reject(
-        new KintaiWorkerUnavailableError(`勤怠 Worker の binding が無いか KINTAI_COMP_ID 以外の会社です: ${base}`),
+        new KintaiWorkerUnavailableError(`勤怠 Worker の binding が無いか、対象外の会社か、会社のテナントが引けません: ${base}`),
       );
     }
     if (init?.method === "POST") {
-      const write = writes?.get(base);
-      if (!write) return Promise.reject(new KintaiWorkerUnavailableError(`KINTAI_WRITE_TOKEN が読めません: ${base}`));
+      if (!writes) return Promise.reject(new KintaiWorkerUnavailableError(`KINTAI_WRITE_TOKEN が読めません: ${base}`));
+      const write = writes.get(base);
+      if (!write) return Promise.reject(new KintaiWorkerUnavailableError(`この会社では書けない口です: ${base}`));
       return write.gcp(path, init);
     }
-    // secret・テナントは付けない (Worker は見ない。読みの口は認可なし)
+    // secret は付けない (読みの口は認可なし)。テナントは kintaiWorkerFor が付ける
     return kintai.fetch(`${KINTAI_WORKER_BASE}${path}`, {
       ...init,
       headers: { ...(init?.headers as Record<string, string>), Accept: "application/json" },
@@ -605,12 +658,29 @@ export type FoldTriggerDecision =
  * (`dtako-scraper-relay-do.ts`) がこれを `fold_state` へ写す。 */
 export type FoldSkipReason = "no_upload" | "split_failed" | "out_of_scope" | "not_configured";
 
-/** fold の対象会社かどうか。判定の**引数**を `KINTAI_COMP_ID` の宣言 (env) にする。 */
+/** fold の対象会社かどうか。判定の**引数**を `KINTAI_COMP_ID` / `KINTAI_COMP_IDS` の宣言 (env) にする。 */
 export interface FoldScope {
   /** 取り込みが終わった会社。 */
   compId: string;
   /** `wrangler.toml` の `KINTAI_COMP_ID` の値をそのまま渡す (未設定なら undefined)。 */
   kintaiCompId: string | undefined;
+  /**
+   * `wrangler.toml` の `KINTAI_COMP_IDS` (カンマ区切り)。**渡した呼び手だけ**集合で判定する — Supabase / alc
+   * だけを読み書きする口 (fold・stale-months 等)。省略は `KINTAI_COMP_ID` の 1 社 (打刻・社内 MariaDB・D1 の口)。
+   */
+  kintaiCompIds?: string | undefined;
+}
+
+/**
+ * 勤怠の対象会社の集合。`KINTAI_COMP_ID` と `KINTAI_COMP_IDS` (カンマ区切り、空白・空要素は落とす) の和。
+ * **`KINTAI_COMP_ID` が空なら空集合** — `KINTAI_COMP_IDS` だけでは誰も開かない (未設定 = `not_configured`
+ * の扱いを変えない)。
+ */
+export function kintaiCompSet(kintaiCompId: string | undefined, kintaiCompIds: string | undefined): Set<string> {
+  const head = (kintaiCompId ?? "").trim();
+  if (!head) return new Set();
+  const rest = (kintaiCompIds ?? "").split(",").map((c) => c.trim()).filter((c) => c);
+  return new Set([head, ...rest]);
 }
 
 /**
@@ -628,11 +698,16 @@ export interface FoldScope {
  * **1 度も成功していない**。恒久的な `fold_state: "failed"` が常態化して、
  * **本物の fold 失敗が埋もれる。**
  *
+ * 勤怠 Worker がリクエストごとのテナント (`X-Kintai-Tenant-Id`、[`kintaiWorkerFor`] が付ける) で
+ * Supabase / alc を読み書きするようになったので、fold は `KINTAI_COMP_IDS` で開いた会社でも回せる。
+ * 打刻・社内 MariaDB・D1 は今も `KINTAI_COMP_ID` の 1 社ぶんしか無いので、そちらの口は
+ * `kintaiCompIds` を渡さずに呼ぶ (1 社の判定のまま)。
+ *
  * ## 方針を焼き込まない
  *
- * 「どの会社が勤怠の対象か」は `wrangler.toml` の `KINTAI_COMP_ID` が既に宣言して
- * いる (「打刻を持つのは大石運輸倉庫だけ」)。**値をコピーせず宣言を参照する** —
- * 将来 対象が変わったら `KINTAI_COMP_ID` 側が変わり、この判定も自動で追随する。
+ * 「どの会社が勤怠の対象か」は `wrangler.toml` の `KINTAI_COMP_ID` (打刻を持つ会社) と
+ * `KINTAI_COMP_IDS` (Supabase / alc だけで勤怠を出す会社) が宣言している。**値をコピーせず宣言を参照する** —
+ * 将来 対象が変わったら宣言側が変わり、この判定も自動で追随する。
  *
  * ## 未設定は「対象外」ではない (Refs #944)
  *
@@ -659,8 +734,8 @@ export type FoldScopeVerdict =
   | { inScope: false; reason: "not_configured" | "out_of_scope"; detail: string };
 
 export function judgeFoldScope(scope: FoldScope): FoldScopeVerdict {
-  const target = (scope.kintaiCompId ?? "").trim();
-  if (!target) {
+  const targets = kintaiCompSet(scope.kintaiCompId, scope.kintaiCompIds);
+  if (targets.size === 0) {
     return {
       inScope: false,
       reason: "not_configured",
@@ -670,13 +745,13 @@ export function judgeFoldScope(scope: FoldScope): FoldScopeVerdict {
     };
   }
   const compId = scope.compId.trim();
-  if (compId !== target) {
+  if (!targets.has(compId)) {
     return {
       inScope: false,
       reason: "out_of_scope",
       detail:
-        `comp_id ${compId} は KINTAI_COMP_ID の宣言 (${target}) と一致しません — ` +
-        "wrangler.toml [vars] が勤怠の対象会社を 1 社に絞っています (打刻を持つのがその 1 社だけのため)。",
+        `comp_id ${compId} は勤怠の対象会社の宣言 (${[...targets].join(",")}) に入っていません — ` +
+        "wrangler.toml [vars] の KINTAI_COMP_ID / KINTAI_COMP_IDS が勤怠の対象会社を絞っています。",
     };
   }
   return { inScope: true };

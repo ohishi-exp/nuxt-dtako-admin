@@ -21,36 +21,40 @@ import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
   };
 
 /**
- * 1 社ぶんの勤怠しか持たない口を `KINTAI_COMP_ID` の会社だけに通す (Refs #1133 c1133-8)。
+ * 勤怠の口を会社で絞る (Refs #1133 c1133-8)。
  *
  * 入口の viewer 認可は「閲覧者がその会社を見てよいか」しか見ないので、同じ tenant の
- * 別会社 (75700192) は認可を**通る**。その上で、取得先が会社を受け取らない口
- * (`KINTAI_SINGLE_COMP_PATHS`) と wage-report の打刻系だけを止めることを測る:
+ * 別会社 (75700192) は認可を**通る**。その上で、口を取得先で 2 つに分けて止めることを測る:
  *
- * - (a) 集合の 18 口 — 不一致・未設定・空は 403、上流 (勤怠 Worker / auth-worker / 素の fetch) と R2 を 1 回も呼ばない
- * - (b) 一致なら 403 にならず勤怠 Worker まで届く (代表 2 口)。auth-worker と素の fetch は 0 回
+ * - (a) `KINTAI_SINGLE_COMP_PATHS` (社内 MariaDB・D1・打刻と写し) — `KINTAI_COMP_ID` と不一致なら
+ *   `KINTAI_COMP_IDS` に入っていても 403。未設定・空も 403。上流と R2 を 1 回も呼ばない
+ * - (a') `KINTAI_COMPS_PATHS` (Supabase / alc だけ) — 集合 (`KINTAI_COMP_ID` + `KINTAI_COMP_IDS`) の外は 403。
+ *   `KINTAI_COMP_ID` が未設定なら `KINTAI_COMP_IDS` だけでは開かない
+ * - (b) 開いた口は勤怠 Worker まで届き、`X-Kintai-Tenant-Id` は**会社から引いたテナント** (ブラウザの値は写さない)
  * - (c) 集合外 (`/kintai/alc-upload`、勤怠を呼ばない) は不一致でも 403 にならない (陰性対照)
- * - (d) wage-report — `source=gcp` は 403、既定は 200 のまま打刻の live-build だけを止める
+ * - (d) wage-report — `source=gcp` は集合の外を 403、打刻の live-build は `KINTAI_COMP_ID` の 1 社だけ
  */
 const OWN_COMP = "27324455";
 const OTHER_COMP_SAME_TENANT = "75700192";
 const TENANT = "tenant-of-both-comps";
-const FORBIDDEN = "この会社では使えません (勤怠の記録は KINTAI_COMP_ID の1社分だけを持っています)";
+const FORBIDDEN = "この会社では使えません (勤怠の記録は対象の会社の分だけを持っています)";
 
 const ACCOUNTS = [
   { comp_id: OWN_COMP, user_name: "u1", user_pass: "p", tenant_id: TENANT },
   { comp_id: OTHER_COMP_SAME_TENANT, user_name: "u2", user_pass: "p", tenant_id: TENANT },
+];
+/** テナントの付け分けを測るための、会社ごとにテナントが違う表 (架空の値)。 */
+const OTHER_TENANT = "tenant-of-other-comp";
+const SPLIT_ACCOUNTS = [
+  { comp_id: OWN_COMP, user_name: "u1", user_pass: "p", tenant_id: TENANT },
+  { comp_id: OTHER_COMP_SAME_TENANT, user_name: "u2", user_pass: "p", tenant_id: OTHER_TENANT },
 ];
 
 /** `dispatchRestraintApi` と同じ method で叩く (判定は method を見ないが、判定を
  * 外した時にハンドラまで届いて 403 以外になることを陰性対照で確かめるため)。 */
 const SINGLE_COMP_ROUTES: Array<[method: "GET" | "POST", path: string]> = [
   ["GET", "/restraint-api/kintai/diff"],
-  ["GET", "/restraint-api/kintai/stale-months"],
-  ["GET", "/restraint-api/kintai/unko-gaps"],
-  ["GET", "/restraint-api/kintai/change-log"],
   ["POST", "/restraint-api/kintai/refresh/timecard"],
-  ["POST", "/restraint-api/kintai/refresh/fold"],
   ["POST", "/restraint-api/kintai/fetch"],
   ["GET", "/restraint-api/kintai/pdf-json"],
   ["GET", "/restraint-api/timecard-compare"],
@@ -59,11 +63,20 @@ const SINGLE_COMP_ROUTES: Array<[method: "GET" | "POST", path: string]> = [
   ["POST", "/restraint-api/kintai/refresh/mysql"],
   ["GET", "/restraint-api/kintai/day-events-lookup"],
   ["GET", "/restraint-api/kintai/day-operations"],
+  ["GET", "/restraint-api/kintai/onprem-month-operations"],
   ["GET", "/restraint-api/kintai/archive"],
   ["GET", "/restraint-api/kintai/diff-cache"],
   // 勤怠 Worker にしか送らない (Refs ohishi-exp/rust-ichibanboshi#322)
   ["POST", "/restraint-api/wage-snapshot"],
   ["GET", "/restraint-api/wage-range"],
+];
+
+/** Supabase / alc だけを読み書きする口 (`KINTAI_COMPS_PATHS`)。クエリはハンドラの検証を通る値。 */
+const COMPS_ROUTES: Array<[method: "GET" | "POST", path: string, workerPath: string]> = [
+  ["GET", "/restraint-api/kintai/stale-months?month=2026-06", "/api/kintai/stale-months"],
+  ["GET", "/restraint-api/kintai/unko-gaps?month=2026-06", "/api/kintai/unko-gaps"],
+  ["GET", "/restraint-api/kintai/change-log?driver=9001&from=2026-06-01&to=2026-06-30", "/api/kintai/change-log"],
+  ["POST", "/restraint-api/kintai/refresh/fold?month=2026-06", "/api/kintai/recalc"],
 ];
 
 /** R2 の全メソッドの呼び出しを数える (どのキーも未投入)。 */
@@ -88,6 +101,12 @@ function countingR2() {
 interface Setup {
   /** 未指定なら OWN_COMP (= 対象会社)。`undefined` を明示すると未設定。 */
   kintaiCompId?: string | undefined;
+  /** `KINTAI_COMP_IDS`。未指定なら宣言しない。 */
+  kintaiCompIds?: string;
+  /** `dtako_accounts`。未指定なら ACCOUNTS。 */
+  accounts?: unknown[];
+  /** introspect が返す閲覧者のテナント。未指定なら TENANT。 */
+  viewerTenant?: string;
 }
 
 function makeDO(opts: Setup = {}) {
@@ -98,6 +117,8 @@ function makeDO(opts: Setup = {}) {
   const fetchCalls: string[] = [];
   /** 勤怠 Worker の binding (`KINTAI`)。 */
   const ichibanCalls: string[] = [];
+  /** 勤怠 Worker へ名乗ったテナント (呼び出しごと)。 */
+  const ichibanTenants: Array<[url: string, tenant: string | undefined]> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
@@ -108,21 +129,23 @@ function makeDO(opts: Setup = {}) {
   );
   const env = {
     DTAKO_R2: r2,
-    DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
+    DTAKO_CONFIG_KV: { get: async () => JSON.stringify(opts.accounts ?? ACCOUNTS) },
     INTERNAL_SHARED_SECRET: "shared-secret",
     KINTAI_WRITE_TOKEN: "write-token",
     KINTAI: {
-      fetch: vi.fn(async (url: string) => {
+      fetch: vi.fn(async (url: string, init?: RequestInit) => {
         ichibanCalls.push(url);
+        ichibanTenants.push([url, (init?.headers as Record<string, string> | undefined)?.["x-kintai-tenant-id"]]);
         return new Response("nope", { status: 502 });
       }),
     },
     ...("kintaiCompId" in opts ? { KINTAI_COMP_ID: opts.kintaiCompId } : { KINTAI_COMP_ID: OWN_COMP }),
+    ...(opts.kintaiCompIds !== undefined ? { KINTAI_COMP_IDS: opts.kintaiCompIds } : {}),
     AUTH_WORKER: {
       fetch: vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         if (url.includes("/auth/introspect")) {
-          return Response.json({ active: true, tenant_id: TENANT, email: "viewer@example.com" });
+          return Response.json({ active: true, tenant_id: opts.viewerTenant ?? TENANT, email: "viewer@example.com" });
         }
         authWorkerUpstream.push(url);
         return Response.json({ months: [], summaries: {} });
@@ -139,11 +162,12 @@ function makeDO(opts: Setup = {}) {
     },
   };
   const relay = new DtakoScraperRelayDO(ctx as never, env as never);
-  const call = (method: string, pathAndQuery: string, compId: string) =>
+  const call = (method: string, pathAndQuery: string, compId: string, extraHeaders: Record<string, string> = {}) =>
     relay.fetch(
       new Request(`https://relay.example${pathAndQuery}`, {
         method,
         headers: {
+          ...extraHeaders,
           Authorization: "Bearer dummy-jwt",
           "X-Theearth-Comp-Id": compId,
           // base64url("viewer")
@@ -153,7 +177,7 @@ function makeDO(opts: Setup = {}) {
         ...(method === "POST" ? { body: "{}" } : {}),
       }) as never,
     );
-  return { call, r2Calls, authWorkerUpstream, ichibanCalls, fetchCalls };
+  return { call, r2Calls, authWorkerUpstream, ichibanCalls, ichibanTenants, fetchCalls };
 }
 
 afterEach(() => {
@@ -163,6 +187,7 @@ afterEach(() => {
 describe("KINTAI_SINGLE_COMP_PATHS (Refs #1133 c1133-8)", () => {
   const cases: Array<[label: string, setup: Setup, compId: string]> = [
     ["KINTAI_COMP_ID と不一致", {}, OTHER_COMP_SAME_TENANT],
+    ["KINTAI_COMP_ID と不一致 (KINTAI_COMP_IDS に入っていても)", { kintaiCompIds: OTHER_COMP_SAME_TENANT }, OTHER_COMP_SAME_TENANT],
     ["KINTAI_COMP_ID 未設定", { kintaiCompId: undefined }, OWN_COMP],
     ["KINTAI_COMP_ID が空", { kintaiCompId: "" }, OWN_COMP],
   ];
@@ -180,20 +205,12 @@ describe("KINTAI_SINGLE_COMP_PATHS (Refs #1133 c1133-8)", () => {
     });
   });
 
-  it("(b) 一致なら /kintai/unko-gaps は勤怠 Worker まで届く (auth-worker・素の fetch は 0 回)", async () => {
-    const { call, authWorkerUpstream, ichibanCalls, fetchCalls } = makeDO();
-    const res = await call("GET", "/restraint-api/kintai/unko-gaps?month=2026-06", OWN_COMP);
-    expect(res.status).not.toBe(403);
-    expect(ichibanCalls.some((u) => u.includes("/api/kintai/unko-gaps"))).toBe(true);
-    expect(authWorkerUpstream).toEqual([]);
-    expect(fetchCalls).toEqual([]);
-  });
-
-  it("(b) 一致なら /kintai/kosoku-daily は勤怠 Worker まで届く (素の fetch は 0 回)", async () => {
-    const { call, ichibanCalls, fetchCalls } = makeDO();
+  it("(b) 一致なら /kintai/kosoku-daily は勤怠 Worker まで届き、自社のテナントを名乗る (素の fetch は 0 回)", async () => {
+    const { call, ichibanCalls, ichibanTenants, fetchCalls } = makeDO({ accounts: SPLIT_ACCOUNTS });
     const res = await call("GET", "/restraint-api/kintai/kosoku-daily?month=2026-06", OWN_COMP);
     expect(res.status).not.toBe(403);
     expect(ichibanCalls.some((u) => u.includes("/api/kintai/kosoku-daily"))).toBe(true);
+    expect(ichibanTenants.every(([, t]) => t === TENANT)).toBe(true);
     expect(fetchCalls).toEqual([]);
   });
 
@@ -202,6 +219,53 @@ describe("KINTAI_SINGLE_COMP_PATHS (Refs #1133 c1133-8)", () => {
     const res = await call(method, path, OTHER_COMP_SAME_TENANT);
     expect(res.status).not.toBe(403);
     expect(((await res.json()) as { error?: string }).error).not.toBe(FORBIDDEN);
+  });
+});
+
+describe("KINTAI_COMPS_PATHS — 勤怠の対象会社の集合に開く口", () => {
+  const cases: Array<[label: string, setup: Setup, compId: string]> = [
+    ["集合の外 (KINTAI_COMP_IDS 未宣言)", {}, OTHER_COMP_SAME_TENANT],
+    ["集合の外 (KINTAI_COMP_IDS が空)", { kintaiCompIds: "" }, OTHER_COMP_SAME_TENANT],
+    ["集合の外 (KINTAI_COMP_IDS に別の会社)", { kintaiCompIds: "11112222" }, OTHER_COMP_SAME_TENANT],
+    ["KINTAI_COMP_ID 未設定 (KINTAI_COMP_IDS だけでは開かない)", { kintaiCompId: undefined, kintaiCompIds: OWN_COMP }, OWN_COMP],
+    ["KINTAI_COMP_ID が空", { kintaiCompId: "" }, OWN_COMP],
+  ];
+  describe.each(cases)("★ (a') %s", (_label, setup, compId) => {
+    it.each(COMPS_ROUTES)("%s %s は 403、上流と R2 を 1 回も呼ばない", async (method, path) => {
+      const { call, r2Calls, authWorkerUpstream, ichibanCalls, fetchCalls } = makeDO(setup);
+      const res = await call(method, path, compId);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: FORBIDDEN });
+      expect(authWorkerUpstream).toEqual([]);
+      expect(ichibanCalls).toEqual([]);
+      expect(fetchCalls).toEqual([]);
+      expect(r2Calls).toEqual([]);
+    });
+  });
+
+  it.each(COMPS_ROUTES)(
+    "★ (b) KINTAI_COMP_IDS の会社なら %s %s は勤怠 Worker まで届き、その会社のテナントを名乗る (ブラウザの値は写さない)",
+    async (method, path, workerPath) => {
+      const { call, ichibanTenants, authWorkerUpstream, fetchCalls } = makeDO({
+        accounts: SPLIT_ACCOUNTS,
+        viewerTenant: OTHER_TENANT,
+        kintaiCompIds: ` ${OTHER_COMP_SAME_TENANT} ,`,
+      });
+      const res = await call(method, path, OTHER_COMP_SAME_TENANT, { "X-Kintai-Tenant-Id": TENANT });
+      expect(res.status).not.toBe(403);
+      expect(ichibanTenants.some(([u]) => u.includes(workerPath))).toBe(true);
+      expect(ichibanTenants.map(([, t]) => t)).toEqual(ichibanTenants.map(() => OTHER_TENANT));
+      expect(authWorkerUpstream).toEqual([]);
+      expect(fetchCalls).toEqual([]);
+    },
+  );
+
+  it.each(COMPS_ROUTES)("(b) KINTAI_COMP_ID の会社でも %s %s は自社のテナントを名乗る", async (method, path, workerPath) => {
+    const { call, ichibanTenants } = makeDO({ accounts: SPLIT_ACCOUNTS, kintaiCompIds: OTHER_COMP_SAME_TENANT });
+    const res = await call(method, path, OWN_COMP);
+    expect(res.status).not.toBe(403);
+    expect(ichibanTenants.some(([u]) => u.includes(workerPath))).toBe(true);
+    expect(ichibanTenants.every(([, t]) => t === TENANT)).toBe(true);
   });
 });
 
@@ -244,8 +308,22 @@ describe("GET /restraint-api/wage-report の打刻系 (Refs #1133 c1133-8)", () 
     expect(body.warnings).toContain(NOT_CONFIGURED_WARNING);
   });
 
-  it("未設定 + source=gcp も 403", async () => {
-    const { call } = makeDO({ kintaiCompId: undefined });
+  it("★ 不一致でも KINTAI_COMP_IDS の会社なら source=gcp は通り、その会社のテナントで day_summaries を読む。打刻の live-build は呼ばない", async () => {
+    const { call, ichibanCalls, ichibanTenants } = makeDO({
+      accounts: SPLIT_ACCOUNTS,
+      viewerTenant: OTHER_TENANT,
+      kintaiCompIds: OTHER_COMP_SAME_TENANT,
+    });
+    const res = await call("GET", "/restraint-api/wage-report?month=2026-06&source=gcp", OTHER_COMP_SAME_TENANT);
+    expect(res.status).not.toBe(403);
+    expect(liveBuildCalls(ichibanCalls)).toEqual([]);
+    const daySummaries = ichibanTenants.filter(([u]) => u.includes("/api/kintai/day-summaries"));
+    expect(daySummaries.length).toBeGreaterThan(0);
+    expect(daySummaries.every(([, t]) => t === OTHER_TENANT)).toBe(true);
+  });
+
+  it("未設定 + source=gcp も 403 (KINTAI_COMP_IDS だけでは開かない)", async () => {
+    const { call } = makeDO({ kintaiCompId: undefined, kintaiCompIds: OWN_COMP });
     const res = await call("GET", "/restraint-api/wage-report?month=2026-06&source=gcp", OWN_COMP);
     expect(res.status).toBe(403);
   });

@@ -36,7 +36,13 @@ import { relayKintaiStaleMonths, type KintaiReader, type KintaiRelayDeps } from 
 const COMP = "27324455";
 const TENANT = "tenant-of-comp";
 const YM = "2026-06";
-const ACCOUNTS = [{ comp_id: COMP, user_name: "u1", user_pass: "p", tenant_id: TENANT }];
+/** `KINTAI_COMP_IDS` で開く会社 (打刻を持たない会社)。テナントは架空の値。 */
+const OTHER_COMP = "75700192";
+const OTHER_TENANT = "tenant-of-other-comp";
+const ACCOUNTS = [
+  { comp_id: COMP, user_name: "u1", user_pass: "p", tenant_id: TENANT },
+  { comp_id: OTHER_COMP, user_name: "u2", user_pass: "p", tenant_id: OTHER_TENANT },
+];
 
 /** 読み先 (Worker) が path ごとに返す応答。 */
 function reply(url: string): Response {
@@ -72,6 +78,8 @@ interface Setup {
   writeToken?: boolean;
   /** INTERNAL_SHARED_SECRET・AUTH_WORKER (introspect 以外) を置くか (既定 true)。 */
   gcpProxy?: boolean;
+  /** `KINTAI_COMP_IDS` (既定は宣言しない)。 */
+  kintaiCompIds?: string;
 }
 
 function makeDO(opts: Setup = {}) {
@@ -108,6 +116,7 @@ function makeDO(opts: Setup = {}) {
     DTAKO_CONFIG_KV: { get: async () => JSON.stringify(ACCOUNTS) },
     INTERNAL_SHARED_SECRET: opts.gcpProxy === false ? "" : "shared-secret",
     KINTAI_COMP_ID: COMP,
+    ...(opts.kintaiCompIds !== undefined ? { KINTAI_COMP_IDS: opts.kintaiCompIds } : {}),
     ...(opts.writeToken === false ? {} : { KINTAI_WRITE_TOKEN: "write-token" }),
     UPSTREAM_CACHE: "on",
     RELAY: { idFromName: () => "id", get: () => cacheStub },
@@ -450,9 +459,15 @@ describe("recalc・window・stale-months は勤怠 Worker だけ (Refs ohishi-ex
 describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
   type Priv = {
     runFoldMonths(account: unknown, jobKey: string, months: string[]): Promise<string | null>;
+    foldAfterIngest(
+      account: unknown,
+      range: { startDate: string; endDate: string },
+      jobKey: string,
+      uploadOutcome: { splitFailed: number | null } | null,
+    ): Promise<string | null>;
     recordFold(jobKey: string, patch: Record<string, unknown>): Promise<void>;
   };
-  function fold(setup: Setup, sharedSecret = true) {
+  function fold(setup: Setup, sharedSecret = true, account: unknown = { comp_id: COMP, tenant_id: TENANT }) {
     const made = makeDO(setup);
     const priv = made.relay as unknown as Priv;
     if (!sharedSecret) (made.relay as unknown as { env: Record<string, unknown> }).env.INTERNAL_SHARED_SECRET = "";
@@ -460,9 +475,43 @@ describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-
     vi.spyOn(priv, "recordFold").mockImplementation(async (_k, patch) => {
       states.push(patch);
     });
-    const run = () => priv.runFoldMonths({ comp_id: COMP, tenant_id: TENANT }, "job", [YM]);
-    return { run, states, made };
+    const run = () => priv.runFoldMonths(account, "job", [YM]);
+    const afterIngest = () =>
+      priv.foldAfterIngest(account, { startDate: `${YM}-10`, endDate: `${YM}-10` }, "job", { splitFailed: 0 });
+    return { run, afterIngest, states, made };
   }
+
+  /** 勤怠 Worker へ送った recalc の method とテナント。 */
+  const recalcTenants = (kintai: Call[]) =>
+    kintai
+      .filter((c) => new URL(c.url).pathname === "/api/kintai/recalc")
+      .map((c) => [c.method, c.headers["x-kintai-tenant-id"]]);
+
+  it("★ 取り込み後の fold: KINTAI_COMP_IDS の会社は回り、recalc はその会社のテナントで書く", async () => {
+    const { afterIngest, states, made } = fold({ kintaiCompIds: OTHER_COMP }, true, { comp_id: OTHER_COMP, tenant_id: OTHER_TENANT });
+    await afterIngest();
+    expect(states[0]!.fold_state).toBe("running");
+    const sent = recalcTenants(made.kintai);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every(([method, tenant]) => method === "POST" && tenant === OTHER_TENANT)).toBe(true);
+  });
+
+  it("★ 取り込み後の fold: KINTAI_COMP_IDS に無い会社は skipped_out_of_scope で、勤怠 Worker を呼ばない (陰性対照)", async () => {
+    const { afterIngest, states, made } = fold({}, true, { comp_id: OTHER_COMP, tenant_id: OTHER_TENANT });
+    expect(await afterIngest()).toBeNull();
+    expect(states).toEqual([
+      expect.objectContaining({ fold_state: "skipped_out_of_scope", fold_skip_reason: expect.stringContaining(OTHER_COMP) }),
+    ]);
+    expect(made.kintai).toEqual([]);
+  });
+
+  it("KINTAI_COMP_ID の会社の fold は自社のテナントで書く", async () => {
+    const { afterIngest, made } = fold({ kintaiCompIds: OTHER_COMP });
+    await afterIngest();
+    const sent = recalcTenants(made.kintai);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every(([, tenant]) => tenant === TENANT)).toBe(true);
+  });
 
   it("本番の設定: recalc の apply は token 付きで勤怠 Worker へ、auth-worker は 0 回", async () => {
     const { run, made } = fold({});

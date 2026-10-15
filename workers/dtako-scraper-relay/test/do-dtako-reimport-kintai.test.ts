@@ -139,7 +139,11 @@ describe("POST /cron/dtako/reimport の ② の送り先 (Refs ohishi-exp/rust-i
     expect(globalFetchCalls).toEqual([]);
     expect(kintaiCalls).toHaveLength(1);
     expect(kintaiCalls[0]!.url).toBe(AUTOLOAD_URL);
-    expect(kintaiCalls[0]!.headers).toEqual({ "content-type": "application/zip", "X-Kintai-Write-Token": WRITE_TOKEN });
+    expect(kintaiCalls[0]!.headers).toEqual({
+      "content-type": "application/zip",
+      "x-kintai-write-token": WRITE_TOKEN,
+      "x-kintai-tenant-id": "tenant-a",
+    });
     expect(kintaiCalls[0]!.body).toBeInstanceOf(ArrayBuffer);
   });
 
@@ -150,7 +154,7 @@ describe("POST /cron/dtako/reimport の ② の送り先 (Refs ohishi-exp/rust-i
     expect(res.status).toBe(200);
     expect(globalFetchCalls).toEqual([]);
     expect(kintaiCalls.map((c) => c.url)).toEqual([AUTOLOAD_URL, AUTOLOAD_URL.replace(UNKO_NO, second.unko_no)]);
-    expect(kintaiCalls.every((c) => c.headers["X-Kintai-Write-Token"] === WRITE_TOKEN)).toBe(true);
+    expect(kintaiCalls.every((c) => c.headers["x-kintai-write-token"] === WRITE_TOKEN)).toBe(true);
   });
 
   it("★ (b) 別の会社は 403 で、zip も取らず autoload を 0 回呼ぶ (バッチも同じ)", async () => {

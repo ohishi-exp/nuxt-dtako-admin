@@ -37,7 +37,22 @@ describe("get_kintai_day_summaries (ohishi-exp/rust-ichibanboshi#205 の 23)", (
 
   it("**書き込みの引数を持たない** — apply 相当が無い", () => {
     const keys = Object.keys(getKintaiDaySummariesTool.inputSchema.shape);
-    expect(keys.sort()).toEqual(["driver", "month"]);
+    expect(keys.sort()).toEqual(["comp_id", "driver", "month"]);
+  });
+
+  it("comp_id を渡すとクエリに載せ、省略すると載せない (既定の会社は relay が決める)", async () => {
+    const e = env();
+    await getKintaiDaySummariesTool.execute(e, { month: "2026-06", comp_id: "75700192" });
+    expect(relayFetch(e).mock.calls[0]![0]).toBe(
+      "https://relay.internal/kintai-relay/day-summaries?month=2026-06&comp_id=75700192",
+    );
+    const e2 = env();
+    await getKintaiDaySummariesTool.execute(e2, { month: "2026-06" });
+    expect(relayFetch(e2).mock.calls[0]![0]).toBe("https://relay.internal/kintai-relay/day-summaries?month=2026-06");
+  });
+
+  it.each(["7570019", "757001920", "abcdefgh"])("comp_id は 8 桁の数字だけ受ける (%s は拒否)", (compId) => {
+    expect(getKintaiDaySummariesTool.inputSchema.safeParse({ month: "2026-06", comp_id: compId }).success).toBe(false);
   });
 
   it("month が YYYY-MM でなければ relay を叩かない", async () => {

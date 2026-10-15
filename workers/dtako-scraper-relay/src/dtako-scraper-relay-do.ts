@@ -159,11 +159,13 @@ import {
   type FoldTriggerDecision,
   type KintaiAutoloader,
   type KintaiReader,
+  type KintaiWorkerScope,
   type KintaiRelayDeps,
   type KyuyoAuthorizer,
   KINTAI_WORKER_BASE,
   kintaiAutoloader,
   kintaiReader,
+  kintaiWorkerScope,
   kintaiRelayFailStatus,
   readKintaiWriteToken,
 } from "./kintai-relay";
@@ -762,33 +764,36 @@ async function parseCronCompMonthBody(
 }
 
 /**
- * **1 社ぶんの勤怠しか持たない口** (Refs #1133 c1133-8)。`dispatchRestraintApi` が
- * record 確定直後に `judgeFoldScope` へ訊き、`KINTAI_COMP_ID` の会社でなければ
- * (未設定・空・不一致とも) 403 にする。method は問わない。
+ * **勤怠の口の会社の絞り方** (Refs #1133 c1133-8)。`dispatchRestraintApi` が record 確定直後に
+ * `judgeFoldScope` へ訊き、対象の会社でなければ (未設定・空・不一致とも) 403 にする。method は問わない。
  *
- * 入口の viewer 認可 (`authorizeRestraintViewer`) は「閲覧者がその会社を見てよいか」
- * しか見ない。ところが下の口の取得先は**会社を受け取らない**ので、別の会社の
- * 正規の閲覧者に `KINTAI_COMP_ID` の会社の記録 (運行NO・分数・打刻) が自社として出る:
+ * 入口の viewer 認可 (`authorizeRestraintViewer`) は「閲覧者がその会社を見てよいか」しか見ない。
+ * 取得先が会社を受け取らない口を開けると、別の会社の正規の閲覧者に `KINTAI_COMP_ID` の会社の記録
+ * (運行NO・分数・打刻) が自社として出る。口は取得先で 2 つに分かれる:
  *
- * - GCP の読み書き — ichibanboshi の読み口は tenant を起動時設定 (`KINTAI_COMP_ID`
- *   に対応する 1 社) に固定し `X-Tenant-ID` を読まない
- * - 勤怠 Worker の打刻・デジタコの読み書き — 会社を渡さず、`KINTAI_COMP_ID` の会社の乗務員しか持たない
- * - 上の口の写し (R2、`record.compId` 鍵) — 中身は上の 2 つから来ている
- *
- * wage-snapshot / wage-range も勤怠 Worker にしか送らないので入れる (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * - [`KINTAI_COMPS_PATHS`] — **Supabase / alc だけ**を読み書きする口。勤怠 Worker はリクエストの
+ *   テナント (`X-Kintai-Tenant-Id`、`kintai-relay.ts` の `kintaiWorkerFor` が会社から引いて付ける) で
+ *   読み書きするので、`KINTAI_COMP_IDS` の集合の会社に開く
+ * - [`KINTAI_SINGLE_COMP_PATHS`] — **社内 MariaDB・D1・打刻**に依存する口と、その写し。中身は
+ *   `KINTAI_COMP_ID` の会社のぶんしか無い (勤怠 Worker も既定以外のテナントでは 403 にするが、
+ *   この判定はそれと独立に効く)
  *
  * **入れないもの**: `/kintai/alc-upload` (勤怠を呼ばない。`record.compId` の theearth アカウントで
  * 絞れる)・wage-report (既定ソースの theearth 側は会社ごとに絞れているので止めず、
- * `handleWageReport` が打刻の live-build と `source=gcp` だけを止める)・マスタ系。
+ * `handleWageReport` が打刻の live-build を 1 社、`source=gcp` を集合で判定する)・マスタ系。
  */
-const KINTAI_SINGLE_COMP_PATHS = new Set([
-  // GCP (tenant 固定)
-  "/restraint-api/kintai/diff",
+const KINTAI_COMPS_PATHS = new Set([
   "/restraint-api/kintai/stale-months",
   "/restraint-api/kintai/unko-gaps",
   "/restraint-api/kintai/change-log",
-  "/restraint-api/kintai/refresh/timecard",
   "/restraint-api/kintai/refresh/fold",
+]);
+
+/** `KINTAI_COMP_ID` の 1 社だけに開く口 ([`KINTAI_COMPS_PATHS`] の doc)。 */
+const KINTAI_SINGLE_COMP_PATHS = new Set([
+  // オンプレ kosoku-daily との比較・打刻の運び直し・D1 (賃金スナップショット)
+  "/restraint-api/kintai/diff",
+  "/restraint-api/kintai/refresh/timecard",
   "/restraint-api/wage-snapshot",
   "/restraint-api/wage-range",
   // 打刻・デジタコ (旧オンプレ版の口)
@@ -806,10 +811,10 @@ const KINTAI_SINGLE_COMP_PATHS = new Set([
   "/restraint-api/kintai/diff-cache",
 ]);
 
-/** `KINTAI_SINGLE_COMP_PATHS` と wage-report の打刻系を止めた時の文言。
+/** `KINTAI_SINGLE_COMP_PATHS`・`KINTAI_COMPS_PATHS` と wage-report の打刻系を止めた時の文言。
  * `judgeFoldScope` の `detail` (KINTAI_COMP_ID の値・fold 向けの文言入り) は閲覧者へ返さない。 */
 const KINTAI_SINGLE_COMP_FORBIDDEN =
-  "この会社では使えません (勤怠の記録は KINTAI_COMP_ID の1社分だけを持っています)";
+  "この会社では使えません (勤怠の記録は対象の会社の分だけを持っています)";
 
 /**
  * 中継ハンドラの失敗を HTTP ステータスへ writeback するための型 (Refs #492 PR-A)。
@@ -1045,6 +1050,10 @@ export interface RelayEnv {
    * 使う (`kintai-relay.ts` の `judgeFoldScope`)。未設定は「対象外」ではなく
    * `not_configured` (設定の穴) として記録する (Refs #944)。 */
   KINTAI_COMP_ID?: string;
+  /** 勤怠の対象会社の集合 (カンマ区切り。`KINTAI_COMP_ID` は常に含む扱い)。Supabase / alc だけを読み書きする口
+   * (`KINTAI_COMPS_PATHS`・fold・wage-report の `source=gcp`) だけがこの集合で開く (`kintai-relay.ts` の
+   * `kintaiCompSet`)。本番は空 (= `KINTAI_COMP_ID` の 1 社)、staging / preview は宣言しない。 */
+  KINTAI_COMP_IDS?: string;
   /** 拘束時間管理表 CSV / サマリ JSON の R2 key prefix (`restraint` /
    * `restraint-staging` / `restraint-preview`)。key 設計とバージョン管理
    * (latest + 内容が変わった時だけ `v-{ts}` 追加、SHA-256 変化検知) は
@@ -2048,12 +2057,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     uploadOutcome: AlcUploadOutcome | null,
   ): Promise<string | null> {
     try {
-      // **`KINTAI_COMP_ID` の宣言をそのまま判定に使う** (値をコピーしない、
+      // **`KINTAI_COMP_ID` / `KINTAI_COMP_IDS` の宣言をそのまま判定に使う** (値をコピーしない、
       // Refs #633-22)。対象外の会社で fold を回すと畳み先が 403 を返し、恒久的な
       // `fold_state: "failed"` になって本物の失敗が埋もれる (`judgeFoldScope` の doc)。
       const decision = decideFoldTrigger(uploadOutcome, {
         compId: account.comp_id,
         kintaiCompId: this.env.KINTAI_COMP_ID,
+        // fold は Supabase / alc だけを読み書きするので集合の会社でも回す
+        kintaiCompIds: this.env.KINTAI_COMP_IDS,
       });
       if (!decision.run) {
         // **理由を必ず添える** (Refs #944)。`skipped_out_of_scope` は「対象外だから
@@ -2146,17 +2157,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     });
     try {
       // recalc は勤怠 Worker にしか送らない (`buildDeps`)。書き込みの token はここで 1 回だけ読む
-      if (!kintaiReader(this.env, account.comp_id)) {
+      const scope = await this.kintaiScopeFor(true);
+      if (!kintaiReader(this.env, account.comp_id, scope)) {
         await this.recordFold(jobKey, { fold_state: "not_configured", fold_error: KINTAI_WORKER_UNAVAILABLE });
         return ALERT_REASON_FOLD_NOT_CONFIGURED;
       }
       const writeToken = await this.kintaiWriteTokenFor(account.comp_id, "kintai_fold");
-      const deps = buildDeps({
-        kintai: this.env.KINTAI,
-        compId: account.comp_id,
-        kintaiCompId: this.env.KINTAI_COMP_ID,
-        writeToken,
-      });
+      const deps = buildDeps({ kintai: this.env.KINTAI, compId: account.comp_id, scope, writeToken });
 
       let totalPages = 0;
       let totalDriversWritten = 0;
@@ -4706,9 +4713,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!record) {
       return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
     }
+    // 集合の口だけ KINTAI_COMP_IDS を渡す (渡さなければ KINTAI_COMP_ID の 1 社の判定)
+    const kintaiComps = KINTAI_COMPS_PATHS.has(url.pathname);
     if (
-      KINTAI_SINGLE_COMP_PATHS.has(url.pathname) &&
-      !judgeFoldScope({ compId: record.compId, kintaiCompId: this.env.KINTAI_COMP_ID }).inScope
+      (kintaiComps || KINTAI_SINGLE_COMP_PATHS.has(url.pathname)) &&
+      !judgeFoldScope({
+        compId: record.compId,
+        kintaiCompId: this.env.KINTAI_COMP_ID,
+        kintaiCompIds: kintaiComps ? this.env.KINTAI_COMP_IDS : undefined,
+      }).inScope
     ) {
       return dvrJsonError(403, KINTAI_SINGLE_COMP_FORBIDDEN);
     }
@@ -4839,10 +4852,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/unko-gaps" && request.method === "GET") {
       return this.handleKintaiUnkoGaps(record!, url);
     }
-    // 打刻の変更記録 (訴訟準備「変更記録」タブ、Refs #1133 c1133-6)。ichibanboshi の
-    // 読み口が単一tenant固定 (X-Tenant-IDを読まない) なので、buildKintaiRelayContext の
-    // tenant判定だけでは足りず、record.compId をKINTAI_COMP_IDと直接突き合わせる
-    // (上の KINTAI_SINGLE_COMP_PATHS の判定)。
+    // 打刻の変更記録 (訴訟準備「変更記録」タブ、Refs #1133 c1133-6)。会社の判定は上の
+    // KINTAI_COMPS_PATHS、テナントは buildKintaiRelayContext (kintaiWorkerFor) が付ける。
     if (url.pathname === "/restraint-api/kintai/change-log" && request.method === "GET") {
       return this.handleKintaiChangeLog(record!, url);
     }
@@ -6276,7 +6287,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { year, month, ym } = parsed;
 
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) {
       return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
     }
@@ -7456,7 +7467,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const cache = await this.remoteUpstreamCache(record.viewerEmail);
 
     // secret の解決失敗も未設定と同じ 503 (`/kintai/fetch` と同じ扱い)
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) {
       return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
     }
@@ -7549,8 +7560,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** `compId` の ② 取り込みの送り先 (`kintai-relay.ts` の `kintaiAutoloader`)。log の作法は `kintaiWriteTokenFor` と同じ。 */
-  private kintaiAutoloaderFor(compId: string, tag: string): Promise<KintaiAutoloader | null> {
-    return kintaiAutoloader(this.env, compId, (err) =>
+  private async kintaiAutoloaderFor(compId: string, tag: string): Promise<KintaiAutoloader | null> {
+    return kintaiAutoloader(this.env, compId, await this.dtakoAccountsParsed(), (err) =>
       console.error(JSON.stringify({ [tag]: "secret-error", error: describeUnknownError(err) })),
     );
   }
@@ -7572,15 +7583,31 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async buildKintaiRelayContext(
     compId: string,
     tag: string,
+    comps = false,
   ): Promise<
     | { deps: KintaiRelayDeps; reader: KintaiReader; writeToken: string }
     | Response
   > {
-    const reader = kintaiReader(this.env, compId);
+    const scope = await this.kintaiScopeFor(comps);
+    const reader = kintaiReader(this.env, compId, scope);
     if (!reader) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
     const writeToken = await this.kintaiWriteTokenFor(compId, tag);
-    const deps = buildDeps({ kintai: this.env.KINTAI, compId, kintaiCompId: this.env.KINTAI_COMP_ID, writeToken });
+    const deps = buildDeps({ kintai: this.env.KINTAI, compId, scope, writeToken });
     return { deps, reader, writeToken };
+  }
+
+  /**
+   * 勤怠 Worker の送り先の材料 (`kintai-relay.ts` の `kintaiWorkerScope`)。会社のテナントは `dtako_accounts`
+   * から引く。`comps` を立てるのは Supabase / alc だけを読み書きする口 (`KINTAI_COMPS_PATHS`・fold・
+   * wage-report の `source=gcp`) だけ。既定は `KINTAI_COMP_ID` の 1 社。
+   */
+  private async kintaiScopeFor(comps = false): Promise<KintaiWorkerScope> {
+    return kintaiWorkerScope(this.env, await this.dtakoAccountsParsed(), comps);
+  }
+
+  /** `compId` の勤怠の読み先 (`kintai-relay.ts` の `kintaiReader`)。`KINTAI_COMP_ID` の 1 社だけ。 */
+  private async kintaiReaderFor(compId: string): Promise<KintaiReader | null> {
+    return kintaiReader(this.env, compId, await this.kintaiScopeFor());
   }
 
   /**
@@ -7734,7 +7761,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 責務 — ここで丸めない (#620 の教訓: 「無い」と「引けていない」を混同しない)。
    */
   private async handleKintaiStaleMonths(record: TheearthSessionRecord, url: URL): Promise<Response> {
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_stale_months");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_stale_months", true);
     if (ctx instanceof Response) return ctx;
 
     const from = url.searchParams.get("from") || undefined;
@@ -7768,7 +7795,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     const driverCd = url.searchParams.get("driver_cd") || undefined;
 
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_unko_gaps");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_unko_gaps", true);
     if (ctx instanceof Response) return ctx;
 
     try {
@@ -7785,10 +7812,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * GET /restraint-api/kintai/change-log?driver=&from=&to= — 打刻の変更記録
    * (「取り込んだ時点の値を基準に、あとで変わった記録」、Refs #1133 c1133-6)。
    *
-   * ★★ **ichibanboshi のこの読み口は tenant を設定 (`KINTAI_COMP_ID` に対応する
-   * 1 社) に固定していて `X-Tenant-ID` を読まない** (`read_tenant_of`)。
-   * `record.compId` と `KINTAI_COMP_ID` の突き合わせは **dispatch の集合
-   * (`KINTAI_SINGLE_COMP_PATHS`) で判定**済み — ここに来るのは対象の会社だけ。
+   * 勤怠 Worker はリクエストのテナント (`X-Kintai-Tenant-Id`) で読む。`record.compId` が対象の会社か
+   * は **dispatch の集合 (`KINTAI_COMPS_PATHS`) で判定**済み、テナントは `buildKintaiRelayContext`
+   * (`kintai-relay.ts` の `kintaiWorkerFor`) が会社から引いて付ける。
    */
   private async handleKintaiChangeLog(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const driver = url.searchParams.get("driver") || "";
@@ -7801,7 +7827,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const inputError = kintaiChangeLogInputError({ driver, from, to });
     if (inputError) return dvrJsonError(400, inputError);
 
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_change_log");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_change_log", true);
     if (ctx instanceof Response) return ctx;
 
     try {
@@ -7868,7 +7894,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 当たる実測がある (#615-3 決定3)。
    */
   private async handleKintaiRefreshFold(record: TheearthSessionRecord, url: URL): Promise<Response> {
-    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_fold");
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_fold", true);
     if (ctx instanceof Response) return ctx;
 
     const parsed = this.parseMonthParam(url);
@@ -7995,7 +8021,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     let guarantee: ReturnType<typeof pickRestDiffGuarantee> | null = null;
     let guaranteeError: string | null = null;
     if (driverCd && month) {
-      const reader = kintaiReader(this.env, record.compId);
+      const reader = await this.kintaiReaderFor(record.compId);
       if (!reader) {
         guaranteeError = `${KINTAI_WORKER_UNAVAILABLE}。判定できませんでした`;
       } else {
@@ -8082,7 +8108,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (UNKO_NO_22_RE と同じ正規表現、`kintai-diff.ts` 参照)。
     const date = deriveOpeNoFromUnkoNo(opeNo)!.startOpe.slice(0, 10).replace(/\//g, "-");
 
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
 
     try {
@@ -8124,7 +8150,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       return dvrJsonError(400, `month は YYYY-MM で指定してください: "${month}"`);
     }
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
     try {
       const q = new URLSearchParams({ month, driver: driverCd });
@@ -8172,7 +8198,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(400, `date は YYYY-MM-DD で指定してください: "${date}"`);
     }
 
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
 
     try {
@@ -8289,7 +8315,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     try {
       const driver = this.parseDriverParam(url);
-      const reader = kintaiReader(this.env, record.compId);
+      const reader = await this.kintaiReaderFor(record.compId);
       if (!reader) throw new RelayConfigError(KINTAI_WORKER_UNAVAILABLE);
       const body = await this.fetchNginxPdfJson(reader, parsed.ym, driver);
       return Response.json(body);
@@ -8324,7 +8350,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     const onlyAnomalies = url.searchParams.get("only_anomalies") === "1";
 
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
 
     try {
@@ -8789,7 +8815,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // フラグ off / email 不明。「壊れている」ではないので 200 で伝える
       return Response.json({ month: ym, enabled: false, daily: "off", kosoku: "off", ms: 0 });
     }
-    const reader = kintaiReader(this.env, record.compId);
+    const reader = await this.kintaiReaderFor(record.compId);
     if (!reader) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
     const startedAt = Date.now();
     const dailyTracker = new CacheStateTracker();
@@ -9018,7 +9044,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
      * 画面が正常として出す (本番で 97 名ぶん発生、#980)。 */
     kosokuCurrent: KosokuShiftsState | null;
   } | null> {
-    const reader = kintaiReader(this.env, compId);
+    const reader = await this.kintaiReaderFor(compId);
     if (!reader) {
       console.error(JSON.stringify({ wage_report_kintai: "live-not-configured", comp_id: compId, ym }));
       return null;
@@ -9859,7 +9885,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     | { byMonth: Map<string, Map<string, Map<string, GcpDayPart>>>; shiftOverlaps: Map<string, GcpShiftOverlap[]> }
     | Response
   > {
-    const ctx = await this.buildKintaiRelayContext(compId, "wage_report_gcp");
+    const ctx = await this.buildKintaiRelayContext(compId, "wage_report_gcp", true);
     if (ctx instanceof Response) return ctx;
     type Loaded<T> = { label: string; month: string } & ({ value: T } | { error: string });
     const tryLoad = async <T>(label: string, month: string, load: () => Promise<T>): Promise<Loaded<T>> => {
@@ -9957,8 +9983,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return dvrJsonError(400, "JSON body が必要です");
     }
-    // 勤怠 Worker へ書く (Refs ohishi-exp/rust-ichibanboshi#322)。Worker の書き先テナントは自分の
-    // KINTAI_TENANT_ID 固定で、KINTAI_COMP_ID の会社の tenant と一致する前提 (入口で 1 社に絞っている)
+    // 勤怠 Worker へ書く (Refs ohishi-exp/rust-ichibanboshi#322)。D1 は KINTAI_COMP_ID の会社のぶんしか
+    // 無いので入口 (KINTAI_SINGLE_COMP_PATHS) で 1 社に絞り、テナントは kintaiWorkerFor が付ける
     try {
       return Response.json(await relayWageSnapshotPut(ctx.deps, record.compId, body));
     } catch (err) {
@@ -10028,12 +10054,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { year, month, ym } = parsed;
     const restraintSource = url.searchParams.get("source") === "gcp" ? "gcp" : "current";
-    // 打刻 (オンプレ) と GCP の day_summaries は KINTAI_COMP_ID の 1 社ぶんしか無い
-    // (KINTAI_SINGLE_COMP_PATHS の docs)。wage-report 自体は theearth 側が会社ごとに
-    // 絞れているので止めず、`source=gcp` は 403 (他社の分数で計算した値を出さない)、
-    // 既定ソースは打刻の live-build だけを止める
+    // 打刻 (オンプレ) は KINTAI_COMP_ID の 1 社ぶんしか無く、GCP の day_summaries は
+    // KINTAI_COMP_IDS の集合の会社ぶんある (KINTAI_COMPS_PATHS の docs)。wage-report 自体は
+    // theearth 側が会社ごとに絞れているので止めず、`source=gcp` は集合の外を 403 (他社の分数で
+    // 計算した値を出さない)、打刻の live-build は KINTAI_COMP_ID の 1 社の外で止める
     const kintaiScope = judgeFoldScope({ compId: record.compId, kintaiCompId: this.env.KINTAI_COMP_ID });
-    if (restraintSource === "gcp" && !kintaiScope.inScope) {
+    const gcpScope = judgeFoldScope({
+      compId: record.compId,
+      kintaiCompId: this.env.KINTAI_COMP_ID,
+      kintaiCompIds: this.env.KINTAI_COMP_IDS,
+    });
+    if (restraintSource === "gcp" && !gcpScope.inScope) {
       return dvrJsonError(403, KINTAI_SINGLE_COMP_FORBIDDEN);
     }
     // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ

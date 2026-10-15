@@ -1892,6 +1892,21 @@ export const runDtakoAlcUploadDriverTool = {
 
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
+/**
+ * 勤怠 (GCP) を読む・畳む会社 (`run_kintai_recalc`・`get_kintai_day_summaries`)。relay は
+ * `KINTAI_COMP_ID` / `KINTAI_COMP_IDS` の集合に入っている会社だけを受け、外なら 400 で返す
+ * (会社のテナントは relay が引く)。
+ */
+const kintaiCompIdArg = z
+  .string()
+  .regex(/^\d{8}$/)
+  .optional()
+  .describe(
+    "会社 (comp_id、8 桁)。省略すると既定の会社 (relay の KINTAI_COMP_ID)。" +
+      "指定できるのは relay の勤怠の対象会社 (KINTAI_COMP_ID / KINTAI_COMP_IDS) だけで、外なら 400。" +
+      "北海大運など打刻を持たない会社は、fold の入力が alc (デジタコ) だけになる",
+  );
+
 const runKintaiRecalcArgs = z.object({
   month: z
     .string()
@@ -1923,6 +1938,7 @@ const runKintaiRecalcArgs = z.object({
     .boolean()
     .optional()
     .describe("**true で初めて GCP に書く**。省略時は変わる件数を数えるだけ (preview)"),
+  comp_id: kintaiCompIdArg,
 });
 
 /**
@@ -1945,7 +1961,8 @@ export const runKintaiRecalcTool = {
     "**apply を付けない限り 1 行も書かない** — 変わる件数だけ返る (既定)。" +
     "1 ページで終わらなければ応答の next_after_driver_cd が入る。" +
     "**続きがあるので、それを after_driver_cd に渡して回りきるまで呼び直す** " +
-    "(`null` なら回りきっている)。応答の fold / stale は受け側の形をそのまま返す。",
+    "(`null` なら回りきっている)。応答の fold / stale は受け側の形をそのまま返す。" +
+    "comp_id を省略すると既定の会社。北海大運など打刻を持たない会社は fold の入力が alc だけになる。",
   inputSchema: runKintaiRecalcArgs,
   // **write tool。** apply: true で本番 Supabase に書きうるので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
@@ -1959,6 +1976,7 @@ export const runKintaiRecalcTool = {
       max_drivers: args.max_drivers,
       stale_only: args.stale_only,
       apply: args.apply === true,
+      comp_id: args.comp_id,
     });
   },
 };
@@ -2307,6 +2325,7 @@ const getKintaiDaySummariesArgs = z.object({
     .regex(/^\d{1,10}$/)
     .optional()
     .describe("乗務員CD (数字)。省略すると全乗務員"),
+  comp_id: kintaiCompIdArg,
 });
 
 /**
@@ -2315,7 +2334,7 @@ const getKintaiDaySummariesArgs = z.object({
  *
  * **読むだけの tool。** 受け側 (`src/routes/kintai_day_summaries.rs`) に `POST` が
  * 無く、`run_kintai_recalc` の `apply` に当たる引数もここには無い — 引数は
- * `month` と `driver` の 2 つだけで、この tool からは 1 行も書けない。
+ * `month`・`driver`・`comp_id` の 3 つだけで、この tool からは 1 行も書けない。
  *
  * `requiresScope` を持たないのは既存の read tool (`get_kosoku_events` /
  * `get_restraint_summary` 等) と揃えたため — この repo の read tool は
@@ -2337,13 +2356,16 @@ export const getKintaiDaySummariesTool = {
     "キーは `乗務員CD|暦日|開始時刻`、値は shift_source と拘束/実働/休憩/深夜などの**分数**。" +
     "オンプレ基準 (get_kosoku_events / 拘束時間管理表) との突合を総数ではなく" +
     "**行・分単位**でやるための口で、応答は受け側の形をそのまま返す (整形も要約もしない)。" +
-    "データが 0 件の月は 404 ではなく rows: 0 と空の summaries が返る。",
+    "データが 0 件の月は 404 ではなく rows: 0 と空の summaries が返る。" +
+    "comp_id を省略すると既定の会社。北海大運など打刻を持たない会社は fold の入力が alc だけなので、" +
+    "オンプレ基準との突合 (get_kintai_diff 等) は既定の会社でしかできない。",
   inputSchema: getKintaiDaySummariesArgs,
   execute: async (env: Env, args: z.infer<typeof getKintaiDaySummariesArgs>) => {
     if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
 
     const q = new URLSearchParams({ month: args.month });
     if (args.driver) q.set("driver", args.driver);
+    if (args.comp_id) q.set("comp_id", args.comp_id);
     return await callRelay(env, `/kintai-relay/day-summaries?${q}`, undefined, { method: "GET" });
   },
 };

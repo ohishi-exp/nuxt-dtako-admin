@@ -118,7 +118,7 @@ function makeDO(opts: Setup = {}) {
 }
 
 describe("POST /restraint-api/wage-snapshot の書き先 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
-  it("(a) 本番設定なら勤怠 Worker へ書き、auth-worker の上流は呼ばない。ヘッダーは content-type と token だけ", async () => {
+  it("(a) 本番設定なら勤怠 Worker へ書き、auth-worker の上流は呼ばない。ヘッダーは content-type と token と会社のテナントだけ", async () => {
     const { post, upstreamCalls, kintaiCalls } = makeDO();
     const res = await post();
     expect(res.status).toBe(200);
@@ -128,7 +128,8 @@ describe("POST /restraint-api/wage-snapshot の書き先 (Refs ohishi-exp/rust-i
     expect(kintaiCalls[0]!.url).toBe("https://ichibanboshi-kintai/api/kintai/wage-snapshot");
     expect(kintaiCalls[0]!.headers).toEqual({
       "content-type": "application/json",
-      "X-Kintai-Write-Token": WRITE_TOKEN,
+      "x-kintai-write-token": WRITE_TOKEN,
+      "x-kintai-tenant-id": TENANT,
     });
     // comp_id は呼び出し元の値を捨てて認可済みの値で上書きする (経路 A と同じ)
     expect(kintaiCalls[0]!.body).toEqual({ comp_id: OWN_COMP, month: "2026-06", rows: [] });
@@ -138,7 +139,7 @@ describe("POST /restraint-api/wage-snapshot の書き先 (Refs ohishi-exp/rust-i
     const { post, upstreamCalls, kintaiCalls } = makeDO({ writeToken: WRITE_TOKEN });
     expect((await post()).status).toBe(200);
     expect(upstreamCalls).toEqual([]);
-    expect(kintaiCalls[0]!.headers["X-Kintai-Write-Token"]).toBe(WRITE_TOKEN);
+    expect(kintaiCalls[0]!.headers["x-kintai-write-token"]).toBe(WRITE_TOKEN);
   });
 
   it("★ (b) KINTAI が無ければ 503 で、どこにも書かない", async () => {

@@ -193,7 +193,7 @@ describe("GET /restraint-api/kintai/change-log (Refs #1133 c1133-6)", () => {
     expect(kintaiCalls.map((c) => c.url)).toEqual([
       "https://ichibanboshi-kintai/api/kintai/change-log?driver=1078&from=2026-06-01&to=2026-06-30",
     ]);
-    expect(Object.keys(kintaiCalls[0]!.headers)).toEqual(["Accept"]);
+    expect(kintaiCalls[0]!.headers).toEqual({ accept: "application/json", "x-kintai-tenant-id": TENANT });
   });
 
   it("勤怠 Worker の 503 は 502 で、本文の先頭を error に載せる", async () => {

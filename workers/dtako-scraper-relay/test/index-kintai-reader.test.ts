@@ -137,8 +137,12 @@ describe("/kintai-relay/* の送り先は勤怠 Worker だけ (Refs ohishi-exp/r
       "https://ichibanboshi-kintai/api/kintai/timecard/events?months=2026-06",
       "https://ichibanboshi-kintai/api/kintai/timecard/window",
     ]);
-    expect(kintai[0]!.headers).toEqual({ accept: "application/json" });
-    expect(kintai[1]!.headers).toEqual({ "content-type": "application/json", "x-kintai-write-token": "write-token" });
+    expect(kintai[0]!.headers).toEqual({ accept: "application/json", "x-kintai-tenant-id": "tenant" });
+    expect(kintai[1]!.headers).toEqual({
+      "content-type": "application/json",
+      "x-kintai-write-token": "write-token",
+      "x-kintai-tenant-id": "tenant",
+    });
   });
 });
 

@@ -18,7 +18,10 @@ import {
   buildDeps,
   judgeKintaiGate,
   judgeYTimeShiftsRequest,
+  kintaiCompSet,
   kintaiRelayFailStatus,
+  kintaiWorkerScope,
+  type KintaiRelayDeps,
   readKintaiWriteToken,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
@@ -96,6 +99,9 @@ export interface RelayWorkerEnv {
   KINTAI_WRITE_TOKEN?: unknown;
   /** 打刻を運ぶ対象の会社。tenant は KV の `dtako_accounts` から引く。 */
   KINTAI_COMP_ID?: string;
+  /** 勤怠の対象会社の集合 (カンマ区切り。`KINTAI_COMP_ID` は常に含む扱い)。`/kintai-relay/recalc`・
+   * `day-summaries`・`shift-overlaps` の `comp_id` はこの集合の中からだけ選べる (`pickKintaiCompId`)。 */
+  KINTAI_COMP_IDS?: string;
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
   /** 運転日報 netprint cron の対象 (JSON 配列
@@ -477,14 +483,16 @@ export default {
  * `/kintai-relay/run`・`/kintai-relay/recalc` の共通の関門 (Refs ohishi-exp/rust-ichibanboshi#322)。
  *
  * 宣言が欠けていれば **503 で fail-closed** — 「走ったが実は何も運んでいない」を
- * 作らない。会社は `KINTAI_COMP_ID` (呼び出し元に名乗らせない)。窓も recalc も勤怠 Worker にしか
- * 送らない (`buildDeps`)。書き込みの token はここで 1 回だけ読む。
+ * 作らない。窓も recalc も勤怠 Worker にしか送らない (`buildDeps`)。書き込みの token はここで 1 回だけ読む。
+ *
+ * 会社は呼び手が `depsFor` で決める。既定は `KINTAI_COMP_ID`。`comps` を立てると `KINTAI_COMP_IDS` の
+ * 集合の会社にも開く (呼び手は [`pickKintaiCompId`] で集合の中から選んだ会社だけを渡す)。
  */
 async function passKintaiWriteGate(
   request: Request,
   env: RelayWorkerEnv,
   logKey: string,
-): Promise<{ deps: ReturnType<typeof buildDeps> } | Response> {
+): Promise<{ compId: string; depsFor: (compId: string, comps?: boolean) => KintaiRelayDeps } | Response> {
   const compId = (env.KINTAI_COMP_ID ?? "").trim();
   const [proxySecret, writeToken] = await Promise.all([
     resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
@@ -502,10 +510,39 @@ async function passKintaiWriteGate(
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return kintaiGcpFail(401, "Unauthorized");
 
-  // 書き先のテナントは勤怠 Worker が自分の設定で固定する (relay の KV の tenant は送らない)
-  const deps = buildDeps({ kintai: env.KINTAI, compId, kintaiCompId: env.KINTAI_COMP_ID, writeToken });
-  return { deps };
+  // 書き先のテナントは会社から引いて `kintaiWorkerFor` が名乗る (呼び手に名乗らせない)
+  const accounts = await loadDtakoAccounts(env);
+  return {
+    compId,
+    depsFor: (target, comps = false) =>
+      buildDeps({ kintai: env.KINTAI, compId: target, scope: kintaiWorkerScope(env, accounts, comps), writeToken }),
+  };
 }
+
+/** `dtako_accounts` を parse して返す (未設定・JSON 不正は `null`)。会社のテナントの引き先。 */
+async function loadDtakoAccounts(env: RelayWorkerEnv): Promise<unknown> {
+  const raw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+  try {
+    return JSON.parse(raw || "null");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 機械用の口の `comp_id` (任意)。省略 (`undefined`・`null`・空文字) は `KINTAI_COMP_ID`。指定したときは
+ * **`KINTAI_COMP_ID` / `KINTAI_COMP_IDS` の集合に入っている会社だけ** (入っていなければ `null` = 呼び手は 400)。
+ * 呼び出し元が選べるのは集合の中の会社だけで、テナントは relay が会社から引く (名乗らせない)。
+ */
+function pickKintaiCompId(requested: unknown, env: Pick<RelayWorkerEnv, "KINTAI_COMP_ID" | "KINTAI_COMP_IDS">): string | null {
+  if (requested === undefined || requested === null || requested === "") return (env.KINTAI_COMP_ID ?? "").trim();
+  if (typeof requested !== "string") return null;
+  const compId = requested.trim();
+  return kintaiCompSet(env.KINTAI_COMP_ID, env.KINTAI_COMP_IDS).has(compId) ? compId : null;
+}
+
+/** [`pickKintaiCompId`] が `null` を返したときの 400 の文言。 */
+const KINTAI_COMP_ID_NOT_ALLOWED = "comp_id は勤怠の対象会社 (KINTAI_COMP_ID / KINTAI_COMP_IDS) の中からだけ指定できます";
 
 /**
  * `POST /kintai-relay/run` — 打刻を**窓ぶんまるごと** 1 回で運ぶ。
@@ -529,7 +566,7 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
   }
 
   try {
-    const report = await relayKintaiWindow(gate.deps, {
+    const report = await relayKintaiWindow(gate.depsFor(gate.compId), {
       // month 省略 = JST の当月。窓は既定で当月 + 前月
       month: typeof body.month === "string" && body.month ? body.month : undefined,
       monthCount: typeof body.month_count === "number" ? body.month_count : undefined,
@@ -549,7 +586,10 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
 /**
  * `POST /kintai-relay/recalc` — 全量再計算を 1 ページぶん進める。
  *
- * body は `{month?, after_driver_cd?, max_drivers?, stale_only?, apply?}`。
+ * body は `{month?, after_driver_cd?, max_drivers?, stale_only?, apply?, comp_id?}`。
+ * `comp_id` は省略で `KINTAI_COMP_ID`、指定は勤怠の対象会社の集合の中からだけ ([`pickKintaiCompId`]、
+ * 外なら 400)。fold は Supabase / alc だけを読み書きするので集合の会社でも回せる
+ * (打刻を持たない会社は fold の入力が alc だけになる)。
  * `apply` を付けない限り GCP 側は `GET` (1 行も書かない preview) を叩く。
  * 応答 (`fold` / `stale` / `next_after_driver_cd`) はそのまま返す — 窓の中継と
  * 違い、続きの位置を呼び出し側が運ぶだけなのでこちらでは reshape しない。
@@ -566,22 +606,25 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
     max_drivers?: unknown;
     stale_only?: unknown;
     apply?: unknown;
+    comp_id?: unknown;
   };
   try {
     body = (await request.json()) as typeof body;
   } catch {
     return kintaiGcpFail(400, "body must be JSON");
   }
+  const compId = pickKintaiCompId(body.comp_id, env);
+  if (compId === null) return kintaiGcpFail(400, KINTAI_COMP_ID_NOT_ALLOWED);
 
   try {
-    const report = await relayKintaiRecalc(gate.deps, {
+    const report = await relayKintaiRecalc(gate.depsFor(compId, true), {
       month: typeof body.month === "string" && body.month ? body.month : undefined,
       afterDriverCd: typeof body.after_driver_cd === "number" ? body.after_driver_cd : undefined,
       maxDrivers: typeof body.max_drivers === "number" ? body.max_drivers : undefined,
       staleOnly: body.stale_only === true,
       apply: body.apply === true,
     });
-    console.log(JSON.stringify({ kintai_recalc: "ok" }));
+    console.log(JSON.stringify({ kintai_recalc: "ok", comp_id: compId }));
     return new Response(JSON.stringify(report), {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
@@ -593,7 +636,7 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
 }
 
 /**
- * `GET /kintai-relay/day-summaries?month=YYYY-MM[&driver=CD]` — 畳んだ結果を読む。
+ * `GET /kintai-relay/day-summaries?month=YYYY-MM[&driver=CD][&comp_id=]` — 畳んだ結果を読む。
  *
  * **読むだけの口。** 受け側 (`src/routes/kintai_day_summaries.rs`) に `POST` は無く、
  * `recalc` の `apply` に当たるものも無い。ここを `POST` にしないのは、書ける口と
@@ -603,10 +646,9 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
  * 行単位の突合で、突合スクリプトがそのまま比較できることが目的。
  *
  * 認証・tenant 解決は `/kintai-relay/run` と同じ関門 (`X-Alc-Proxy-Secret` の
- * constant-time 検証 → KV `dtako_accounts` から `KINTAI_COMP_ID` で引く)。
- * なお受け側は `X-Tenant-ID` を読まず instance の設定で読み先を固定しているが、
- * ここでは他の中継と同じ形で名乗る (auth-worker の関門が `X-Tenant-ID` を必須にしており、
- * 欠けると 400 になる)。
+ * constant-time 検証 → KV `dtako_accounts` から会社のテナントを引く)。
+ * `comp_id` (クエリ、任意) は省略で `KINTAI_COMP_ID`、指定は勤怠の対象会社の集合の中からだけ
+ * ([`pickKintaiCompId`]、外なら 400)。テナントは `kintaiWorkerFor` が会社から引いて名乗る。
  */
 async function handleKintaiDaySummaries(
   request: Request,
@@ -621,9 +663,9 @@ async function handleKintaiDaySummaries(
 }
 
 /**
- * `GET /kintai-relay/shift-overlaps?month=YYYY-MM` — 同じ乗務員の勤務の時間帯が重なっている
+ * `GET /kintai-relay/shift-overlaps?month=YYYY-MM[&comp_id=]` — 同じ乗務員の勤務の時間帯が重なっている
  * 組 (GCP `kintai.shifts` の自己結合) を読む (Refs #1123)。最低賃金の検証 (条件3) の材料。
- * 関門・応答の扱いは day-summaries と同じ (`handleKintaiGcpRead`)。
+ * 関門・応答・`comp_id` の扱いは day-summaries と同じ (`handleKintaiGcpRead`)。
  */
 async function handleKintaiShiftOverlaps(
   request: Request,
@@ -674,12 +716,16 @@ function kintaiGcpFail(status: number, error: string, reason?: string): Response
  * 勤怠 Worker を**読むだけ**の口の共通の関門。
  * day-summaries / shift-overlaps / y-time-shifts が共有する — 関門を写すと片方だけ直す
  * 事故になるため。順序 (secret の解決 → secret の比較 → 残りの配線) の判定は
- * `judgeKintaiGate`、そのあと tenant を KV `dtako_accounts` から `KINTAI_COMP_ID` で引く。
+ * `judgeKintaiGate`、そのあと会社を決めて tenant を KV `dtako_accounts` から引く。
+ *
+ * 会社は `requestedCompId` が `undefined` (y-time-shifts) なら `KINTAI_COMP_ID` の 1 社。渡されたら
+ * (`null` = 省略を含む) [`pickKintaiCompId`] で集合の中から選び、外なら 400。
  */
 async function passKintaiGcpGate(
   request: Request,
   env: RelayWorkerEnv,
   logKey: string,
+  requestedCompId?: string | null,
 ): Promise<
   | { ok: true; deps: ReturnType<typeof buildDeps>; tenantId: string }
   | { ok: false; status: number; error: string; reason?: string }
@@ -691,21 +737,17 @@ async function passKintaiGcpGate(
     constantTimeEquals,
   );
   if (!verdict.ok) return verdict;
-  const { kintai, compId } = verdict.config;
+  const comps = requestedCompId !== undefined;
+  const compId = comps ? pickKintaiCompId(requestedCompId, env) : verdict.config.compId;
+  if (compId === null) return { ok: false, status: 400, error: KINTAI_COMP_ID_NOT_ALLOWED };
 
-  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
-  let accounts: unknown = null;
-  try {
-    accounts = JSON.parse(accountsRaw || "null");
-  } catch {
-    accounts = null;
-  }
+  const accounts = await loadDtakoAccounts(env);
   const tenantId = tenantForCompId(accounts, compId);
   if (!tenantId) {
     console.error(JSON.stringify({ [logKey]: "tenant not resolved", comp_id: compId }));
     return { ok: false, status: 503, error: "tenant not resolved from dtako_accounts" };
   }
-  const deps = buildDeps({ kintai, compId, kintaiCompId: env.KINTAI_COMP_ID });
+  const deps = buildDeps({ kintai: verdict.config.kintai, compId, scope: kintaiWorkerScope(env, accounts, comps) });
   return { ok: true, deps, tenantId };
 }
 
@@ -724,7 +766,7 @@ async function respondKintaiGcpRead(logKey: string, read: () => Promise<unknown>
   }
 }
 
-/** day-summaries / shift-overlaps の関門と応答 (`passKintaiGcpGate` → `read`)。
+/** day-summaries / shift-overlaps の関門と応答 (`passKintaiGcpGate` → `read`)。`comp_id` はクエリから取る。
  * この 2 つの口は 503 の本文に `reason` を出さない (応答の形を変えない)。 */
 async function handleKintaiGcpRead(
   request: Request,
@@ -732,9 +774,9 @@ async function handleKintaiGcpRead(
   logKey: string,
   read: (deps: ReturnType<typeof buildDeps>, url: URL) => Promise<unknown>,
 ): Promise<Response> {
-  const gate = await passKintaiGcpGate(request, env, logKey);
-  if (!gate.ok) return kintaiGcpFail(gate.status, gate.error);
   const url = new URL(request.url);
+  const gate = await passKintaiGcpGate(request, env, logKey, url.searchParams.get("comp_id"));
+  if (!gate.ok) return kintaiGcpFail(gate.status, gate.error);
   return respondKintaiGcpRead(logKey, () => read(gate.deps, url));
 }
 
