@@ -2900,6 +2900,64 @@ export const getIchibanColumnsTool = {
   },
 } satisfies ToolEntry<typeof getIchibanColumnsArgs>;
 
+// ===== get_ichiban_leave_days ================================================
+
+const getIchibanLeaveDaysArgs = z
+  .object({
+    from: z.string().regex(YMD_RE).describe("下限 (YYYY-MM-DD、**含む**)"),
+    to: z
+      .string()
+      .regex(YMD_RE)
+      .describe("上限 (YYYY-MM-DD、**含む**)。from〜to は最大 92 日 (超えると上流が 400)"),
+  })
+  .strict();
+
+export const getIchibanLeaveDaysTool = {
+  name: "get_ichiban_leave_days",
+  description:
+    "一番星 (販売管理) の休暇入力の行 (運転日報明細の休暇の品名) を期間で返す。" +
+    "休暇申請 (rust-leave-worker) が読むのと同じ口。" +
+    "各行に行 ID (管理年月日-管理C) と最終更新 (last_updated、空は null)。" +
+    "from〜to は両端を含み最大 92 日。read-only (`GET /api/leave/days`)。" +
+    "行は上流の pass-through、tool が足すのは `summary` (last_updated が null の行数など) だけ。",
+  inputSchema: getIchibanLeaveDaysArgs,
+  execute: async (env: Env, args) => {
+    const parsed = await fetchIchibanWorkerJson(
+      env.ICHIBAN_DB,
+      ICHIBAN_WORKER,
+      ichibanRangeQuery("/api/leave/days", args.from, args.to, {}),
+    );
+    // 上流は素の配列 or `{ data: [...] }` のどちらでも読めるようにしておく。
+    const rows = Array.isArray(parsed) ? parsed : ichibanRows(parsed);
+
+    const byItem = new Map<
+      string,
+      { item_name: string; rows: number; null_last_updated: number }
+    >();
+    let nullLastUpdated = 0;
+    for (const row of rows) {
+      const isNull = fieldOf(row, "last_updated") == null;
+      if (isNull) nullLastUpdated += 1;
+      const itemName = strField(row, "item_name");
+      const agg = byItem.get(itemName) ?? { item_name: itemName, rows: 0, null_last_updated: 0 };
+      agg.rows += 1;
+      if (isNull) agg.null_last_updated += 1;
+      byItem.set(itemName, agg);
+    }
+
+    return {
+      from: args.from,
+      to: args.to,
+      rows,
+      summary: {
+        rows: rows.length,
+        null_last_updated: nullLastUpdated,
+        by_item_name: sortedByKey(byItem),
+      },
+    };
+  },
+} satisfies ToolEntry<typeof getIchibanLeaveDaysArgs>;
+
 // ===== get_kushiro_branch_estimate ===========================================
 
 /**
@@ -3565,5 +3623,6 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getIchibanCostsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanSalesTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanColumnsTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getIchibanLeaveDaysTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKushiroBranchEstimateTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

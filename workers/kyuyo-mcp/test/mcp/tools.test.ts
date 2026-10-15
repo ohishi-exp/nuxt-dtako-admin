@@ -5,6 +5,7 @@ import {
   getIchibanCostsTool,
   getIchibanSalesTool,
   getIchibanColumnsTool,
+  getIchibanLeaveDaysTool,
   getRestDiffTool,
   runDtakoScrapeTool,
   getTimecardDiffTool,
@@ -1554,6 +1555,79 @@ describe("get_ichiban_columns", () => {
   });
 });
 
+describe("get_ichiban_leave_days", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const args = { from: "2026-10-01", to: "2026-10-31" };
+
+  it("calls /api/leave/days with from/to and counts null last_updated", async () => {
+    const rows = [
+      { employee_code: "1", date: "2026-10-02", item_name: "有給", row_id: "a-1", last_updated: "2026-10-01 09:00" },
+      { employee_code: "2", date: "2026-10-03", item_name: "有給", row_id: "a-2", last_updated: null },
+      { employee_code: "3", date: "2026-10-04", item_name: "欠勤", row_id: "a-3", last_updated: null },
+      { employee_code: "4", date: "2026-10-05", row_id: "a-4" },
+    ];
+    const { env, urls } = stubIchibanJson({ source_table: "運転日報明細", data: rows });
+    const res = (await getIchibanLeaveDaysTool.execute(env, args)) as {
+      rows: unknown[];
+      summary: {
+        rows: number;
+        null_last_updated: number;
+        by_item_name: { item_name: string; rows: number; null_last_updated: number }[];
+      };
+    };
+    expect(urls).toEqual([
+      "https://ichibanboshi-ichiban/api/leave/days?from=2026-10-01&to=2026-10-31",
+    ]);
+    expect(res.rows).toEqual(rows);
+    expect(res.summary.rows).toBe(4);
+    expect(res.summary.null_last_updated).toBe(3);
+    expect(res.summary.by_item_name).toEqual([
+      { item_name: "", rows: 1, null_last_updated: 1 },
+      { item_name: "有給", rows: 2, null_last_updated: 1 },
+      { item_name: "欠勤", rows: 1, null_last_updated: 1 },
+    ]);
+  });
+
+  it("accepts a bare-array upstream body and tolerates a malformed one", async () => {
+    const bare = [{ item_name: "有給", last_updated: "x" }];
+    const a = stubIchibanJson(bare);
+    const ra = (await getIchibanLeaveDaysTool.execute(a.env, args)) as { rows: unknown[] };
+    expect(ra.rows).toEqual(bare);
+    const b = stubIchibanJson("x");
+    const rb = (await getIchibanLeaveDaysTool.execute(b.env, args)) as {
+      rows: unknown[];
+      summary: { rows: number; null_last_updated: number };
+    };
+    expect(rb.rows).toEqual([]);
+    expect(rb.summary).toMatchObject({ rows: 0, null_last_updated: 0 });
+  });
+
+  it("rejects malformed dates before calling upstream", () => {
+    const schema = getIchibanLeaveDaysTool.inputSchema;
+    expect(schema.safeParse(args).success).toBe(true);
+    expect(schema.safeParse({ from: "2026/10/01", to: "2026-10-31" }).success).toBe(false);
+    expect(schema.safeParse({ from: "2026-10-01" }).success).toBe(false);
+  });
+
+  it("surfaces a non-2xx Worker response as a throw", async () => {
+    const env = ichibanEnv(async () => new Response("range too long", { status: 400 }));
+    await expect(getIchibanLeaveDaysTool.execute(env, args)).rejects.toThrow(
+      "一番星 Worker が 400 を返しました: range too long",
+    );
+  });
+
+  it("throws when the ICHIBAN_DB binding is missing", async () => {
+    const env = kosokuEnv({ ICHIBAN_DB: undefined });
+    await expect(getIchibanLeaveDaysTool.execute(env, args)).rejects.toThrow(
+      "一番星 Worker の Service Binding (ICHIBAN_DB) が未設定です",
+    );
+  });
+});
+
 // ===== 勤怠 Worker (KINTAI) への振り分け =======================================
 //
 // `fetchIchibanJson` の 1 か所で振り分ける (Refs ohishi-exp/rust-ichibanboshi#322)。
@@ -1648,6 +1722,8 @@ describe("ALL_TOOLS", () => {
     "get_ichiban_sales",
     // 一番星の 運転日報明細 の列一覧 (INFORMATION_SCHEMA) を読むだけ。上流は GET のみ
     "get_ichiban_columns",
+    // 一番星の休暇の行 (最終更新つき) を読むだけ。上流は GET のみ
+    "get_ichiban_leave_days",
     // 釧路営業所 (暫定) の試算 (Refs #760 の 34)。**pure な計算 + R2 の最低賃金マスタと
     // 一番星の売上を読むだけ**で、上流に POST を 1 本も投げない
     "get_kushiro_branch_estimate",
