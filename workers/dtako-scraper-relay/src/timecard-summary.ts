@@ -972,7 +972,7 @@ export function theearthUnsyncedWarning(
 ): string | null {
   if (theearthCurrent.length > 0) return null;
   const head = `${ym} はデジタコ (拘束時間管理表) を一度も取り込んでいません`
-    + " — 無人で埋まる経路はありません。画面『拘束CSV取得』でこの月を取り込んでください";
+    + " — 自動では埋まりません。画面『拘束CSV取得』か MCP の run_theearth_restraint_fetch でこの月を取り込んでください";
   const prevTimecardCds = new Set(timecardPrev.map((s) => s.data.driverCd));
   const prevOnly = theearthPrev.filter((s) => !prevTimecardCds.has(s.data.driverCd)).length;
   if (prevOnly === 0) return head;

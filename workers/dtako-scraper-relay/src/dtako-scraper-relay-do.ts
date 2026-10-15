@@ -450,6 +450,7 @@ import {
   summarizeRestraintDriver,
   validateRestraintParams,
   type RestraintCsvParams,
+  type RestraintCsvResult,
   type RestraintDriverSummary,
   type RestraintSummaryDay,
 } from "./theearth-restraint-client";
@@ -1298,6 +1299,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 認証は index.ts の /kintai-relay/restraint-resummarize 側 (X-Alc-Proxy-Secret)。
     if (url.pathname === "/cron/restraint-resummarize" && request.method === "POST") {
       return this.handleCronRestraintResummarize(request);
+    }
+    // theearth の拘束時間管理表 (F-ERS2010) を DTAKO_ACCOUNTS の資格情報で 1 か月ぶん取り込む。
+    // 画面「拘束CSV取得」の無人版 (人の theearth ログインが要らない)。認証は index.ts の
+    // /kintai-relay/theearth-restraint-run 側 (X-Alc-Proxy-Secret)。
+    if (url.pathname === "/cron/theearth-restraint" && request.method === "POST") {
+      return this.handleCronTheearthRestraint(request);
     }
 
     // theearth 乗務員マスタ (F-MMS0320) を読んで alc の employees へ流す
@@ -10674,12 +10681,80 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         this.ctx.waitUntil(this.saveRestraintNoDataToR2(record.compId, params));
         return { no_data: true };
       }
-      const report = parseRestraintCsv(csv.text);
-      const limitMinutes = report.maxRestraintHours !== null ? report.maxRestraintHours * 60 : null;
-      const summaries = report.drivers.map((d) => summarizeRestraintDriver(d, limitMinutes));
-      // 生 CSV + 乗務員別サマリを R2 にバージョン管理付きで保存 (応答をブロックしない)
-      this.ctx.waitUntil(this.saveRestraintToR2(record.compId, params, csv.bytes, summaries));
+      const { report, summaries, saved } = this.archiveRestraintCsv(record.compId, params, csv);
+      // 保存は応答をブロックしない
+      this.ctx.waitUntil(saved);
       return { no_data: false, report, summaries };
+    });
+  }
+
+  /**
+   * 取得した拘束時間管理表 CSV をパース・集計して R2 (版管理) / D1 / 勤怠 Worker へ保存し、
+   * その月と前月の上流キャッシュを無効化する。画面の `/restraint-api/report` と無人の
+   * `/cron/theearth-restraint` が共有する。**パース失敗は throw** (どちらの呼び手も失敗として返す)。
+   * `/restraint-api/csv` は生 CSV を返す経路でパース失敗を縮退させるので、ここは使わない。
+   * `saved` は呼び手が待つか `waitUntil` に渡す。
+   */
+  private archiveRestraintCsv(
+    compId: string,
+    params: RestraintCsvParams,
+    csv: RestraintCsvResult,
+  ): { report: ReturnType<typeof parseRestraintCsv>; summaries: RestraintDriverSummary[]; saved: Promise<void> } {
+    const report = parseRestraintCsv(csv.text);
+    const limitMinutes = report.maxRestraintHours !== null ? report.maxRestraintHours * 60 : null;
+    const summaries = report.drivers.map((d) => summarizeRestraintDriver(d, limitMinutes));
+    const ym = `${params.year}-${String(params.month).padStart(2, "0")}`;
+    const saved = this.saveRestraintToR2(compId, params, csv.bytes, summaries).then(() =>
+      this.invalidateKintaiUpstreamCache([ym, prevYmOf(ym)], "restraint-report"),
+    );
+    return { report, summaries, saved };
+  }
+
+  /**
+   * POST /cron/theearth-restraint — body `{comp_id, month: "YYYY-MM"}`。theearth の拘束時間管理表
+   * (F-ERS2010) を **DTAKO_ACCOUNTS の資格情報で**全乗務員一括 1 回取り、画面「拘束CSV取得」と
+   * 同じ保存 (`archiveRestraintCsv`) をする。人の theearth ログインが要らない無人版で、
+   * 会社は `comp_id` の DTAKO_ACCOUNTS 行 (`resolveAccount`) に限る。
+   *
+   * - theearth は同一アカウントの並行アクセスで hang するので `enqueueScrape` で直列化する
+   * - 無人ログインは同じアカウントを使う人のセッションを蹴りうる。応答の
+   *   `theearth_logins` / `theearth_kicked` に残す (`run_dtako_reimport` と同じ)
+   * - 該当データ無し (未集計の月・在籍者なし) は 200 の `{no_data: true}` で、画面と同じく
+   *   「確認した結果データなし」として R2 に残す
+   * - この DO は `scraper-comp-{comp}` なので、無効化する上流キャッシュはこの DO のぶんだけ
+   *   (`handleCronRestraintResummarize` と同じ)。拘束×賃金が読む R2 の拘束サマリは即座に新しくなる
+   */
+  private async handleCronTheearthRestraint(request: Request): Promise<Response> {
+    const parsed = await parseCronCompMonthBody(request, "/cron/theearth-restraint");
+    if (parsed instanceof Response) return parsed;
+    const ym = this.parseMonthParam(parsed.url);
+    if (!ym) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const compId = parsed.record.compId;
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    const params: RestraintCsvParams = { year: ym.year, month: ym.month, driverFrom: "", driverTo: "" };
+    return this.enqueueScrape(async () => {
+      const jobState = this.makeTheearthLoginJobState();
+      const login = () => ({
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
+      try {
+        const csv = await this.withTheearthLoginSession(account, jobState, (jar) => downloadRestraintCsv(jar, params));
+        if (csv === null) {
+          await this.saveRestraintNoDataToR2(compId, params);
+          return Response.json({ comp_id: compId, month: ym.ym, no_data: true, drivers: 0, ...login() });
+        }
+        const { summaries, saved } = this.archiveRestraintCsv(compId, params, csv);
+        await saved;
+        return Response.json({ comp_id: compId, month: ym.ym, no_data: false, drivers: summaries.length, ...login() });
+      } catch (err) {
+        console.error(JSON.stringify({ theearth_restraint: "failed", comp_id: compId, month: ym.ym, error: describeUnknownError(err) }));
+        const message = err instanceof TheearthClientError ? err.message : `拘束時間管理表の取り込みに失敗しました (${describeUnknownError(err)})`;
+        return Response.json({ error: message, ...login() }, { status: 502 });
+      }
     });
   }
 

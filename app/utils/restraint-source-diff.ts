@@ -299,7 +299,7 @@ export function restraintSourceDiffUnavailableReason(
     return 'この月はデジタコ側にも打刻側にも行がありません。どちらも取り込まれていないので、比較できていません (差が無いという意味ではありません)。'
   }
   if (summary.theearthOnlyCount === 0) {
-    return 'この月はデジタコ (拘束時間管理表) を一度も取り込んでいないため、全員が比較できていません。無人で埋まる経路は無いので、画面『拘束CSV取得』でこの月を取り込んでください。'
+    return 'この月はデジタコ (拘束時間管理表) を一度も取り込んでいないため、全員が比較できていません。自動では埋まらないので、画面『拘束CSV取得』か MCP の run_theearth_restraint_fetch でこの月を取り込んでください。'
   }
   if (summary.timecardOnlyCount === 0) {
     return 'この月は打刻側 (live-build) の行が 1 件もないため、全員が比較できていません。取り込み先の疎通を確認してください (古い写しにはフォールバックしません)。'
