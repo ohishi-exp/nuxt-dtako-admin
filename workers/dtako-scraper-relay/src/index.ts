@@ -294,6 +294,12 @@ export default {
       return handleTheearthRestraintRun(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/theearth-restraint-calc" && request.method === "POST") {
+      // 上の取り込みの前に theearth (F-ERS2012) で拘束時間を集計し直す。DO 内部
+      // (/cron/theearth-restraint-calc) へ転送するだけ
+      return handleTheearthRestraintCalc(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/driver-master-run" && request.method === "POST") {
       // theearth 乗務員マスタ → alc employees の同期を、cron (JST 7/12/15/17/19 時)
       // を待たずに 1 回走らせる (Refs ippoan/alc-app-s3#125)。cron 経路と同じ DO
@@ -1190,7 +1196,7 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
 }
 
 /**
- * `/kintai-relay/{restraint-sync,restraint-resummarize,theearth-restraint-run}` の共通の関門と転送。
+ * `/kintai-relay/{restraint-sync,restraint-resummarize,theearth-restraint-run,theearth-restraint-calc}` の共通の関門と転送。
  * `X-Alc-Proxy-Secret` を constant-time で検証し (未設定は 503)、body `{month, comp_id?}` を
  * `scraper-comp-{comp}` の DO の `doPath` へ `{comp_id, month}` で渡す。**`month` は必須**、
  * `comp_id` 省略時は `KINTAI_COMP_ID`。`month` の形式 (YYYY-MM) は DO 側が見る — ここでは素通し。
@@ -1258,6 +1264,17 @@ export async function handleRestraintResummarize(request: Request, env: RelayWor
  */
 export async function handleTheearthRestraintRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
   return forwardCompMonthToDo(request, env, "/cron/theearth-restraint");
+}
+
+/**
+ * `POST /kintai-relay/theearth-restraint-calc` — `theearth-restraint-run` の前に、theearth の
+ * 拘束時間集計 (F-ERS2012、画面「集計」→「全乗務員を選択」→「集計開始」) を全事業所で走らせる。
+ * CSV は theearth が最後に集計した結果しか返さないので、就業時間管理マスターを変えた月はこちら
+ * (2026-10-16 ユーザー判断)。**theearth の拘束時間管理表を書き換える。** body・関門は
+ * `forwardCompMonthToDo`、処理は DO の `/cron/theearth-restraint-calc`。
+ */
+export async function handleTheearthRestraintCalc(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardCompMonthToDo(request, env, "/cron/theearth-restraint-calc");
 }
 
 /**
