@@ -439,6 +439,7 @@ import {
 } from "./restraint-wage-source";
 import {
   appendHistoryJsonl,
+  calculateRestraint,
   downloadRestraintCsv,
   parseRestraintCsv,
   pickSupersededVersionKeys,
@@ -1314,6 +1315,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // /kintai-relay/theearth-restraint-run 側 (X-Alc-Proxy-Secret)。
     if (url.pathname === "/cron/theearth-restraint" && request.method === "POST") {
       return this.handleCronTheearthRestraint(request);
+    }
+    // /kintai-relay/theearth-restraint-calc 側。集計 (F-ERS2012) してから同じ取り込みをする
+    if (url.pathname === "/cron/theearth-restraint-calc" && request.method === "POST") {
+      return this.handleCronTheearthRestraint(request, { calc: true });
     }
 
     // theearth 乗務員マスタ (F-MMS0320) を読んで alc の employees へ流す
@@ -10747,6 +10752,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 同じ保存 (`archiveRestraintCsv`) をする。人の theearth ログインが要らない無人版で、
    * 会社は `comp_id` の DTAKO_ACCOUNTS 行 (`resolveAccount`) に限る。
    *
+   * - `opts.calc` (`/cron/theearth-restraint-calc`) のときは、取る前に F-ERS2012 で全事業所・全乗務員を
+   *   集計し直す (`calculateRestraint`)。CSV は theearth が最後に集計した結果しか返さないので、
+   *   就業時間管理マスターを変えた月はこちらを使う。応答に `calculated` (事業所ごとの乗務員数と、
+   *   集計前に「未」だった乗務員CD) を足す
    * - theearth は同一アカウントの並行アクセスで hang するので `enqueueScrape` で直列化する
    * - 無人ログインは同じアカウントを使う人のセッションを蹴りうる。応答の
    *   `theearth_logins` / `theearth_kicked` に残す (`run_dtako_reimport` と同じ)
@@ -10755,8 +10764,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * - この DO は `scraper-comp-{comp}` なので、無効化する上流キャッシュはこの DO のぶんだけ
    *   (`handleCronRestraintResummarize` と同じ)。拘束×賃金が読む R2 の拘束サマリは即座に新しくなる
    */
-  private async handleCronTheearthRestraint(request: Request): Promise<Response> {
-    const parsed = await parseCronCompMonthBody(request, "/cron/theearth-restraint");
+  private async handleCronTheearthRestraint(request: Request, opts: { calc?: boolean } = {}): Promise<Response> {
+    const parsed = await parseCronCompMonthBody(
+      request,
+      opts.calc ? "/cron/theearth-restraint-calc" : "/cron/theearth-restraint",
+    );
     if (parsed instanceof Response) return parsed;
     const ym = this.parseMonthParam(parsed.url);
     if (!ym) return dvrJsonError(400, "month は YYYY-MM で指定してください");
@@ -10773,17 +10785,28 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         theearth_kicked: jobState.logins.some((l) => l.kicked),
       });
       try {
-        const csv = await this.withTheearthLoginSession(account, jobState, (jar) => downloadRestraintCsv(jar, params));
+        const { calc, csv } = await this.withTheearthLoginSession(account, jobState, async (jar) => ({
+          // 集計してから取る — CSV は theearth が最後に集計した結果しか返さない
+          calc: opts.calc ? await calculateRestraint(jar, params) : undefined,
+          csv: await downloadRestraintCsv(jar, params),
+        }));
+        const calculated = calc && {
+          calculated: calc.map((b) => ({
+            branch: b.branchName,
+            drivers: b.drivers.length,
+            uncalculated_before: b.drivers.filter((d) => !d.calculatedBefore).map((d) => d.driverCd),
+          })),
+        };
         if (csv === null) {
           await this.saveRestraintNoDataToR2(compId, params);
-          return Response.json({ comp_id: compId, month: ym.ym, no_data: true, drivers: 0, ...login() });
+          return Response.json({ comp_id: compId, month: ym.ym, ...calculated, no_data: true, drivers: 0, ...login() });
         }
         const { summaries, saved } = this.archiveRestraintCsv(compId, params, csv);
         await saved;
-        return Response.json({ comp_id: compId, month: ym.ym, no_data: false, drivers: summaries.length, ...login() });
+        return Response.json({ comp_id: compId, month: ym.ym, ...calculated, no_data: false, drivers: summaries.length, ...login() });
       } catch (err) {
-        console.error(JSON.stringify({ theearth_restraint: "failed", comp_id: compId, month: ym.ym, error: describeUnknownError(err) }));
-        const message = err instanceof TheearthClientError ? err.message : `拘束時間管理表の取り込みに失敗しました (${describeUnknownError(err)})`;
+        console.error(JSON.stringify({ theearth_restraint: "failed", calc: opts.calc === true, comp_id: compId, month: ym.ym, error: describeUnknownError(err) }));
+        const message = err instanceof TheearthClientError ? err.message : `拘束時間管理表の${opts.calc ? "集計・" : ""}取り込みに失敗しました (${describeUnknownError(err)})`;
         return Response.json({ error: message, ...login() }, { status: 502 });
       }
     });

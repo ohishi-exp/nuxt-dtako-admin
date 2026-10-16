@@ -31,6 +31,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   TheearthClientError,
   VenusSessionExpiredError,
+  decodeHtmlEntities,
   fetchWithJar,
   findFormFieldById,
   findTagById,
@@ -248,6 +249,168 @@ export async function downloadRestraintCsv(
     if (result !== null) return result;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// 拘束時間の集計 (F-ERS2012)
+// ---------------------------------------------------------------------------
+
+/**
+ * F-ERS2010 の「集計」が開く小窓 `F-ERS2012[RestraintReportCalc]`。`Target=1` は令和 6 年 4 月
+ * 改正基準 (F-ERS2010 の既定の出力基準と同じ)。
+ *
+ * 実機確定知見 (2026-10-16、北海大運 2026-07 で実ブラウザから集計開始を押して確認):
+ *
+ * - **CSV (`btnOutputCsv`) は theearth が最後に集計した結果を返すだけ**。就業時間管理マスターを
+ *   変えても、ここで集計し直すまで拘束時間管理表は古い設定の値のまま
+ * - 年月 (`ucMonthDate`) と事業所 (`ddlBranch`) を入れて「適用」(`btnBranch`) を押すと、その事業所の
+ *   乗務員一覧 (`lstData_chkCheck_N` / `lstData_lblDriverCD_N` / 集計の済・未 `lstData_lblIsCalc_N`)
+ *   が出る。事業所は会社によって 1 つ (北海大運「本社」) から 12 (大石) まである
+ * - 「全乗務員を選択」等はブラウザ側でチェックを入れるだけ。「集計開始」(`btnOK`) の postback で、
+ *   チェックした乗務員を集計し直す。北海大運 13 名で 14.3 秒、終わると「完了しました。」を返す
+ */
+export const RESTRAINT_CALC_PATH = "/F-ERS2012[RestraintReportCalc].aspx?Target=1";
+
+/** 集計画面の必須要素 (ClientID)。name は毎回ページから読む。 */
+const RESTRAINT_CALC_FORM_IDS = ["ucMonthDate_txtYear", "ucMonthDate_txtMonth", "ddlBranch", "btnBranch", "btnOK"] as const;
+
+/** 集計の完了マーカー (実機確定)。 */
+const RESTRAINT_CALC_DONE = "完了しました";
+
+export interface RestraintCalcDriver {
+  driverCd: string;
+  /** 集計前に「済」だったか (「未」なら false)。 */
+  calculatedBefore: boolean;
+}
+
+export interface RestraintCalcBranch {
+  branchCode: string;
+  branchName: string;
+  drivers: RestraintCalcDriver[];
+}
+
+/** `ddlBranch` の option を `{value, text}` で返す (出現順)。 */
+export function parseCalcBranches(html: string): { value: string; text: string }[] {
+  const select = html.match(/<select\b[^>]*\bid=["']ddlBranch["'][^>]*>([\s\S]*?)<\/select>/i);
+  if (!select) return [];
+  const out: { value: string; text: string }[] = [];
+  const optionRe = /<option\b([^>]*)>([\s\S]*?)<\/option>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = optionRe.exec(select[1])) !== null) {
+    const value = m[1].match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "";
+    out.push({ value: decodeHtmlEntities(value), text: decodeHtmlEntities(m[2].replace(/<[^>]+>/g, "").trim()) });
+  }
+  return out;
+}
+
+/** 乗務員一覧の行 (`lstData_chkCheck_N`) を、checkbox の name と乗務員CD・済/未で返す。 */
+export function parseCalcRows(html: string): { checkName: string; driverCd: string; calculatedBefore: boolean }[] {
+  const out: { checkName: string; driverCd: string; calculatedBefore: boolean }[] = [];
+  for (let i = 0; ; i++) {
+    const check = findFormFieldById(html, `lstData_chkCheck_${i}`);
+    if (!check) break;
+    const span = (id: string) =>
+      html.match(new RegExp(`<span\\b[^>]*\\bid=["']${id}["'][^>]*>([\\s\\S]*?)<\\/span>`, "i"))?.[1]?.replace(/<[^>]+>/g, "").trim() ?? "";
+    out.push({
+      checkName: check.name,
+      driverCd: span(`lstData_lblDriverCD_${i}`),
+      calculatedBefore: span(`lstData_lblIsCalc_${i}`) === "済",
+    });
+  }
+  return out;
+}
+
+function requireCalcRefs(html: string): Map<string, { name: string; value: string }> {
+  const refs = new Map<string, { name: string; value: string }>();
+  for (const id of RESTRAINT_CALC_FORM_IDS) {
+    const ref = findFormFieldById(html, id);
+    if (!ref) {
+      throw new TheearthClientError(
+        `拘束時間集計フォームの要素 (id=${id}) が見つかりません — theearth-np のページ仕様が変更された可能性があります`,
+      );
+    }
+    refs.set(id, ref);
+  }
+  return refs;
+}
+
+async function postCalcPage(
+  jar: CookieJar,
+  body: URLSearchParams,
+  label: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const res = await postForm(jar, `${BASE_URL}${RESTRAINT_CALC_PATH}`, body, fetchImpl, timeoutMs);
+  const html = await res.text();
+  if (!res.ok) {
+    throw new TheearthClientError(`拘束時間集計の${label}が HTTP ${res.status} を返しました (${describeHtml(html)})`);
+  }
+  if (hasLoginForm(html)) {
+    throw new VenusSessionExpiredError(`拘束時間集計の${label}がログイン画面を返しました — theearth セッションが切れています`);
+  }
+  return html;
+}
+
+/**
+ * F-ERS2012 で、指定した年月の拘束時間を**全事業所・全乗務員**について集計し直す
+ * (画面「集計」→「全乗務員を選択」→「集計開始」の無人版)。**theearth の拘束時間管理表を書き換える。**
+ *
+ * - 年は `restraintYearCandidates` の先頭 (和暦入力の企業は令和 2 桁、それ以外は 4 桁西暦)
+ * - 事業所ごとに「適用」で一覧を出し、全行にチェックを入れて「集計開始」を押す。乗務員の居ない
+ *   事業所は押さない
+ * - 「完了しました。」が返らなければ throw (黙って成功にしない)
+ */
+export async function calculateRestraint(
+  jar: CookieJar,
+  params: { year: number; month: number },
+  fetchImpl: FetchLike = fetch,
+  timeouts: ScrapeTimeouts = {},
+): Promise<RestraintCalcBranch[]> {
+  validateRestraintParams({ ...params, driverFrom: "", driverTo: "" });
+  const requestTimeoutMs = timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const exportTimeoutMs = timeouts.exportTimeoutMs ?? DEFAULT_EXPORT_TIMEOUT_MS;
+  const getRes = await fetchWithJar(jar, `${BASE_URL}${RESTRAINT_CALC_PATH}`, { method: "GET" }, fetchImpl, requestTimeoutMs);
+  let html = await getRes.text();
+  if (hasLoginForm(html)) {
+    throw new VenusSessionExpiredError("拘束時間集計ページがログイン画面を返しました — theearth セッションが切れています");
+  }
+  requireCalcRefs(html);
+  const year = restraintYearCandidates(params.year, html)[0];
+  const branches = parseCalcBranches(html);
+  if (branches.length === 0) {
+    throw new TheearthClientError("拘束時間集計の事業所 (ddlBranch) が 1 つもありません — theearth-np のページ仕様が変更された可能性があります");
+  }
+  const out: RestraintCalcBranch[] = [];
+  for (const branch of branches) {
+    // 1. 年月・事業所を入れて「適用」で一覧を出し直す
+    let refs = requireCalcRefs(html);
+    const fields = serializeFormFields(html);
+    fields[refs.get("ucMonthDate_txtYear")!.name] = year;
+    fields[refs.get("ucMonthDate_txtMonth")!.name] = String(params.month).padStart(2, "0");
+    fields[refs.get("ddlBranch")!.name] = branch.value;
+    const apply = refs.get("btnBranch")!;
+    html = await postCalcPage(jar, new URLSearchParams({ ...fields, [apply.name]: apply.value }), "一覧 (適用)", fetchImpl, requestTimeoutMs);
+    const rows = parseCalcRows(html);
+    out.push({
+      branchCode: branch.value,
+      branchName: branch.text,
+      drivers: rows.map((r) => ({ driverCd: r.driverCd, calculatedBefore: r.calculatedBefore })),
+    });
+    if (rows.length === 0) continue;
+    // 2. 全行にチェックを入れて「集計開始」
+    refs = requireCalcRefs(html);
+    const calcFields = serializeFormFields(html);
+    for (const r of rows) calcFields[r.checkName] = "on";
+    const ok = refs.get("btnOK")!;
+    html = await postCalcPage(jar, new URLSearchParams({ ...calcFields, [ok.name]: ok.value }), "集計開始", fetchImpl, exportTimeoutMs);
+    if (!html.includes(RESTRAINT_CALC_DONE)) {
+      throw new TheearthClientError(
+        `拘束時間集計 (事業所 ${branch.text}) が「${RESTRAINT_CALC_DONE}」を返しませんでした (${describeHtml(html)})`,
+      );
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

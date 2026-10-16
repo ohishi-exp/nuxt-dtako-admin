@@ -2101,6 +2101,32 @@ export const runTheearthRestraintFetchTool = {
   },
 };
 
+// ── run_theearth_restraint_calc ─────────────────────────────────────────────
+
+/**
+ * theearth の拘束時間集計 (F-ERS2012) を全事業所・全乗務員で走らせてから、
+ * `run_theearth_restraint_fetch` と同じ取り込みをする。relay の
+ * `POST /kintai-relay/theearth-restraint-calc` を叩くだけ (運ぶロジックはここに無い)。
+ */
+export const runTheearthRestraintCalcTool = {
+  name: "run_theearth_restraint_calc",
+  description:
+    "theearth の**拘束時間集計** (F-ERS2012、画面「拘束時間管理表」→「集計」→「全乗務員を選択」→「集計開始」の無人版) を " +
+    "**全事業所・全乗務員**について 1 か月ぶん走らせ、続けて run_theearth_restraint_fetch と同じ取り込みをする。" +
+    "**拘束時間管理表の CSV は theearth が最後に集計した結果しか返さない** — 就業時間管理マスター (F-MMS0810) を変えた月は、" +
+    "これで集計し直さないと古い設定の値のまま取れる。**theearth の拘束時間管理表を書き換える** (集計し直すだけで、運行の作業時間は変えない)。" +
+    "応答は run_theearth_restraint_fetch の応答に `calculated` (事業所ごとの `{branch, drivers, uncalculated_before}`。" +
+    "uncalculated_before は集計前に「未」だった乗務員CD) を足したもの。集計は 13 名で 15 秒ほどかかる (実測)。" +
+    "無人ログインは同じ theearth アカウントを使っている人のセッションを蹴りうる (`theearth_kicked`)。**並列に呼ばない**。" +
+    "comp_id・month とも必須で、1 回 1 社 1 か月。`/kintai-relay/*` (X-Alc-Proxy-Secret 方式) を叩く。",
+  inputSchema: runTheearthRestraintFetchArgs,
+  // **write tool。** theearth の集計結果と、R2・D1・勤怠 Worker の D1 を書く
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runTheearthRestraintFetchArgs>) => {
+    return await callRelay(env, "/kintai-relay/theearth-restraint-calc", { month: args.month, comp_id: args.comp_id });
+  },
+};
+
 // ── run_driver_master_sync ───────────────────────────────────────────────────
 
 /** 乗務員マスタ同期の失敗本文をエラーに載せるときの上限。relay が返すのは
@@ -3664,6 +3690,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintResummarizeTool as unknown as ToolEntry<z.ZodTypeAny>,
   runTheearthRestraintFetchTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runTheearthRestraintCalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
