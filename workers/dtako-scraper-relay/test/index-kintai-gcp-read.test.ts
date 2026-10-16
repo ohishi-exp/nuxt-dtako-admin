@@ -89,6 +89,46 @@ describe("GET /kintai-relay/shift-overlaps (Refs #1123)", () => {
   });
 });
 
+describe("GET /kintai-relay/alc-events (ohishi-exp/rust-ichibanboshi#400)", () => {
+  const body = { driver: 12, shifts: [{ start: "2026-06-02 05:00:00", end: "2026-06-02 08:00:00", minutes: 180 }] };
+
+  it("secret が無ければ 401 で、上流を叩かない", async () => {
+    const { env, calls } = fakeEnv(() => Response.json(body));
+    const res = await worker.fetch(get("/kintai-relay/alc-events?driver=12&from=2026-06-01&to=2026-06-24", {}), env);
+    expect(res.status).toBe(401);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("driver・from・to を上流の alc-events に渡し、応答をそのまま返す", async () => {
+    const { env, calls } = fakeEnv(() => Response.json(body));
+    const res = await worker.fetch(get("/kintai-relay/alc-events?driver=12&from=2026-06-01&to=2026-06-24"), env);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(body);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("/api/kintai/alc-events?driver=12&from=2026-06-01&to=2026-06-24");
+  });
+
+  it.each([
+    "/kintai-relay/alc-events?from=2026-06-01&to=2026-06-24",
+    "/kintai-relay/alc-events?driver=x&from=2026-06-01&to=2026-06-24",
+    "/kintai-relay/alc-events?driver=12&from=2026-6-1&to=2026-06-24",
+    "/kintai-relay/alc-events?driver=12&from=2026-06-01",
+  ])("引数の形が違えば上流を叩かずに落とす (%s。day-summaries の month と同じく 502)", async (path) => {
+    const { env, calls } = fakeEnv(() => Response.json(body));
+    const res = await worker.fetch(get(path), env);
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/で指定してください/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("上流が落ちたら 502", async () => {
+    const { env } = fakeEnv(() => new Response("boom", { status: 500 }));
+    const res = await worker.fetch(get("/kintai-relay/alc-events?driver=12&from=2026-06-01&to=2026-06-24"), env);
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/alc-events: status 500: boom/);
+  });
+});
+
 describe("GET /kintai-relay/day-summaries (関門を shift-overlaps と共有したあとも同じに動く)", () => {
   it("secret が無ければ 401", async () => {
     const { env, calls } = fakeEnv(() => Response.json({ summaries: {} }));

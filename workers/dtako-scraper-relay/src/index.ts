@@ -26,6 +26,7 @@ import {
   relayKintaiDaySummaries,
   relayKintaiRecalc,
   relayKintaiShiftOverlaps,
+  relayKintaiAlcEvents,
   relayKintaiWindow,
   relayKintaiYTimeShifts,
   tenantForCompId,
@@ -209,6 +210,11 @@ export default {
       // 畳んだ結果を読む (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
       // **GET だけ。** 受け側に書き込みの口が無いので、こちらにも作らない
       return handleKintaiDaySummaries(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/alc-events" && request.method === "GET") {
+      // fold が読む 1 人ぶんの alc の行と勤務 (診断、ohishi-exp/rust-ichibanboshi#400)。読むだけ
+      return handleKintaiAlcEvents(request, env);
     }
 
     if (url.pathname === "/kintai-relay/shift-overlaps" && request.method === "GET") {
@@ -664,6 +670,21 @@ async function handleKintaiDaySummaries(
     relayKintaiDaySummaries(deps, {
       month: url.searchParams.get("month") || undefined,
       driver: url.searchParams.get("driver") || undefined,
+    }),
+  );
+}
+
+/**
+ * `GET /kintai-relay/alc-events?driver=CD&from=YYYY-MM-DD&to=YYYY-MM-DD[&comp_id=]` — 勤怠 Worker が fold で読む
+ * 1 人ぶんの alc の行と、そこから組んだ勤務 (ohishi-exp/rust-ichibanboshi#400)。関門・応答・`comp_id` の扱いは
+ * day-summaries と同じ (`handleKintaiGcpRead`)。
+ */
+async function handleKintaiAlcEvents(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return handleKintaiGcpRead(request, env, "kintai_alc_events", (deps, url) =>
+    relayKintaiAlcEvents(deps, {
+      driver: url.searchParams.get("driver") || undefined,
+      from: url.searchParams.get("from") || undefined,
+      to: url.searchParams.get("to") || undefined,
     }),
   );
 }

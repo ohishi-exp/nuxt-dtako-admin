@@ -84,6 +84,7 @@ const ROUTES: Case[] = [
   ["POST /kintai-relay/recalc", (s) => post("/kintai-relay/recalc", { month: "2026-06" }, s)],
   ["GET /kintai-relay/day-summaries", (s) => get("/kintai-relay/day-summaries?month=2026-06", s)],
   ["GET /kintai-relay/shift-overlaps", (s) => get("/kintai-relay/shift-overlaps?month=2026-06", s)],
+  ["GET /kintai-relay/alc-events", (s) => get("/kintai-relay/alc-events?driver=12&from=2026-06-01&to=2026-06-24", s)],
   [
     "POST /kintai-relay/y-time-shifts",
     (s) => post("/kintai-relay/y-time-shifts", { driver_cd: "9001", from: "2026-06-01", to: "2026-06-30", tenant_id: "tenant" }, s),
