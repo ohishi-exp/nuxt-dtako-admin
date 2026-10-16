@@ -2396,6 +2396,50 @@ export const getKintaiDaySummariesTool = {
   },
 };
 
+// ── get_kintai_alc_events ───────────────────────────────────────────────────
+
+const getKintaiAlcEventsArgs = z.object({
+  driver: z
+    .string()
+    .regex(/^\d{1,10}$/)
+    .describe("乗務員CD (数字)"),
+  from: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .describe("期間の初日 (JST の YYYY-MM-DD)"),
+  to: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .describe("期間の最終日 (JST の YYYY-MM-DD、この日を含む)。初日から 62 日まで"),
+  comp_id: kintaiCompIdArg,
+});
+
+/**
+ * 勤怠 Worker が fold で読む **1 人ぶんの alc の行**と、そこから fold と同じ組み方で作った勤務を読む
+ * (relay `GET /kintai-relay/alc-events` → 勤怠 Worker `GET /api/kintai/alc-events`、ohishi-exp/rust-ichibanboshi#400)。
+ *
+ * **読むだけの tool** (scope を要求しない。`get_kintai_day_summaries` と同じ)。`get_kosoku_events` は社内 MariaDB しか
+ * 読まないので、打刻の無い会社 (北海大運) の勤務の組み方は、これまで theearth の画面 (ブラウザのログイン) でしか
+ * 確かめられなかった。応答はそのまま返す。
+ */
+export const getKintaiAlcEventsTool = {
+  name: "get_kintai_alc_events",
+  description:
+    "勤怠 Worker が fold で読む 1 人ぶんの alc (デジタコ) の行と、そこから fold と同じ組み方で作った勤務を返す " +
+    "(ohishi-exp/rust-ichibanboshi#400)。**読むだけ — 1 行も書かない。theearth にもログインしない。** " +
+    "応答: alc_only (打刻も社内 MariaDB の運行も持たず alc だけで勤務を組む乗務員か)・shifts[] (start/end/minutes)・" +
+    "operations[] (運行NO ごとの車輌・最初と最後の時刻・行数・イベント名ごとの行数)・events[] (alc の行、運行NO つき)・" +
+    "borrowed[] (写しから借りた打刻・運行の確定イベント)・warnings[]。" +
+    "shifts は渡した期間の行だけで組むので、端の勤務は fold (月の読み窓) の勤務と違いうる。" +
+    "get_kosoku_events は社内 MariaDB しか読まないので、北海大運など打刻の無い会社はこちらを使う。",
+  inputSchema: getKintaiAlcEventsArgs,
+  execute: async (env: Env, args: z.infer<typeof getKintaiAlcEventsArgs>) => {
+    const q = new URLSearchParams({ driver: args.driver, from: args.from, to: args.to });
+    if (args.comp_id) q.set("comp_id", args.comp_id);
+    return await callRelay(env, `/kintai-relay/alc-events?${q}`, undefined, { method: "GET" });
+  },
+};
+
 // ── get_kintai_diff ─────────────────────────────────────────────────────────
 
 /**
@@ -3699,6 +3743,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getKintaiAlcEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   getOperationZipTool as unknown as ToolEntry<z.ZodTypeAny>,
   listScrapeErrorsTool as unknown as ToolEntry<z.ZodTypeAny>,

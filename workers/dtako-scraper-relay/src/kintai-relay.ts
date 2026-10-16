@@ -63,6 +63,8 @@ const RECALC_PATH = "/api/kintai/recalc";
 const DAY_SUMMARIES_PATH = "/api/kintai/day-summaries";
 /** 同じ乗務員の勤務の時間帯の重なり (rust-ichibanboshi `src/routes/shift_overlaps.rs`)。 */
 const SHIFT_OVERLAPS_PATH = "/api/kintai/shift-overlaps";
+/** 勤怠 Worker の診断の口: fold が読む 1 人ぶんの alc の行と勤務 (ohishi-exp/rust-ichibanboshi#400)。読むだけ。 */
+const ALC_EVENTS_PATH = "/api/kintai/alc-events";
 /**
  * 月ごとの stale (畳み直しが要るか) だけを返す軽い口 (rust-ichibanboshi
  * `src/routes/stale_months.rs`、Refs #620)。`unko_diff` (alc の etags 掃引、約50秒) を
@@ -974,6 +976,41 @@ export async function relayKintaiShiftOverlaps(
     await deps.gcp(`${SHIFT_OVERLAPS_PATH}?${new URLSearchParams({ month })}`),
     "gcp kintai shift-overlaps",
   );
+}
+
+export interface KintaiAlcEventsInput {
+  /** 乗務員CD (数字)。 */
+  driver?: string;
+  /** 期間の初日 (JST の `YYYY-MM-DD`)。 */
+  from?: string;
+  /** 期間の最終日 (JST の `YYYY-MM-DD`、この日を含む)。 */
+  to?: string;
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DRIVER_RE = /^\d{1,10}$/;
+
+/**
+ * 勤怠 Worker が fold で読む **1 人ぶんの alc の行**と、そこから fold と同じ組み方で作った勤務を読む
+ * (`GET /api/kintai/alc-events`、ohishi-exp/rust-ichibanboshi#400)。打刻の無い会社 (北海大運) の勤務の組み方を、
+ * theearth の画面に頼らず確かめるための診断の口。
+ *
+ * **読むだけ** で、応答はそのまま返す (`relayKintaiDaySummaries` と同じ)。引数の形はここでも見る
+ * (受け側も 400 にするが、壊れた値で往復しない)。期間の上限 (62 日) は受け側が決める。
+ */
+export async function relayKintaiAlcEvents(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: KintaiAlcEventsInput,
+): Promise<unknown> {
+  const { driver = "", from = "", to = "" } = input;
+  if (!DRIVER_RE.test(driver)) {
+    throw new KintaiRelayError(`driver は乗務員CD (数字) で指定してください: ${driver}`);
+  }
+  if (!DATE_RE.test(from) || !DATE_RE.test(to)) {
+    throw new KintaiRelayError(`from・to は YYYY-MM-DD で指定してください: ${from}..${to}`);
+  }
+  const q = new URLSearchParams({ driver, from, to });
+  return readJson<unknown>(await deps.gcp(`${ALC_EVENTS_PATH}?${q}`), "gcp kintai alc-events");
 }
 
 export interface KintaiStaleMonthsInput {

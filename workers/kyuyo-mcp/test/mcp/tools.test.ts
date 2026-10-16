@@ -1713,6 +1713,8 @@ describe("ALL_TOOLS", () => {
     // 畳んだ結果を読むだけ (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。受け側に
     // POST が無く、この tool にも apply 相当の引数が無いので write 側に置かない
     "get_kintai_day_summaries",
+    // fold が読む 1 人ぶんの alc の行と勤務を読むだけ (ohishi-exp/rust-ichibanboshi#400)。上流は GET のみ
+    "get_kintai_alc_events",
     // オンプレ (kosoku-daily) と GCP (day_summaries) の突合。GET 2 本を叩くだけで
     // 1 バイトも書かない (Refs ohishi-exp/rust-ichibanboshi#205 の 50)
     "get_kintai_diff",
