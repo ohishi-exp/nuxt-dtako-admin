@@ -17,9 +17,11 @@ import {
   type WageConfig,
   type WageMaster,
 } from "../../../dtako-scraper-relay/src/restraint-wage";
-import type {
-  RestraintDriverSummary,
-  RestraintSummaryDay,
+import {
+  parseRestraintCsv,
+  restraintR2Paths,
+  type RestraintDriverSummary,
+  type RestraintSummaryDay,
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
 import {
@@ -456,6 +458,58 @@ export const getRestraintSummaryTool = {
     return { month: args.month, rows, no_data_drivers: noDataDrivers };
   },
 } satisfies ToolEntry<typeof getRestraintSummaryArgs>;
+
+// ===== get_restraint_days ====================================================
+
+const getRestraintDaysArgs = z
+  .object({
+    ...monthArgsShape,
+    driver: z.string().regex(/^\d{1,10}$/).describe("乗務員CD (数字)"),
+  })
+  .strict();
+
+/**
+ * theearth の拘束時間管理表 (F-ERS2010) の **1 人ぶんの日別の行をそのまま** 返す (始業時刻・終業時刻・
+ * 運転・荷役・休憩・拘束・休息・実働・摘要と、ヘッダと同順の生の列)。
+ *
+ * relay が取り込んだ CSV (`run_theearth_restraint_fetch` / 画面「拘束CSV取得」) を R2 から読み、relay と同じ
+ * パーサ (`parseRestraintCsv`) で読む。**読むだけで theearth にもログインしない。** `get_restraint_summary` は
+ * 日別の分だけを持ち始業・終業が無いので、勤怠 Worker の勤務と 1 本ずつ突き合わせるときはこちらを使う。
+ */
+export const getRestraintDaysTool = {
+  name: "get_restraint_days",
+  description:
+    "theearth の拘束時間管理表 (F-ERS2010) の 1 人ぶんの日別の行をそのまま返す (始業時刻・終業時刻・運転・荷役・休憩・" +
+    "拘束時間小計/合計・休息・実働・時間外・深夜・摘要、ヘッダと同順の生の列 columns)。" +
+    "relay が取り込んだ CSV を R2 から読むだけで、theearth にはログインしない (取り込みは run_theearth_restraint_fetch)。" +
+    "get_restraint_summary には始業・終業が無いので、勤務ごとに突き合わせるときはこちらを使う。",
+  inputSchema: getRestraintDaysArgs,
+  execute: async (env: Env, args: z.infer<typeof getRestraintDaysArgs>) => {
+    const [year, month] = args.month.split("-").map(Number) as [number, number];
+    const key = restraintR2Paths(r2Prefix(env), args.company, year, month, "all").csvLatest;
+    const obj = await env.DTAKO_R2.get(key);
+    if (!obj) {
+      throw new Error(
+        `R2 に拘束時間管理表 CSV がありません (${key})。run_theearth_restraint_fetch で取り込んでください`,
+      );
+    }
+    const report = parseRestraintCsv(new TextDecoder("shift_jis").decode(await obj.arrayBuffer()));
+    const block = report.drivers.find((d) => d.driverCd === args.driver);
+    if (!block) {
+      throw new Error(`拘束時間管理表 (${args.month}) に乗務員 ${args.driver} がいません`);
+    }
+    return {
+      month: args.month,
+      driver: block.driverCd,
+      driver_name: block.driverName,
+      branch_name: block.branchName,
+      fetched_at: obj.customMetadata?.fetchedAt ?? null,
+      header: block.header,
+      days: block.days,
+      totals: block.totals,
+    };
+  },
+} satisfies ToolEntry<typeof getRestraintDaysArgs>;
 
 // ===== get_kosoku_events ======================================================
 
@@ -3726,6 +3780,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getWageReportTool as unknown as ToolEntry<z.ZodTypeAny>,
   getRestraintSummaryTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getRestraintDaysTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKosokuEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getRestDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
