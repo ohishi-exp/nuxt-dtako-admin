@@ -59,6 +59,10 @@ const LIST_HTML_EMPTY = `<html><body><form>
   <input type="submit" name="ctl00$MainContent$ucDataSelect$btnRowCount" id="MainContent_ucDataSelect_btnRowCount" value="表示" />
 </form></body></html>`
 
+// 一覧の日付セル (実ページは <td><span>YY/MM/DD</span></td>)。年 2 桁で和暦/西暦を見分ける (detectWareki)。
+const LIST_HTML_WESTERN = LIST_HTML_EMPTY.replace('</form>', '<table><tr><td><span>26/07/14</span></td></tr></table></form>')
+const LIST_HTML_WAREKI = LIST_HTML_EMPTY.replace('</form>', '<table><tr><td><span>08/07/17</span></td></tr></table></form>')
+
 // 行 1 件入りの一覧ページ。
 const LIST_HTML_ONE_ROW = LIST_HTML_EMPTY.replace(
   '</form></body></html>',
@@ -297,11 +301,11 @@ describe('searchNet780', () => {
     expect(captured.body[captured.body.length - 1]).toMatch(/txtSDriver=(&|$)/)
   })
 
-  it('運行日 range を年月日フィールドへ分解して送る', async () => {
+  it('運行日 range を年月日フィールドへ分解して送る (一覧の日付が西暦なら年は西暦 2 桁)', async () => {
     const captured = { body: [] as string[] }
     const fetchImpl = capturingFetch(
       [
-        html(LIST_HTML_EMPTY),
+        html(LIST_HTML_WESTERN),
         html(CONFIG_HTML),
         html(CONFIG_HTML),
         html(LIST_HTML_EMPTY),
@@ -321,6 +325,30 @@ describe('searchNet780', () => {
     expect(applyBody).toContain('ucStartDate1$txtMonth=07')
     expect(applyBody).toContain('ucStartDate1$txtDay=01')
     expect(applyBody).toContain('ucEndDate1$txtDay=18')
+  })
+
+  it('一覧の日付が和暦 (北海大運) なら年は令和 2 桁で送る — 西暦 26 を送ると令和 26 年で 0 件になる', async () => {
+    const captured = { body: [] as string[] }
+    const fetchImpl = capturingFetch(
+      [
+        html(LIST_HTML_WAREKI),
+        html(CONFIG_HTML),
+        html(CONFIG_HTML),
+        html(LIST_HTML_EMPTY),
+        html(LIST_HTML_EMPTY),
+        html(CONFIG_HTML),
+        html(CONFIG_HTML),
+      ],
+      captured,
+    )
+    await searchNet780(
+      { cookies: new Map() },
+      { operationDateFrom: '2026-07-15', operationDateTo: '2026-07-29' },
+      fetchImpl,
+    )
+    const applyBody = decodeURIComponent(captured.body[0])
+    expect(applyBody).toContain('ucStartDate1$txtYear=08')
+    expect(applyBody).toContain('ucEndDate1$txtYear=08')
   })
 
   it('日付種別 select (ddlSortDay1) を読取日 (ReadNo) に固定して送る (運行日ではなく読取日で絞り込む、Refs #299)', async () => {

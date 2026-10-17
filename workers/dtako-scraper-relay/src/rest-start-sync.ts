@@ -7,7 +7,7 @@
  *
  * 1. 管理表の日別の行 (拘束時間小計・実働) と勤怠 Worker の `day_summaries` を、乗務員 + 始業 (分まで) で突き合わせ、
  *    **拘束も実働もちょうど +1 分**の勤務だけを候補にする ([`pickRestStartCandidates`])
- * 2. 候補の勤務を締める alc の `休息` の行を、勤怠 Worker の alc-events から探す ([`closingRest`])
+ * 2. 候補の勤務の中の alc の `休息` の行 (分割休息を含む) を、勤怠 Worker の alc-events から探す ([`shiftRests`])
  * 3. その運行の NET780 zip の `.spd` で最後の動きを出し (`net780-spd.ts`)、休息の開始と分が違えば補正にする
  *    ([`restStartOverride`])
  *
@@ -103,8 +103,8 @@ export function pickRestStartCandidates(theearth: RestStartRow[], kintai: RestSt
   return out.sort((a, b) => Number(a.driverCd) - Number(b.driverCd) || a.start.localeCompare(b.start));
 }
 
-/** 勤務を締める休息。`restStart` は alc の行の開始 (JST の `YYYY-MM-DD HH:MM:SS`)。 */
-export interface ClosingRest {
+/** 勤務の中の休息 (分割休息と、勤務を締める休息)。`restStart` は alc の行の開始 (JST の `YYYY-MM-DD HH:MM:SS`)。 */
+export interface ShiftRest {
   restStart: string;
   unkoNo: string;
 }
@@ -115,24 +115,32 @@ interface AlcEventsBody {
 }
 
 /**
- * 勤怠 Worker の `GET /api/kintai/alc-events` の本文から、始業が `start` (分まで) の勤務を締める `休息` の行。
- * 勤務の終わり (分) と開始が同じ分の `休息` の行で、始業より後のもの。見つからなければ `null`
- * (勤務が休息で締まっていない = 24 時間の日締めや運行終了で終わる勤務は補正の対象外)。
+ * 勤怠 Worker の `GET /api/kintai/alc-events` の本文から、始業が `start` (分まで) の勤務の**中の休息**すべて:
+ * 開始が始業より後で、勤務の終わり (分) の分以前の `休息` の行 (時刻順)。勤務を締める休息だけでなく分割休息も入る —
+ * theearth はどの休息でも直前の運転を最後の動きで終える (北海 7/17 乗務員 11 は分割休息 16:46:09 の直前が 1 分ずれた)。
+ * 勤務が見つからなければ空。運行NO (22 桁) の無い行は落とす (NET780 を引けない)。
  */
-export function closingRest(body: unknown, start: string): ClosingRest | null {
+export function shiftRests(body: unknown, start: string): ShiftRest[] {
   const b = body as AlcEventsBody;
   const shift = (b?.shifts ?? []).find((s) => s.start?.slice(0, 16) === start);
   const end = shift?.end?.slice(0, 16);
-  if (!end) return null;
-  const rest = (b.events ?? []).find(
-    (e) => e.state === "休息" && e.datetime?.slice(0, 16) === end && e.datetime > start && /^\d{22}$/.test(e.unko_no ?? ""),
-  );
-  return rest ? { restStart: rest.datetime!, unkoNo: rest.unko_no! } : null;
+  if (!end) return [];
+  return (b.events ?? [])
+    .filter(
+      (e) =>
+        e.state === "休息" &&
+        e.datetime !== undefined &&
+        e.datetime.slice(0, 16) > start &&
+        e.datetime.slice(0, 16) <= end &&
+        /^\d{22}$/.test(e.unko_no ?? ""),
+    )
+    .map((e) => ({ restStart: e.datetime!, unkoNo: e.unko_no! }))
+    .sort((x, y) => x.restStart.localeCompare(y.restStart));
 }
 
 /** 運行NO (22 桁、先頭 12 桁が出庫の `YYMMDDhhmmss`) → NET780 の検索の `start_ope` (`YYYY/MM/DD H:mm:ss`)。 */
 export function startOpeFromUnkoNo(unkoNo: string): string {
-  // 運行NO は呼び手 ([`closingRest`]) が 22 桁の数字だと確かめている
+  // 運行NO は呼び手 ([`shiftRests`]) が 22 桁の数字だと確かめている
   const [yy, mo, dd, hh, mi, ss] = unkoNo.slice(0, 12).match(/\d{2}/g)!;
   return `20${yy}/${mo}/${dd} ${Number(hh)}:${mi}:${ss}`;
 }
@@ -151,7 +159,7 @@ export interface RestStartOverrideItem {
  */
 export function restStartOverride(
   driverCd: string,
-  rest: ClosingRest,
+  rest: ShiftRest,
   lastMove: string | null,
 ): RestStartOverrideItem | null {
   if (lastMove === null || lastMove.slice(0, 16) === rest.restStart.slice(0, 16)) return null;
@@ -161,7 +169,7 @@ export function restStartOverride(
 /**
  * 候補の乗務員の alc-events を読む範囲 (月の前後 2 日。`YYYY-MM-DD`、`to` の日を含む)。勤務は渡した範囲の行だけで
  * 組まれる (24 時間の日締めの鎖は読み始めで切れる) ので、1 日だけでなく月ごと読む。月初の勤務は fold (月初の遡り)
- * と組み方が違いうるが、そのときは始業が合わず候補から外れるだけ ([`closingRest`] が `null`)。
+ * と組み方が違いうるが、そのときは始業が合わず候補から外れるだけ ([`shiftRests`] が空)。
  */
 export function alcEventsRange(month: string): { from: string; to: string } {
   const [y, m] = month.split("-").map(Number);

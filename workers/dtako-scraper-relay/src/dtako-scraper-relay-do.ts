@@ -516,15 +516,15 @@ import {
 import { lastMovementBefore, parseSpd, spdFromZip, wallSeconds, wallString } from "./net780-spd";
 import {
   alcEventsRange,
-  closingRest,
   kintaiRows,
   pickRestStartCandidates,
   restStartOverride,
   startOpeFromUnkoNo,
+  shiftRests,
   theearthReportRows,
-  type ClosingRest,
   type RestStartCandidate,
   type RestStartOverrideItem,
+  type ShiftRest,
 } from "./rest-start-sync";
 import { sendLineworksTextViaAlcInternalProxy } from "./lineworks-notify";
 import {
@@ -2653,8 +2653,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * POST /cron/rest-start-sync — body `{comp_id, month, apply?}` (Refs ohishi-exp/rust-ichibanboshi#322)。
    *
    * theearth の拘束時間管理表は休息の直前の運転を、休息ボタンではなく速度データで最後に車が動いた時刻で終える。
-   * 勤怠 Worker が管理表より拘束も実働も 1 分長い勤務だけ、その運行の NET780 zip の `.spd` から最後の動きを出し、
-   * 休息の開始の補正にする (pure 部分は `rest-start-sync.ts` / `net780-spd.ts`)。
+   * 勤怠 Worker が管理表より拘束も実働も 1 分長い勤務だけ、勤務の中の休息 (分割休息を含む) ごとに、その運行の
+   * NET780 zip の `.spd` から直前の最後の動きを出し、休息の開始の補正にする (pure 部分は `rest-start-sync.ts` / `net780-spd.ts`)。
    *
    * - 管理表は R2 の取り込み済み CSV (`run_theearth_restraint_fetch` の結果) を読む。theearth には取りに行かない
    * - NET780 はアーカイブ済みなら R2 から、無ければ theearth で 検索 → ダウンロード → R2/D1 に保存 (`searchAndArchiveNet780`)
@@ -2692,8 +2692,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(kintaiRelayFailStatus(err), `勤怠 Worker の日別サマリが読めません (${describeUnknownError(err)})`);
     }
 
-    // 候補の勤務を締める休息 (乗務員ごとに alc-events を 1 回)
-    type Found = { candidate: RestStartCandidate; rest: ClosingRest };
+    // 候補の勤務の中の休息 (分割休息を含む。乗務員ごとに alc-events を 1 回)
+    type Found = { candidate: RestStartCandidate; rest: ShiftRest };
     const found: Found[] = [];
     const results: Record<string, unknown>[] = [];
     const alcByDriver = new Map<string, unknown>();
@@ -2706,18 +2706,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         results.push({ ...c, status: "error", message: `alc-events が読めません (${describeUnknownError(err)})` });
         continue;
       }
-      const rest = closingRest(alcByDriver.get(c.driverCd), c.start);
-      if (rest) found.push({ candidate: c, rest });
-      else results.push({ ...c, status: "no_closing_rest" });
+      const rests = shiftRests(alcByDriver.get(c.driverCd), c.start);
+      for (const rest of rests) found.push({ candidate: c, rest });
+      if (!rests.length) results.push({ ...c, status: "no_rest" });
     }
 
     const jobState = this.makeTheearthLoginJobState();
     const overrides: RestStartOverrideItem[] = [];
     const run = async (): Promise<Response> => {
       const account = found.length ? await this.resolveAccount(compId) : null;
+      // 同じ運行の休息は 1 つの zip で足りる (分割休息と締める休息は同じ運行のことが多い)
+      const zips = new Map<string, ArrayBuffer>();
       for (const [index, { candidate, rest }] of found.entries()) {
         const base = { ...candidate, rest_start_at: rest.restStart, unko_no: rest.unkoNo };
-        let zip = await this.archivedNet780Zip(rest.unkoNo);
+        let zip = zips.get(rest.unkoNo) ?? (await this.archivedNet780Zip(rest.unkoNo));
         if (!zip) {
           if (!account) {
             results.push({ ...base, status: "error", message: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` });
@@ -2735,6 +2737,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             continue;
           }
         }
+        zips.set(rest.unkoNo, zip);
         let lastMove: string | null;
         try {
           const blocks = parseSpd(await spdFromZip(zip));

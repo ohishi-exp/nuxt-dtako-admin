@@ -38,6 +38,7 @@ import {
   hasLoginForm,
   postForm,
   serializeFormFields,
+  detectWareki,
   splitJapaneseDate,
   type CookieJar,
   type FetchLike,
@@ -216,10 +217,14 @@ function resolveConfigFields(html: string): Record<ConfigFieldId, FormFieldRef> 
   return refs;
 }
 
-/** F-GOS0030 の年入力は西暦2桁 (実機確認: "26" = 2026)。和暦企業への対応は未検証。 */
-function dateFieldValues(iso: string | undefined): { y: string; m: string; d: string } {
+/**
+ * F-GOS0030 の年入力は 2 桁で、**企業の和暦/西暦設定で解釈が変わる** (大石 27324455 は西暦 "26" = 2026、
+ * 北海大運 75700192 は和暦 "08" = 令和 8 年 = 2026。北海に西暦 "26" を送ると令和 26 年になり 0 件、実測 2026-10-17)。
+ * どちらかは一覧の日付セルから決める (`detectWareki`、CSV ダウンロードと同じ判定)。
+ */
+function dateFieldValues(iso: string | undefined, isWareki: boolean): { y: string; m: string; d: string } {
   if (!iso) return { y: "", m: "", d: "" };
-  return splitJapaneseDate(iso, false);
+  return splitJapaneseDate(iso, isWareki);
 }
 
 /** F-GOS0030 の日付種別 select (`ddlSortDay1`) の値。実機確定オプション:
@@ -232,9 +237,10 @@ const DATE_FILTER_TYPE_READ_NO = "ReadNo";
 function buildConfigOverrides(
   refs: Record<ConfigFieldId, FormFieldRef>,
   params: Net780SearchParams,
+  isWareki: boolean,
 ): Record<string, string> {
-  const from = dateFieldValues(params.operationDateFrom);
-  const to = dateFieldValues(params.operationDateTo);
+  const from = dateFieldValues(params.operationDateFrom, isWareki);
+  const to = dateFieldValues(params.operationDateTo, isWareki);
   return {
     [refs.txtSDriver.name]: params.driverCdFrom ?? "",
     [refs.txtEDriver.name]: params.driverCdTo ?? "",
@@ -361,7 +367,8 @@ export async function searchNet780(
     originalValues[refs[id].name] = baseline[refs[id].name] ?? "";
   }
 
-  await applyConfig(jar, configHtml, refs, buildConfigOverrides(refs, params), fetchImpl, timeoutMs);
+  const isWareki = detectWareki(listHtml);
+  await applyConfig(jar, configHtml, refs, buildConfigOverrides(refs, params, isWareki), fetchImpl, timeoutMs);
 
   let rows: Net780Row[] = [];
   let searchFailed = false;
