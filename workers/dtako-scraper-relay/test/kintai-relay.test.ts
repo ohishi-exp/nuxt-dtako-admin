@@ -23,6 +23,9 @@ import {
   tenantForCompId,
   buildDeps,
   kintaiAutoloader,
+  kintaiRestStartWriter,
+  putKintaiRestStartOverrides,
+  REST_START_OVERRIDES_PATH,
   kintaiReader,
   kintaiRelayFailStatus,
   KintaiWorkerUnavailableError,
@@ -2024,5 +2027,60 @@ describe("relayKintaiYTimeShifts — 月ごとの shift-days を並列で読ん�
       relayKintaiYTimeShifts({ gcp }, { driverCd: "abc", from: "2026-04-01", to: "2026-04-30" }, "tenant-a"),
     ).rejects.toThrow(/driver は数字で/);
     expect(paths).toHaveLength(0);
+  });
+});
+
+
+describe("kintaiRestStartWriter / putKintaiRestStartOverrides — 休息の開始の補正 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  const ITEM = { driver_cd: 11, rest_start_at: "2026-07-17 16:46:09", last_move_at: "2026-07-17 16:45:46", unko_no: "2607150330460000000233" };
+  function binding(res: Response = json({ written: 1 })) {
+    return { fetch: vi.fn(async (_url: string, _init?: RequestInit) => res) };
+  }
+
+  it("KINTAI_COMP_IDS の会社にも token・テナント付きで PUT し、書いた件数を返す", async () => {
+    const kintai = binding();
+    const onSecretError = vi.fn();
+    const writer = await kintaiRestStartWriter(
+      { KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_COMP_IDS: "2002", KINTAI_WRITE_TOKEN: { get: async () => "wt" } },
+      "2002",
+      KINTAI_ACCOUNTS,
+      onSecretError,
+    );
+    expect(await putKintaiRestStartOverrides(writer!, [ITEM])).toEqual({ written: 1 });
+    expect(kintai.fetch).toHaveBeenCalledWith(`https://ichibanboshi-kintai${REST_START_OVERRIDES_PATH}`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        "x-kintai-write-token": "wt",
+        "x-kintai-tenant-id": "tenant-2002",
+      },
+      body: JSON.stringify({ items: [ITEM] }),
+    });
+    expect(onSecretError).not.toHaveBeenCalled();
+    // 補正の口だけ。他の書き込みの口には送らない
+    await expect(writer!.gcp("/api/kintai/recalc", { method: "POST" })).rejects.toThrow("path not allowed");
+  });
+
+  it("勤怠 Worker が失敗したら投げる", async () => {
+    const kintai = binding(json({ error: "x" }, 400));
+    const writer = await kintaiRestStartWriter(
+      { KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: { get: async () => "wt" } },
+      "1001",
+      KINTAI_ACCOUNTS,
+      vi.fn(),
+    );
+    await expect(putKintaiRestStartOverrides(writer!, [ITEM])).rejects.toThrow("gcp kintai rest-start-overrides: status 400");
+  });
+
+  it("対象外の会社は null。token が読めないときも null で onSecretError に渡す", async () => {
+    const kintai = binding();
+    expect(
+      await kintaiRestStartWriter({ KINTAI: kintai, KINTAI_COMP_ID: "1001", KINTAI_WRITE_TOKEN: { get: async () => "wt" } }, "2002", KINTAI_ACCOUNTS, vi.fn()),
+    ).toBeNull();
+    const onSecretError = vi.fn();
+    expect(await kintaiRestStartWriter({ KINTAI: kintai, KINTAI_COMP_ID: "1001" }, "1001", KINTAI_ACCOUNTS, onSecretError)).toBeNull();
+    expect(onSecretError).toHaveBeenCalledWith(new Error("KINTAI_WRITE_TOKEN が読めません"));
+    expect(kintai.fetch).not.toHaveBeenCalled();
   });
 });

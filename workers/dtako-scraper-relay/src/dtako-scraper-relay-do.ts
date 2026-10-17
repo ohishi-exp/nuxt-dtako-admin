@@ -149,6 +149,9 @@ import {
   kintaiChangeLogInputError,
   relayKintaiChangeLog,
   relayKintaiDaySummaries,
+  relayKintaiAlcEvents,
+  kintaiRestStartWriter,
+  putKintaiRestStartOverrides,
   relayKintaiShiftOverlaps,
   relayWageRangeGet,
   relayWageSnapshotPut,
@@ -510,6 +513,19 @@ import {
   type Net780ArchiveItem,
   type Net780ArchiveResult,
 } from "./net780-archive";
+import { lastMovementBefore, parseSpd, spdFromZip, wallSeconds, wallString } from "./net780-spd";
+import {
+  alcEventsRange,
+  closingRest,
+  kintaiRows,
+  pickRestStartCandidates,
+  restStartOverride,
+  startOpeFromUnkoNo,
+  theearthReportRows,
+  type ClosingRest,
+  type RestStartCandidate,
+  type RestStartOverrideItem,
+} from "./rest-start-sync";
 import { sendLineworksTextViaAlcInternalProxy } from "./lineworks-notify";
 import {
   buildScrapeFailureNotification,
@@ -1293,6 +1309,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 認証は index.ts の /kintai-relay/net780-archive 側 (X-Alc-Proxy-Secret) が持つ。
     if (url.pathname === "/cron/dtako/net780-archive" && request.method === "POST") {
       return this.handleCronDtakoNet780Archive(request);
+    }
+    // 休息の開始の補正 (管理表と 1 分ずれた勤務だけ NET780 の速度データを読む、Refs ohishi-exp/rust-ichibanboshi#322)。
+    // 認証は index.ts の /kintai-relay/rest-start-sync 側 (X-Alc-Proxy-Secret)。
+    if (url.pathname === "/cron/rest-start-sync" && request.method === "POST") {
+      return this.handleCronRestStartSync(request);
     }
     if (url.pathname === "/cron/etc" && request.method === "POST") {
       return this.handleCronEtc(request);
@@ -2628,6 +2649,139 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return this.enqueueScrape(() => this.runNet780ArchiveBatch(account, parsed.items));
   }
 
+  /**
+   * POST /cron/rest-start-sync — body `{comp_id, month, apply?}` (Refs ohishi-exp/rust-ichibanboshi#322)。
+   *
+   * theearth の拘束時間管理表は休息の直前の運転を、休息ボタンではなく速度データで最後に車が動いた時刻で終える。
+   * 勤怠 Worker が管理表より拘束も実働も 1 分長い勤務だけ、その運行の NET780 zip の `.spd` から最後の動きを出し、
+   * 休息の開始の補正にする (pure 部分は `rest-start-sync.ts` / `net780-spd.ts`)。
+   *
+   * - 管理表は R2 の取り込み済み CSV (`run_theearth_restraint_fetch` の結果) を読む。theearth には取りに行かない
+   * - NET780 はアーカイブ済みなら R2 から、無ければ theearth で 検索 → ダウンロード → R2/D1 に保存 (`searchAndArchiveNet780`)
+   * - **既定は書かない** (候補と補正を返すだけ)。`apply: true` で勤怠 Worker に補正を PUT し、月を畳み直す (`foldMonth`)
+   * - theearth に行くときだけ `scrapeQueue` で直列化する (同一 comp_id への並行アクセスは hang/500 する)
+   */
+  private async handleCronRestStartSync(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; month?: unknown; apply?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+    const month = typeof body.month === "string" ? body.month : "";
+    if (!compId || !/^\d{4}-\d{2}$/.test(month)) return dvrJsonError(400, "comp_id / month (YYYY-MM) は必須です");
+    const apply = body.apply === true;
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const ctx = await this.buildKintaiRelayContext(compId, "rest_start_sync", true);
+    if (ctx instanceof Response) return ctx;
+
+    const [year, mon] = month.split("-").map(Number);
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const csv = await bucket.get(restraintR2Paths(prefix, compId, year, mon, "all").csvLatest);
+    if (!csv) {
+      return dvrJsonError(404, `拘束時間管理表の CSV が R2 にありません (${month}。run_theearth_restraint_fetch で取り込んでください)`);
+    }
+    const report = parseRestraintCsv(new TextDecoder("shift_jis").decode(await csv.arrayBuffer()));
+    let candidates: RestStartCandidate[];
+    try {
+      const days = await relayKintaiDaySummaries(ctx.deps, { month });
+      candidates = pickRestStartCandidates(theearthReportRows(report), kintaiRows(days));
+    } catch (err) {
+      return dvrJsonError(kintaiRelayFailStatus(err), `勤怠 Worker の日別サマリが読めません (${describeUnknownError(err)})`);
+    }
+
+    // 候補の勤務を締める休息 (乗務員ごとに alc-events を 1 回)
+    type Found = { candidate: RestStartCandidate; rest: ClosingRest };
+    const found: Found[] = [];
+    const results: Record<string, unknown>[] = [];
+    const alcByDriver = new Map<string, unknown>();
+    for (const c of candidates) {
+      try {
+        if (!alcByDriver.has(c.driverCd)) {
+          alcByDriver.set(c.driverCd, await relayKintaiAlcEvents(ctx.deps, { driver: c.driverCd, ...alcEventsRange(month) }));
+        }
+      } catch (err) {
+        results.push({ ...c, status: "error", message: `alc-events が読めません (${describeUnknownError(err)})` });
+        continue;
+      }
+      const rest = closingRest(alcByDriver.get(c.driverCd), c.start);
+      if (rest) found.push({ candidate: c, rest });
+      else results.push({ ...c, status: "no_closing_rest" });
+    }
+
+    const jobState = this.makeTheearthLoginJobState();
+    const overrides: RestStartOverrideItem[] = [];
+    const run = async (): Promise<Response> => {
+      const account = found.length ? await this.resolveAccount(compId) : null;
+      for (const [index, { candidate, rest }] of found.entries()) {
+        const base = { ...candidate, rest_start_at: rest.restStart, unko_no: rest.unkoNo };
+        let zip = await this.archivedNet780Zip(rest.unkoNo);
+        if (!zip) {
+          if (!account) {
+            results.push({ ...base, status: "error", message: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` });
+            continue;
+          }
+          try {
+            const got = await this.searchAndArchiveNet780(account, jobState, { opeNo: rest.unkoNo, startOpe: startOpeFromUnkoNo(rest.unkoNo) }, index);
+            if (!got.zip) {
+              results.push({ ...base, status: got.status, message: got.message });
+              continue;
+            }
+            zip = got.zip;
+          } catch (err) {
+            results.push({ ...base, status: "error", message: `NET780 が取れません (${describeUnknownError(err)})` });
+            continue;
+          }
+        }
+        let lastMove: string | null;
+        try {
+          const blocks = parseSpd(await spdFromZip(zip));
+          const t = lastMovementBefore(blocks, wallSeconds(rest.restStart));
+          lastMove = t === null ? null : wallString(t);
+        } catch (err) {
+          results.push({ ...base, status: "error", message: `.spd が読めません (${describeUnknownError(err)})` });
+          continue;
+        }
+        const item = restStartOverride(candidate.driverCd, rest, lastMove);
+        if (item) overrides.push(item);
+        results.push({ ...base, status: item ? "override" : "same_minute", last_move_at: lastMove });
+      }
+
+      let written: number | null = null;
+      let fold: unknown = null;
+      if (apply && overrides.length) {
+        const writer = await kintaiRestStartWriter(this.env, compId, await this.dtakoAccountsParsed(), (err) =>
+          console.error(JSON.stringify({ rest_start_sync: "secret-error", error: describeUnknownError(err) })),
+        );
+        if (!writer) return dvrJsonError(503, KINTAI_WORKER_UNAVAILABLE);
+        try {
+          written = (await putKintaiRestStartOverrides(writer, overrides)).written;
+          fold = await foldMonth(ctx.deps, { month, apply: true });
+        } catch (err) {
+          return dvrJsonError(kintaiRelayFailStatus(err), `補正の書き込み・畳み直しに失敗しました (${describeUnknownError(err)})`);
+        }
+      }
+      const summary = {
+        comp_id: compId,
+        month,
+        apply,
+        candidates: candidates.length,
+        overrides,
+        written,
+        fold,
+        results,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      };
+      console.log(JSON.stringify({ rest_start_sync: "done", comp_id: compId, month, apply, candidates: candidates.length, overrides: overrides.length, written }));
+      return Response.json(summary);
+    };
+    // アーカイブ済みで足りれば theearth に行かない — そのときはキューに並ばない
+    return found.length ? this.enqueueScrape(run) : run();
+  }
+
   /** D1 カタログ (`dtako_uploads`) に operation_no が**単一運行として**既にあるか
    * (`/api/net780/by-operation` が 200 を返す条件と同じ。`operation_count !== 1` の
    * 旧 archive は使えないので false → 取り直す)。D1 未 binding や読み出し失敗は
@@ -2645,6 +2799,82 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ net780_archive: "catalog_lookup_failed", operation_no: operationNo, error: describeUnknownError(err) }));
       return false;
+    }
+  }
+
+  /**
+   * 1 運行の NET780 を theearth で 検索 → ダウンロード → R2/D1 に保存する ([`runNet780ArchiveBatch`] の 2〜3)。
+   * 保存できたら zip も返す (`/cron/rest-start-sync` が `.spd` を読む)。session 切れはそのまま投げる。
+   */
+  private async searchAndArchiveNet780(
+    account: DtakoAccountRaw,
+    jobState: { reloginAttempts: number; logins: Array<LoginResult & { at: number }> },
+    item: Net780ArchiveItem,
+    index: number,
+  ): Promise<Net780ArchiveResult & { zip?: ArrayBuffer }> {
+    const key = deriveNet780ArchiveSearchKey(item);
+    if (!key) {
+      return {
+        ope_no: item.opeNo,
+        status: "error",
+        message: "運行NO から車輌CD を取り出せません (13〜22 桁目が 0 のみ、または 8 桁超)",
+      };
+    }
+    let row: Net780Row | null = null;
+    let lastParams: Net780SearchParams | null = null;
+    let lastRowCount = 0;
+    for (const params of net780ArchiveSearchPlan(key)) {
+      const rows = await this.withTheearthLoginSession(account, jobState, (jar) => searchNet780(jar, params));
+      lastParams = params;
+      lastRowCount = rows.length;
+      row = pickNet780RowForOperation(rows, item.opeNo);
+      if (row) break;
+    }
+    if (!row) {
+      const message = describeNet780NotFound(key, lastParams!, lastRowCount, NET780_SEARCH_MAX_ROWS);
+      console.log(
+        JSON.stringify({ net780_archive: "not_found", comp_id: account.comp_id, ope_no: item.opeNo, index, message }),
+      );
+      return { ope_no: item.opeNo, status: "not_found", message };
+    }
+    const target = net780DownloadTargetFromRow(row);
+    const zip = await retryNet780Download(() =>
+      this.withTheearthLoginSession(account, jobState, (jar) => downloadNet780Zip(jar, [target])),
+    );
+    const saved = await this.saveNet780ToR2(account.comp_id, [target], zip);
+    if (!saved.ok) {
+      return { ope_no: item.opeNo, status: "error", message: `アーカイブの保存に失敗しました (${saved.error})` };
+    }
+    console.log(
+      JSON.stringify({
+        net780_archive: "archived",
+        comp_id: account.comp_id,
+        ope_no: item.opeNo,
+        index,
+        bytes: zip.byteLength,
+        zip_key: saved.zipKey,
+        dedup: saved.dedup,
+      }),
+    );
+    return { ope_no: item.opeNo, status: "archived", bytes: zip.byteLength, zip };
+  }
+
+  /** アーカイブ済みの NET780 zip (D1 `dtako_uploads` の単一運行の行 → R2)。無い・読めないときは `null`。 */
+  private async archivedNet780Zip(operationNo: string): Promise<ArrayBuffer | null> {
+    const db = this.env.DTAKO_DB;
+    const bucket = this.env.DTAKO_R2;
+    if (!db || !bucket) return null;
+    try {
+      const row = await db
+        .prepare(`SELECT r2_key, operation_count FROM dtako_uploads WHERE dataset = 'net780' AND operation_no = ? LIMIT 1`)
+        .bind(operationNo)
+        .first<{ r2_key: string | null; operation_count: number | null }>();
+      if (!isNet780CatalogRowUsable(row) || !row?.r2_key) return null;
+      const obj = await bucket.get(row.r2_key);
+      return obj ? await obj.arrayBuffer() : null;
+    } catch (err) {
+      console.error(JSON.stringify({ rest_start_sync: "archived_zip_failed", operation_no: operationNo, error: describeUnknownError(err) }));
+      return null;
     }
   }
 
@@ -2670,51 +2900,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (await this.isNet780Archived(item.opeNo)) {
         return { ope_no: item.opeNo, status: "already" };
       }
-      const key = deriveNet780ArchiveSearchKey(item);
-      if (!key) {
-        return {
-          ope_no: item.opeNo,
-          status: "error",
-          message: "運行NO から車輌CD を取り出せません (13〜22 桁目が 0 のみ、または 8 桁超)",
-        };
-      }
-      let row: Net780Row | null = null;
-      let lastParams: Net780SearchParams | null = null;
-      let lastRowCount = 0;
-      for (const params of net780ArchiveSearchPlan(key)) {
-        const rows = await this.withTheearthLoginSession(account, jobState, (jar) => searchNet780(jar, params));
-        lastParams = params;
-        lastRowCount = rows.length;
-        row = pickNet780RowForOperation(rows, item.opeNo);
-        if (row) break;
-      }
-      if (!row) {
-        const message = describeNet780NotFound(key, lastParams!, lastRowCount, NET780_SEARCH_MAX_ROWS);
-        console.log(
-          JSON.stringify({ net780_archive: "not_found", comp_id: account.comp_id, ope_no: item.opeNo, index, message }),
-        );
-        return { ope_no: item.opeNo, status: "not_found", message };
-      }
-      const target = net780DownloadTargetFromRow(row);
-      const zip = await retryNet780Download(() =>
-        this.withTheearthLoginSession(account, jobState, (jar) => downloadNet780Zip(jar, [target])),
-      );
-      const saved = await this.saveNet780ToR2(account.comp_id, [target], zip);
-      if (!saved.ok) {
-        return { ope_no: item.opeNo, status: "error", message: `アーカイブの保存に失敗しました (${saved.error})` };
-      }
-      console.log(
-        JSON.stringify({
-          net780_archive: "archived",
-          comp_id: account.comp_id,
-          ope_no: item.opeNo,
-          index,
-          bytes: zip.byteLength,
-          zip_key: saved.zipKey,
-          dedup: saved.dedup,
-        }),
-      );
-      return { ope_no: item.opeNo, status: "archived", bytes: zip.byteLength };
+      const result = await this.searchAndArchiveNet780(account, jobState, item, index);
+      delete result.zip;
+      return result;
     });
 
     const summary = summarizeNet780ArchiveBatch(items, batch);

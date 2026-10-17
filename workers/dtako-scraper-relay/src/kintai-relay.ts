@@ -417,6 +417,41 @@ export async function kintaiAutoloader(
   return null;
 }
 
+/** 勤怠 Worker の休息の開始の補正の口 (Refs ohishi-exp/rust-ichibanboshi#322)。 */
+export const REST_START_OVERRIDES_PATH = "/api/kintai/rest-start-overrides";
+
+/**
+ * 休息の開始の補正 (`PUT /api/kintai/rest-start-overrides`) の送り先。補正は Supabase だけを書くので
+ * `KINTAI_COMP_IDS` で開いた会社 (北海大運) も送れる (`kintaiWorkerScope(…, true)`)。binding が無い・対象外の会社・
+ * テナントが引けない・token が読めないときは `null` (呼び手は 503)。token が読めないときは `onSecretError` に渡す。
+ */
+export async function kintaiRestStartWriter(
+  env: KintaiAutoloadEnv,
+  compId: string,
+  accounts: unknown,
+  onSecretError: (err: unknown) => void,
+): Promise<Pick<KintaiRelayDeps, "gcp"> | null> {
+  const kintai = kintaiWorkerFor(env.KINTAI, compId, kintaiWorkerScope(env, accounts, true));
+  if (!kintai) return null;
+  const writeToken = await readKintaiWriteToken(env, compId, onSecretError);
+  if (writeToken) return kintaiWriteDeps(kintai, writeToken, REST_START_OVERRIDES_PATH);
+  onSecretError(new Error("KINTAI_WRITE_TOKEN が読めません"));
+  return null;
+}
+
+/** 休息の開始の補正を書く (同じ鍵は置き換え。畳み直しはしない — 呼び手が続けて [`foldMonth`] を回す)。 */
+export async function putKintaiRestStartOverrides(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  items: readonly { driver_cd: number; rest_start_at: string; last_move_at: string; unko_no: string }[],
+): Promise<{ written: number }> {
+  const res = await deps.gcp(REST_START_OVERRIDES_PATH, {
+    method: "PUT",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  return readJson<{ written: number }>(res, "gcp kintai rest-start-overrides");
+}
+
 /**
  * `compId` の勤怠 Worker の書き込み token (`KINTAI_WRITE_TOKEN`)。binding が無い・勤怠の対象会社の集合
  * ([`kintaiCompSet`]) に居ない会社なら読まずに `""`。どの口に書けるかは token ではなく [`buildDeps`] が決める。

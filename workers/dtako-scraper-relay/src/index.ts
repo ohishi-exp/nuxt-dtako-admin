@@ -300,6 +300,10 @@ export default {
       return handleTheearthRestraintRun(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/rest-start-sync" && request.method === "POST") {
+      // 休息の開始の補正 (管理表と 1 分ずれた勤務だけ NET780 の速度データを読む)。DO の /cron/rest-start-sync へ転送する
+      return handleKintaiRestStartSync(request, env);
+    }
     if (url.pathname === "/kintai-relay/theearth-restraint-calc" && request.method === "POST") {
       // 上の取り込みの前に theearth (F-ERS2012) で拘束時間を集計し直す。DO 内部
       // (/cron/theearth-restraint-calc) へ転送するだけ
@@ -1223,7 +1227,12 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
  * `comp_id` 省略時は `KINTAI_COMP_ID`。`month` の形式 (YYYY-MM) は DO 側が見る — ここでは素通し。
  * DO の応答 (成功も失敗も) はそのまま返し、ここで reshape しない。
  */
-async function forwardCompMonthToDo(request: Request, env: RelayWorkerEnv, doPath: string): Promise<Response> {
+async function forwardCompMonthToDo(
+  request: Request,
+  env: RelayWorkerEnv,
+  doPath: string,
+  opts: { apply?: boolean } = {},
+): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -1235,7 +1244,7 @@ async function forwardCompMonthToDo(request: Request, env: RelayWorkerEnv, doPat
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
 
-  let body: { month?: unknown; comp_id?: unknown };
+  let body: { month?: unknown; comp_id?: unknown; apply?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -1251,7 +1260,8 @@ async function forwardCompMonthToDo(request: Request, env: RelayWorkerEnv, doPat
   const res = await env.RELAY.get(id).fetch(`https://relay.internal${doPath}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ comp_id: compId, month }),
+    // `apply` を受ける口だけ渡す (true のときだけ書く。それ以外は false)
+    body: JSON.stringify(opts.apply ? { comp_id: compId, month, apply: body.apply === true } : { comp_id: compId, month }),
   });
   return new Response(res.body, {
     status: res.status,
@@ -1296,6 +1306,16 @@ export async function handleTheearthRestraintRun(request: Request, env: RelayWor
  */
 export async function handleTheearthRestraintCalc(request: Request, env: RelayWorkerEnv): Promise<Response> {
   return forwardCompMonthToDo(request, env, "/cron/theearth-restraint-calc");
+}
+
+/**
+ * `POST /kintai-relay/rest-start-sync` — body `{month, comp_id?, apply?}` (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * theearth の管理表より勤怠 Worker が拘束も実働も 1 分長い勤務だけ、NET780 の速度データで休息直前の最後の動きを出し、
+ * 休息の開始の補正にする。既定は書かない (`apply: true` で補正を勤怠 Worker に書いて月を畳み直す)。
+ * 関門は `forwardCompMonthToDo`、処理は DO の `/cron/rest-start-sync`。
+ */
+export async function handleKintaiRestStartSync(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardCompMonthToDo(request, env, "/cron/rest-start-sync", { apply: true });
 }
 
 /**

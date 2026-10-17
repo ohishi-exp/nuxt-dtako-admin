@@ -2155,6 +2155,45 @@ export const runTheearthRestraintFetchTool = {
   },
 };
 
+// ── run_kintai_rest_start_sync ──────────────────────────────────────────────
+
+const runKintaiRestStartSyncArgs = z
+  .object({
+    comp_id: z.string().regex(/^\d{8}$/).describe("会社 (dtako の comp_id、8 桁)。勤怠の対象会社 (KINTAI_COMP_ID / KINTAI_COMP_IDS) だけ"),
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("対象の年月 (YYYY-MM)。1 回 1 か月"),
+    apply: z.boolean().optional().describe("true で補正を勤怠 Worker に書き、その月を畳み直す。省略・false は候補と補正を返すだけ (書かない)"),
+  })
+  .strict();
+
+/**
+ * 休息の開始の補正 (Refs ohishi-exp/rust-ichibanboshi#322)。relay の `POST /kintai-relay/rest-start-sync` を叩くだけ
+ * (運ぶロジックはここに無い)。
+ */
+export const runKintaiRestStartSyncTool = {
+  name: "run_kintai_rest_start_sync",
+  description:
+    "theearth の拘束時間管理表は、休息の直前の運転を休息ボタンではなく**速度データで最後に車が動いた時刻**で終える。" +
+    "最後の動きとボタンが同じ分に収まらないと、勤怠 Worker の拘束・実働が管理表より 1 分長くなる。" +
+    "この tool は 1 か月ぶん、管理表 (R2 に取り込み済みの CSV。無ければ先に run_theearth_restraint_fetch) と勤怠 Worker の日別サマリを、" +
+    "乗務員 + 始業で突き合わせ、**拘束も実働もちょうど +1 分の勤務だけ**、締めている休息の運行の NET780 (3要素解析データ) の .spd から" +
+    "最後の動きを出して補正 (休息の開始 → 最後の動き) にする。NET780 はアーカイブ済みなら R2 から読み、無ければ relay が " +
+    "DTAKO_ACCOUNTS で theearth にログインして取ってアーカイブする (**人のセッションを蹴りうる** — `theearth_kicked`)。" +
+    "**既定は書かない** (`apply` 省略 / false で候補・補正・各勤務の結果 `results[].status` を返すだけ。status は " +
+    "`override` / `same_minute` (同じ分で直す必要なし) / `no_closing_rest` (休息で締まっていない) / `not_found` / `error`)。" +
+    "`apply: true` で補正を勤怠 Worker (`PUT /api/kintai/rest-start-overrides`) に書き、その月を畳み直す (応答の `written`・`fold`)。" +
+    "comp_id・month とも必須で、1 回 1 社 1 か月。**並列に呼ばない**。`/kintai-relay/*` (X-Alc-Proxy-Secret 方式) を叩く。",
+  inputSchema: runKintaiRestStartSyncArgs,
+  // **write tool。** NET780 のアーカイブ (R2・D1) と、apply なら勤怠 Worker (Supabase) を書き、theearth へログインしうる
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runKintaiRestStartSyncArgs>) => {
+    return await callRelay(env, "/kintai-relay/rest-start-sync", {
+      month: args.month,
+      comp_id: args.comp_id,
+      apply: args.apply === true,
+    });
+  },
+};
+
 // ── run_theearth_restraint_calc ─────────────────────────────────────────────
 
 /**
@@ -3789,6 +3828,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintResummarizeTool as unknown as ToolEntry<z.ZodTypeAny>,
   runTheearthRestraintFetchTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runKintaiRestStartSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runTheearthRestraintCalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,

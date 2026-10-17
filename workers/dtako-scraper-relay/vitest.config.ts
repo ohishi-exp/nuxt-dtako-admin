@@ -86,6 +86,8 @@ export default defineConfig({
         'src/litigation-case.ts',
         'src/litigation-check.ts',
         'src/litigation-output.ts',
+        'src/net780-spd.ts',
+        'src/rest-start-sync.ts',
       ],
       thresholds: {
         lines: 100,
