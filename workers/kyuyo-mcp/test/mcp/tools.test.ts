@@ -1765,6 +1765,7 @@ describe("ALL_TOOLS", () => {
     run_kintai_restraint_resummarize: "mcp.write",
     // theearth へ自前ログインし、拘束時間管理表を R2・D1・勤怠 Worker へ書く
     run_theearth_restraint_fetch: "mcp.write",
+    run_kintai_rest_start_sync: "mcp.write",
     // theearth の拘束時間集計を走らせ (拘束時間管理表を書き換える)、続けて同じ取り込みをする
     run_theearth_restraint_calc: "mcp.write",
     // theearth 乗務員マスタ → alc employees の一括 upsert (Refs ippoan/alc-app-s3#125)
