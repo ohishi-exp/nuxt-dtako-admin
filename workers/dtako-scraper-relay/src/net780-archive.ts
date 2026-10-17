@@ -105,6 +105,28 @@ export function deriveNet780ArchiveSearchKey(item: Net780ArchiveItem): Net780Arc
   return { vehicleCd, startDate: `${y}-${m}-${d}` };
 }
 
+/**
+ * 一覧 (3要素解析データダウンロード) で見つからない運行を、**運行NO から直接選ぶ**ダウンロードの対象。
+ * 一覧に出るのは読取日がおよそ 3 か月以内の運行だけで、それより古い運行は検索では引けない (北海 6/17 出庫の
+ * 運行、読取日 6/21 を 10/17 に検索して 0 件)。ダウンロードの postback は一覧の行ではなく隠し欄
+ * (`txtOperationNo`・`txtStartDateTime`) の値で運行を選ぶので、一覧に無くても取れる (実機確認 2026-10-17)。
+ * 出庫日時は運行NO の先頭 12 桁 (`YYMMDDhhmmss`) から、一覧の行と同じ `YYYY/MM/DD HH:mm:ss` で組む。
+ */
+export function net780DirectTarget(opeNo: string): Net780DownloadTarget {
+  const [yy, mo, dd, hh, mi, ss] = opeNo.slice(0, 12).match(/\d{2}/g)!;
+  return { operationNo: opeNo, startDateTime: `20${yy}/${mo}/${dd} ${hh}:${mi}:${ss}` };
+}
+
+/**
+ * 直接選んで取った zip が、その運行のものか。zip の中は `{車輌CD}/{YYYYMMDD_HHMMSS}-0-0-{車輌CD}/…` の入れ子なので、
+ * 出庫の時刻と車輌CD (運行NO の 13〜22 桁目、先頭の 0 を落とす) が一致するフォルダがあるかで見る。
+ */
+export function net780ZipHasOperation(entries: readonly string[], opeNo: string): boolean {
+  const stamp = `20${opeNo.slice(0, 6)}_${opeNo.slice(6, 12)}-`;
+  const vehicle = opeNo.slice(12, 22).replace(/^0+/, "");
+  return entries.some((e) => e.split("/")[0] === vehicle && e.includes(`/${stamp}`));
+}
+
 /** "YYYY-MM-DD" に日数を足す (UTC で計算、暦日の加算だけなので TZ は効かない)。 */
 export function addDaysIso(date: string, days: number): string {
   const t = Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)));
