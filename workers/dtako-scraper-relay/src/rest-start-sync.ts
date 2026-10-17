@@ -112,6 +112,7 @@ export interface ShiftRest {
 interface AlcEventsBody {
   shifts?: { start?: string; end?: string }[];
   events?: { datetime?: string; state?: string; unko_no?: string | null }[];
+  rest_start_overrides?: { rest_start_at: string; last_move_at: string }[];
 }
 
 /**
@@ -119,19 +120,25 @@ interface AlcEventsBody {
  * 開始が始業より後で、勤務の終わり (分) の分以前の `休息` の行 (時刻順)。勤務を締める休息だけでなく分割休息も入る —
  * theearth はどの休息でも直前の運転を最後の動きで終える (北海 7/17 乗務員 11 は分割休息 16:46:09 の直前が 1 分ずれた)。
  * 勤務が見つからなければ空。運行NO (22 桁) の無い行は落とす (NET780 を引けない)。
+ *
+ * 補正済みの休息は、勤務 (`shifts`) は補正後で組まれるのに行 (`events`) は元の時刻のまま返る。なので勤務の内外は
+ * 補正後 (`rest_start_overrides` の `last_move_at`) で見て、`restStart` は元の時刻を返す。同じ補正をもう一度
+ * 作って書き直せる (upsert) ので、書いた後に月ゲートが閉じていた月も、叩き直せば畳み直される。
  */
 export function shiftRests(body: unknown, start: string): ShiftRest[] {
   const b = body as AlcEventsBody;
   const shift = (b?.shifts ?? []).find((s) => s.start?.slice(0, 16) === start);
   const end = shift?.end?.slice(0, 16);
   if (!end) return [];
+  const moved = new Map((b.rest_start_overrides ?? []).map((o) => [o.rest_start_at, o.last_move_at]));
+  const at = (datetime: string) => (moved.get(datetime) ?? datetime).slice(0, 16);
   return (b.events ?? [])
     .filter(
       (e) =>
         e.state === "休息" &&
         e.datetime !== undefined &&
-        e.datetime.slice(0, 16) > start &&
-        e.datetime.slice(0, 16) <= end &&
+        at(e.datetime) > start &&
+        at(e.datetime) <= end &&
         /^\d{22}$/.test(e.unko_no ?? ""),
     )
     .map((e) => ({ restStart: e.datetime!, unkoNo: e.unko_no! }))
