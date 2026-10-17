@@ -171,6 +171,19 @@ describe("shiftRests", () => {
     expect(shiftRests(null, "2026-07-17 05:17")).toEqual([]);
     expect(shiftRests({ shifts: [{ start: "2026-07-17 05:17:00", end: "2026-07-18 02:26:00" }] }, "2026-07-17 05:17")).toEqual([]);
   });
+  it("補正済みの休息は補正後の時刻で勤務の内外を見て、元の時刻を返す (書き直せる)", () => {
+    // 北海 10/11 乗務員 9 の形: 補正 08:39:42 → 08:38:54 を書いた後、勤務は 08:38 で終わるが行は 08:39:42 のまま
+    const unko = "2610081322520000000250";
+    const applied = {
+      shifts: [{ start: "2026-10-10 21:01:00", end: "2026-10-11 08:38:00" }],
+      events: [
+        { datetime: "2026-10-11 08:39:42", state: "休息", unko_no: unko },
+        { datetime: "2026-10-11 08:40:00", state: "休息", unko_no: unko }, // 補正の無い行は元の時刻で見る
+      ],
+      rest_start_overrides: [{ rest_start_at: "2026-10-11 08:39:42", last_move_at: "2026-10-11 08:38:54" }],
+    };
+    expect(shiftRests(applied, "2026-10-10 21:01")).toEqual([{ restStart: "2026-10-11 08:39:42", unkoNo: unko }]);
+  });
 });
 
 describe("startOpeFromUnkoNo / restStartOverride / alcEventsRange", () => {
