@@ -2175,11 +2175,11 @@ export const runKintaiRestStartSyncTool = {
     "theearth の拘束時間管理表は、休息の直前の運転を休息ボタンではなく**速度データで最後に車が動いた時刻**で終える。" +
     "最後の動きとボタンが同じ分に収まらないと、勤怠 Worker の拘束・実働が管理表より 1 分長くなる。" +
     "この tool は 1 か月ぶん、管理表 (R2 に取り込み済みの CSV。無ければ先に run_theearth_restraint_fetch) と勤怠 Worker の日別サマリを、" +
-    "乗務員 + 始業で突き合わせ、**拘束も実働もちょうど +1 分の勤務だけ**、締めている休息の運行の NET780 (3要素解析データ) の .spd から" +
-    "最後の動きを出して補正 (休息の開始 → 最後の動き) にする。NET780 はアーカイブ済みなら R2 から読み、無ければ relay が " +
+    "乗務員 + 始業で突き合わせ、**拘束も実働もちょうど +1 分の勤務だけ**、休息の運行の NET780 (3要素解析データ) の .spd から" +
+    "直前の最後の動きを、勤務の中の休息ごと (分割休息を含む) に出して補正 (休息の開始 → 最後の動き) にする。NET780 はアーカイブ済みなら R2 から読み、無ければ relay が " +
     "DTAKO_ACCOUNTS で theearth にログインして取ってアーカイブする (**人のセッションを蹴りうる** — `theearth_kicked`)。" +
     "**既定は書かない** (`apply` 省略 / false で候補・補正・各勤務の結果 `results[].status` を返すだけ。status は " +
-    "`override` / `same_minute` (同じ分で直す必要なし) / `no_closing_rest` (休息で締まっていない) / `not_found` / `error`)。" +
+    "`override` / `same_minute` (同じ分で直す必要なし) / `no_rest` (勤務の中に休息が無い) / `not_found` / `error`)。" +
     "`apply: true` で補正を勤怠 Worker (`PUT /api/kintai/rest-start-overrides`) に書き、その月を畳み直す (応答の `written`・`fold`)。" +
     "comp_id・month とも必須で、1 回 1 社 1 か月。**並列に呼ばない**。`/kintai-relay/*` (X-Alc-Proxy-Secret 方式) を叩く。",
   inputSchema: runKintaiRestStartSyncArgs,

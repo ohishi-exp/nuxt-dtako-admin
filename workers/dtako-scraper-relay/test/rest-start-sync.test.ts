@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   alcEventsRange,
-  closingRest,
+  shiftRests,
   kintaiRows,
   pickRestStartCandidates,
   restStartOverride,
@@ -140,29 +140,36 @@ describe("pickRestStartCandidates", () => {
   });
 });
 
-describe("closingRest", () => {
-  const UNKO = "2606171125560000000237";
+describe("shiftRests", () => {
+  const UNKO = "2607150330460000000233";
+  // 北海 7/17 乗務員 11 の形: 分割休息 16:46:09 と、勤務を締める休息 7/18 02:26:53
   const body = {
     shifts: [
-      { start: "2026-06-17 11:25:00", end: "2026-06-17 19:53:00" },
-      { start: "2026-06-18 05:25:00", end: "2026-06-18 18:38:00" },
-      { start: "2026-06-19 05:20:00" },
+      { start: "2026-07-17 05:17:00", end: "2026-07-18 02:26:00" },
+      { start: "2026-07-19 05:20:00" },
     ],
     events: [
-      { datetime: "2026-06-17 19:26:07", state: "運転", unko_no: UNKO },
-      { datetime: "2026-06-17 19:53:00", state: "休息", unko_no: UNKO },
-      { datetime: "2026-06-18 18:38:42", state: "休息", unko_no: null },
+      { datetime: "2026-07-18 02:26:53", state: "休息", unko_no: UNKO },
+      { datetime: "2026-07-17 16:20:26", state: "運転", unko_no: UNKO },
+      { datetime: "2026-07-17 16:46:09", state: "休息", unko_no: UNKO },
+      { datetime: "2026-07-17 05:17:00", state: "休息", unko_no: UNKO }, // 始業の分 (勤務の前の休息の続き) は入れない
+      { datetime: "2026-07-18 02:27:00", state: "休息", unko_no: UNKO }, // 勤務の終わりの分より後
+      { datetime: "2026-07-17 10:00:00", state: "休息", unko_no: null }, // 運行NO が無い
+      { state: "休息", unko_no: UNKO }, // 時刻が無い
     ],
   };
-  it("勤務の終わりと同じ分に始まる休息の行", () => {
-    expect(closingRest(body, "2026-06-17 11:25")).toEqual({ restStart: "2026-06-17 19:53:00", unkoNo: UNKO });
+  it("始業より後・勤務の終わりの分以前の休息を時刻順に (分割休息も入る)", () => {
+    expect(shiftRests(body, "2026-07-17 05:17")).toEqual([
+      { restStart: "2026-07-17 16:46:09", unkoNo: UNKO },
+      { restStart: "2026-07-18 02:26:53", unkoNo: UNKO },
+    ]);
   });
-  it("勤務が無い・終わりが無い・休息が無い (運行NO が無い) なら null", () => {
-    expect(closingRest(body, "2026-06-16 00:00")).toBeNull();
-    expect(closingRest(body, "2026-06-19 05:20")).toBeNull();
-    expect(closingRest(body, "2026-06-18 05:25")).toBeNull();
-    expect(closingRest({}, "2026-06-17 11:25")).toBeNull();
-    expect(closingRest({ shifts: [{ start: "2026-06-17 11:25:00", end: "2026-06-17 19:53:00" }] }, "2026-06-17 11:25")).toBeNull();
+  it("勤務が無い・終わりが無い・本文の形が違えば空", () => {
+    expect(shiftRests(body, "2026-07-16 00:00")).toEqual([]);
+    expect(shiftRests(body, "2026-07-19 05:20")).toEqual([]);
+    expect(shiftRests({}, "2026-07-17 05:17")).toEqual([]);
+    expect(shiftRests(null, "2026-07-17 05:17")).toEqual([]);
+    expect(shiftRests({ shifts: [{ start: "2026-07-17 05:17:00", end: "2026-07-18 02:26:00" }] }, "2026-07-17 05:17")).toEqual([]);
   });
 });
 

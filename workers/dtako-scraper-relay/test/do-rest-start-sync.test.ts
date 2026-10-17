@@ -73,9 +73,13 @@ const DAYS = {
     "11|2026-07-18|2026-07-18 06:02:00": { restraint_minutes: 431, working_minutes: 398 },
   },
 };
+// 7/17 の勤務の中に分割休息 16:46:09 と、締める休息 7/18 02:26:53
 const ALC = {
   shifts: [{ start: "2026-07-17 05:17:00", end: "2026-07-18 02:26:00" }],
-  events: [{ datetime: "2026-07-18 02:26:53", state: "休息", unko_no: UNKO }],
+  events: [
+    { datetime: "2026-07-17 16:46:09", state: "休息", unko_no: UNKO },
+    { datetime: "2026-07-18 02:26:53", state: "休息", unko_no: UNKO },
+  ],
 };
 
 function makeDO(opts: { csv?: boolean; archived?: boolean } = {}) {
@@ -117,11 +121,14 @@ function makeDO(opts: { csv?: boolean; archived?: boolean } = {}) {
   return { call, spies, env };
 }
 
+/** 分割休息 16:46:09 の直前の最後の動きは `lastMove`、締める休息 02:26:53 の直前は同じ分 (02:26:53)。 */
 function arrange(lastMove: string | null) {
   vi.mocked(parseRestraintCsv).mockReturnValue(REPORT as never);
   vi.mocked(relayKintaiDaySummaries).mockResolvedValue(DAYS);
   vi.mocked(relayKintaiAlcEvents).mockResolvedValue(ALC);
-  vi.mocked(lastMovementBefore).mockReturnValue(lastMove === null ? null : wallSeconds(lastMove));
+  vi.mocked(lastMovementBefore).mockImplementation((_b, rest) =>
+    rest === wallSeconds("2026-07-17 16:46:09") ? (lastMove === null ? null : wallSeconds(lastMove)) : rest,
+  );
 }
 
 afterEach(() => {
@@ -130,7 +137,7 @@ afterEach(() => {
 
 describe("POST /cron/rest-start-sync", () => {
   it("既定は書かない: 候補 → 休息 → theearth の NET780 → 補正を返すだけ", async () => {
-    arrange("2026-07-18 02:25:58");
+    arrange("2026-07-17 16:45:46");
     const { call, spies } = makeDO();
     const res = await call({ comp_id: COMP_ID, month: "2026-07" });
     expect(res.status).toBe(200);
@@ -144,19 +151,22 @@ describe("POST /cron/rest-start-sync", () => {
       fold: null,
       theearth_logins: 1,
       theearth_kicked: false,
-      overrides: [{ driver_cd: 11, rest_start_at: "2026-07-18 02:26:53", last_move_at: "2026-07-18 02:25:58", unko_no: UNKO }],
+      overrides: [{ driver_cd: 11, rest_start_at: "2026-07-17 16:46:09", last_move_at: "2026-07-17 16:45:46", unko_no: UNKO }],
     });
     expect(body.results).toEqual([
-      expect.objectContaining({ driverCd: "11", start: "2026-07-17 05:17", status: "override", last_move_at: "2026-07-18 02:25:58" }),
+      expect.objectContaining({ start: "2026-07-17 05:17", rest_start_at: "2026-07-17 16:46:09", status: "override", last_move_at: "2026-07-17 16:45:46" }),
+      expect.objectContaining({ start: "2026-07-17 05:17", rest_start_at: "2026-07-18 02:26:53", status: "same_minute" }),
     ]);
     expect(vi.mocked(relayKintaiAlcEvents).mock.calls[0]![1]).toEqual({ driver: "11", from: "2026-06-29", to: "2026-08-02" });
     expect(spies.search.mock.calls[0]![2]).toEqual({ opeNo: UNKO, startOpe: "2026/07/15 3:30:46" });
+    // 同じ運行の 2 つの休息は 1 回の取得で足りる
+    expect(spies.search).toHaveBeenCalledTimes(1);
     expect(putKintaiRestStartOverrides).not.toHaveBeenCalled();
     expect(foldMonth).not.toHaveBeenCalled();
   });
 
   it("apply: アーカイブ済みの zip を使い、補正を書いて月を畳み直す", async () => {
-    arrange("2026-07-18 02:25:58");
+    arrange("2026-07-17 16:45:46");
     const { call, spies } = makeDO({ archived: true });
     const body = (await (await call({ comp_id: COMP_ID, month: "2026-07", apply: true })).json()) as Record<string, unknown>;
     expect(body).toMatchObject({ apply: true, written: 1, theearth_logins: 0, fold: { driversWritten: 1 } });
@@ -166,20 +176,23 @@ describe("POST /cron/rest-start-sync", () => {
   });
 
   it("最後の動きが同じ分なら補正しない (apply でも書かない)", async () => {
-    arrange("2026-07-18 02:26:40");
+    arrange("2026-07-17 16:46:01");
     const { call } = makeDO({ archived: true });
     const body = (await (await call({ comp_id: COMP_ID, month: "2026-07", apply: true })).json()) as Record<string, unknown>;
     expect(body).toMatchObject({ overrides: [], written: null });
-    expect(body.results).toEqual([expect.objectContaining({ status: "same_minute" })]);
+    expect(body.results).toEqual([
+      expect.objectContaining({ status: "same_minute" }),
+      expect.objectContaining({ status: "same_minute" }),
+    ]);
     expect(putKintaiRestStartOverrides).not.toHaveBeenCalled();
   });
 
-  it("候補の勤務が休息で締まっていなければ NET780 に行かない", async () => {
+  it("候補の勤務の中に休息が無ければ NET780 に行かない", async () => {
     arrange(null);
     vi.mocked(relayKintaiAlcEvents).mockResolvedValue({ shifts: [], events: [] });
     const { call, spies } = makeDO();
     const body = (await (await call({ comp_id: COMP_ID, month: "2026-07" })).json()) as Record<string, unknown>;
-    expect(body.results).toEqual([expect.objectContaining({ status: "no_closing_rest" })]);
+    expect(body.results).toEqual([expect.objectContaining({ status: "no_rest" })]);
     expect(spies.archived).not.toHaveBeenCalled();
   });
 
