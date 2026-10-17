@@ -6,6 +6,8 @@ import {
   NET780_ARCHIVE_NARROW_WINDOW_DAYS,
   NET780_ARCHIVE_WINDOW_DAYS,
   addDaysIso,
+  net780DirectTarget,
+  net780ZipHasOperation,
   buildNet780ArchiveSearchParams,
   deriveNet780ArchiveSearchKey,
   isNet780CatalogRowUsable,
@@ -398,5 +400,29 @@ describe("summarizeNet780ArchiveBatch", () => {
       truncated: false,
       remaining: 0,
     });
+  });
+});
+
+
+describe("net780DirectTarget / net780ZipHasOperation — 一覧に無い古い運行を直接選ぶ", () => {
+  it("出庫日時は運行NO の先頭 12 桁から、一覧の行と同じ YYYY/MM/DD HH:mm:ss で組む", () => {
+    expect(net780DirectTarget("2606171125560000000237")).toEqual({
+      operationNo: "2606171125560000000237",
+      startDateTime: "2026/06/17 11:25:56",
+    });
+    expect(net780DirectTarget("2607150330460000000233").startDateTime).toBe("2026/07/15 03:30:46");
+  });
+
+  it("zip の中に出庫の時刻と車輌CD が一致するフォルダがあるか", () => {
+    const entries = [
+      "237/",
+      "237/20260617_112556-0-0-237/07043475296.fin",
+      "237/20260617_112556-0-0-237/20260617_112556-0-0-237.spd",
+    ];
+    expect(net780ZipHasOperation(entries, "2606171125560000000237")).toBe(true);
+    // 違う運行 (時刻違い・車輌違い)
+    expect(net780ZipHasOperation(entries, "2606171125570000000237")).toBe(false);
+    expect(net780ZipHasOperation(entries, "2606171125560000000238")).toBe(false);
+    expect(net780ZipHasOperation([], "2606171125560000000237")).toBe(false);
   });
 });

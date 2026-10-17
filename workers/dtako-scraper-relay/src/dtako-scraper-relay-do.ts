@@ -88,7 +88,7 @@ import {
 } from "./theearth-driver-master-client";
 import type { DriverMasterUpsertResult } from "./theearth-driver-master-client";
 import { postScrapeHistory, scrapeJobKey } from "./scrape-dispatch";
-import { buildOperationZipPayload } from "./operation-zip";
+import { buildOperationZipPayload, listZipEntryNames } from "./operation-zip";
 import { recalculateBeforeFetch } from "./theearth-recalculate";
 import { decideRelogin, isEntryReusable, type LoginSessionEntry } from "./theearth-login-session";
 import {
@@ -506,6 +506,8 @@ import {
   isNet780CatalogRowUsable,
   net780ArchiveSearchPlan,
   net780DownloadTargetFromRow,
+  net780DirectTarget,
+  net780ZipHasOperation,
   parseNet780ArchiveRequest,
   pickNet780RowForOperation,
   retryNet780Download,
@@ -2833,17 +2835,35 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       row = pickNet780RowForOperation(rows, item.opeNo);
       if (row) break;
     }
-    if (!row) {
-      const message = describeNet780NotFound(key, lastParams!, lastRowCount, NET780_SEARCH_MAX_ROWS);
-      console.log(
-        JSON.stringify({ net780_archive: "not_found", comp_id: account.comp_id, ope_no: item.opeNo, index, message }),
+    let target: Net780DownloadTarget;
+    let zip: ArrayBuffer;
+    if (row) {
+      target = net780DownloadTargetFromRow(row);
+      zip = await retryNet780Download(() =>
+        this.withTheearthLoginSession(account, jobState, (jar) => downloadNet780Zip(jar, [target])),
       );
-      return { ope_no: item.opeNo, status: "not_found", message };
+    } else {
+      // 一覧は読取日がおよそ 3 か月以内の運行しか出さない。古い運行は運行NO から直接選んで取る
+      // (`net780DirectTarget`)。取れた zip がその運行のものか (中のフォルダ名) を確かめてから保存する
+      target = net780DirectTarget(item.opeNo);
+      let direct: ArrayBuffer | null = null;
+      try {
+        direct = await retryNet780Download(() =>
+          this.withTheearthLoginSession(account, jobState, (jar) => downloadNet780Zip(jar, [target])),
+        );
+      } catch (err) {
+        if (err instanceof VenusSessionExpiredError) throw err;
+        console.log(JSON.stringify({ net780_archive: "direct_failed", comp_id: account.comp_id, ope_no: item.opeNo, error: describeUnknownError(err) }));
+      }
+      if (!direct || !net780ZipHasOperation(listZipEntryNames(direct), item.opeNo)) {
+        const message = `${describeNet780NotFound(key, lastParams!, lastRowCount, NET780_SEARCH_MAX_ROWS)} (運行NO で直接選んでも取れませんでした)`;
+        console.log(
+          JSON.stringify({ net780_archive: "not_found", comp_id: account.comp_id, ope_no: item.opeNo, index, message }),
+        );
+        return { ope_no: item.opeNo, status: "not_found", message };
+      }
+      zip = direct;
     }
-    const target = net780DownloadTargetFromRow(row);
-    const zip = await retryNet780Download(() =>
-      this.withTheearthLoginSession(account, jobState, (jar) => downloadNet780Zip(jar, [target])),
-    );
     const saved = await this.saveNet780ToR2(account.comp_id, [target], zip);
     if (!saved.ok) {
       return { ope_no: item.opeNo, status: "error", message: `アーカイブの保存に失敗しました (${saved.error})` };
