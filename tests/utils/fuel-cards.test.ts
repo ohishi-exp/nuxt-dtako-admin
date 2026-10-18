@@ -8,6 +8,9 @@ describe('carOptions', () => {
       { label: '9', value: '9' },
     ])
   })
+  it('★ 名前が空文字の車両も id だけ (本番の cars に `{"id":"000100","name":""}` がある)', () => {
+    expect(carOptions([{ id: '000100', name: '' }])).toEqual([{ label: '000100', value: '000100' }])
+  })
 })
 
 describe('toDatetimeLocal', () => {
