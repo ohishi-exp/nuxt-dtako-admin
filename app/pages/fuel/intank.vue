@@ -6,13 +6,14 @@
  */
 import {
   getFuelStarts, getFuelIntank, getFuelUnregisteredCards, getFuelCars, getFuelCards,
-  createFuelCard, updateFuelIntankDtakoRow, deleteFuelIntank, uploadFuelCsv, downloadFuelUpload,
+  createFuelCard, updateFuelIntankDtakoRow, deleteFuelIntank, uploadFuelCsv, downloadFuelUpload, recheckFuelIntank,
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
   isDiffHighlighted, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
+import { canRecheck, describeManualError } from '~/utils/fuel-manual'
 import { describeCaughtError, describeListFailure } from '~/utils/api-error'
 import type { FuelStart, FuelIntankRow, FuelCar } from '~/types'
 
@@ -52,6 +53,9 @@ const saving = ref(false)
 const rowError = ref<string | null>(null)
 const deleteTarget = ref<FuelIntankRow | null>(null)
 const deleting = ref(false)
+/** 再照合中の行 (rowKey)。押した行のボタンだけ回す */
+const rechecking = ref<string | null>(null)
+const recheckMessage = ref<string | null>(null)
 
 const isMatching = computed(() => selected.value !== LATEST)
 const selectedStart = computed(() => starts.value.find(s => s.datetime === selected.value) ?? null)
@@ -246,6 +250,30 @@ async function confirmDelete() {
   }
 }
 
+// --- 再照合 (dtako_row_id が空の行を照合し直し、manual を外す。CakePHP の recheck) ---
+
+async function recheck(r: FuelIntankRow) {
+  rechecking.value = rowKey(r)
+  rowError.value = null
+  recheckMessage.value = null
+  try {
+    const res = await recheckFuelIntank(r.datetime, r.fuel_card_id)
+    const what = `${formatShortDatetime(r.datetime)} / card ${r.fuel_card_id}`
+    const result = res.row.dtako_row_id ? `運行 ${res.row.dtako_row_id} に紐づけました` : '照合できる運行がありませんでした'
+    // 上流の recheck は manual を外すので、手入力の行は以後 削除も手入力での上書きもできなくなる (409 not_manual)
+    const unmarked = r.manual && !res.row.manual ? ' — 手入力の印を外したので、この行は削除も手入力での上書きもできなくなりました' : ''
+    recheckMessage.value = `${what}: ${result}${unmarked}`
+    await loadRows()
+  }
+  catch (e) {
+    rowError.value = (e instanceof Error ? describeManualError(e.message) : null)
+      ?? describeCaughtError(e, 'もう一度「再照合」を押してください')
+  }
+  finally {
+    rechecking.value = null
+  }
+}
+
 function printPage() {
   window.print()
 }
@@ -261,6 +289,7 @@ onMounted(() => {
     <div class="flex flex-wrap items-center gap-3 fuel-no-print">
       <h2 class="text-xl font-bold mr-auto">インタンク燃料確認</h2>
       <USelect v-model="selected" :items="startItems" class="w-64" />
+      <UButton to="/fuel/manual" icon="i-lucide-pencil" variant="outline" label="手入力" />
       <UButton to="/fuel/cards" icon="i-lucide-credit-card" variant="outline" label="カード" />
       <UButton icon="i-lucide-printer" variant="outline" label="印刷" @click="printPage" />
     </div>
@@ -332,6 +361,7 @@ onMounted(() => {
       <p v-else class="text-sm text-gray-600 dark:text-gray-400 fuel-no-print">最新 100 行を新しい順に出しています。start を選ぶと dtako との突き合わせを出します。</p>
       <UAlert v-if="listError" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="給油の一覧を読めませんでした" :description="listError" class="my-2" />
       <UAlert v-if="rowError" color="error" variant="subtle" icon="i-lucide-alert-triangle" :description="rowError" class="my-2 fuel-no-print" />
+      <UAlert v-if="recheckMessage" color="success" variant="subtle" icon="i-lucide-check-circle" :description="recheckMessage" class="my-2 fuel-no-print" />
       <div v-if="loading" class="flex items-center gap-2 text-sm my-2">
         <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />読み込み中...
       </div>
@@ -376,6 +406,7 @@ onMounted(() => {
               </template>
               <td class="fuel-no-print whitespace-nowrap">
                 <UButton v-if="isMatching && editingKey !== rowKey(r)" size="xs" variant="outline" label="編集" @click="startEdit(r)" />
+                <UButton v-if="canRecheck(r)" size="xs" variant="outline" label="再照合" class="ml-1" :loading="rechecking === rowKey(r)" :disabled="rechecking !== null" @click="recheck(r)" />
                 <UButton v-if="r.manual" size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = r" />
               </td>
             </tr>
