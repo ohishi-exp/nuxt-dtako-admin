@@ -2,7 +2,7 @@
  * 給油カード画面の純粋ロジック (Refs yhonda-ohishi/nginx#814)。
  * 移植元は CakePHP の `templates/FuelCards/index.php`・`edit.php`。
  */
-import type { FuelCar } from '~/types'
+import type { FuelCar, FuelCard, FuelCardPatch } from '~/types'
 
 /** 車両の選択肢 (`USelect` の items)。名前が無い車両は id を出す。 */
 export function carOptions(cars: FuelCar[]): { label: string, value: string }[] {
@@ -26,4 +26,17 @@ export function fromDatetimeLocal(v: string): string | null | undefined {
   if (v === '') return null
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2})?$/.exec(v)
   return m ? `${m[1]} ${m[2]}${m[3] ?? ':00'}` : undefined
+}
+
+/**
+ * 編集中の値から、変わった欄だけの PATCH を組む。何も変わっていなければ null (「保存」を押させない)。
+ * 車両は選ばれていて今と違うときだけ、終了日時は `fromDatetimeLocal` が読めて今と違うときだけ載せる
+ * (空は null = 終了日時の解除)。
+ */
+export function cardPatch(card: FuelCard, carId: string | undefined, endLocal: string): FuelCardPatch | null {
+  const patch: FuelCardPatch = {}
+  if (carId && carId !== card.car_id) patch.car_id = carId
+  const end = fromDatetimeLocal(endLocal)
+  if (end !== undefined && end !== card.end_datetime) patch.end_datetime = end
+  return Object.keys(patch).length > 0 ? patch : null
 }
