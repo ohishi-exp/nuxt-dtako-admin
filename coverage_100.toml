@@ -1367,3 +1367,12 @@ branches = true
 [[files]]
 path = "app/utils/min-wage-fix.ts"
 branches = true
+
+# 給油 (インタンク・カード) 画面の純粋ロジック (Refs yhonda-ohishi/nginx#814)。
+[[files]]
+path = "app/utils/fuel-intank.ts"
+branches = true
+
+[[files]]
+path = "app/utils/fuel-cards.ts"
+branches = true
