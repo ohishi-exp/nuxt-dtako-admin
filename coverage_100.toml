@@ -1376,3 +1376,7 @@ branches = true
 [[files]]
 path = "app/utils/fuel-cards.ts"
 branches = true
+
+[[files]]
+path = "app/utils/fuel-manual.ts"
+branches = true

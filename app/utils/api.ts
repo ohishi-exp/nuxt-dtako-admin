@@ -15,6 +15,7 @@ import type {
   YTimeRowsPreview,
   FuelStartsResponse, FuelIntankResponse, FuelUnregisteredCardsResponse,
   FuelCarsResponse, FuelCardsResponse, FuelCardResponse, FuelCardPatch, FuelUploadResponse,
+  FuelManualCandidatesResponse, FuelIntankCreate, FuelIntankRowResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
 import { caughtErrorStatus, describeFetchThrow, describeResponseFailure, pickBodyReason, ResponseFailure } from '~/utils/api-error'
@@ -1189,6 +1190,24 @@ export async function updateFuelIntankDtakoRow(datetime: string, fuelCardId: num
 /** manual の行の削除 (それ以外は 409)。 */
 export async function deleteFuelIntank(datetime: string, fuelCardId: number): Promise<void> {
   await request<void>(fuelIntankPath(datetime, fuelCardId), { method: 'DELETE' })
+}
+
+/** 手入力の伝票番号の候補と、最新の行。 */
+export async function getFuelManualCandidates(): Promise<FuelManualCandidatesResponse> {
+  return request<FuelManualCandidatesResponse>('/api/fuel/manual-candidates')
+}
+
+/** 手入力の追加 (manual の行なら上書き、CSV 由来の行は 409 `not_manual`)。 */
+export async function createFuelIntank(body: FuelIntankCreate): Promise<FuelIntankRowResponse> {
+  return request<FuelIntankRowResponse>('/api/fuel/intank', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/** dtako_row_id が空の行を照合し直し、manual を外す。 */
+export async function recheckFuelIntank(datetime: string, fuelCardId: number): Promise<FuelIntankRowResponse> {
+  return request<FuelIntankRowResponse>(`${fuelIntankPath(datetime, fuelCardId)}/recheck`, { method: 'POST' })
 }
 
 /**

@@ -531,3 +531,25 @@ export interface FuelUploadResponse {
   latest_start: { datetime: string, fuel_card_id: number } | null
 }
 export interface FuelCardResponse { ok: boolean, card: FuelCard, intank?: FuelIntankRow[] }
+
+/** `GET /api/fuel/manual-candidates` の応答 (手入力の伝票番号の候補と、最新の行) */
+export interface FuelManualCandidatesResponse {
+  ok: boolean
+  /** 昇順・重複なし */
+  candidates: number[]
+  last_inserted: { datetime: string, fuel_card_id: number, slip_num: number | null } | null
+}
+
+/** `POST /api/fuel/intank` の本文。`fuel_card_id` が無ければ start 行 */
+export interface FuelIntankCreate {
+  /** `YYYY-MM-DD HH:MM:SS` */
+  datetime: string
+  slip_num: number
+  fuel_card_id?: number
+  /** リットル (小数 2 桁)。fuel 行で必須 */
+  quantity_decimal?: number
+  slip_num_parent?: number
+}
+
+/** 手入力の追加・上書き・recheck の応答 */
+export interface FuelIntankRowResponse { ok: boolean, row: FuelIntankRow }

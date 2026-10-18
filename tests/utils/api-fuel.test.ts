@@ -17,9 +17,13 @@ import {
   deleteFuelCard,
   updateFuelIntankDtakoRow,
   deleteFuelIntank,
+  getFuelManualCandidates,
+  createFuelIntank,
+  recheckFuelIntank,
   uploadFuelCsv,
   downloadFuelUpload,
 } from '~/utils/api'
+import { describeManualError } from '~/utils/fuel-manual'
 
 const BASE = 'http://test'
 const SHA = 'a'.repeat(64)
@@ -53,6 +57,7 @@ describe('fuel の GET', () => {
     ['getFuelCars', () => getFuelCars(), '/api/fuel/cars'],
     ['getFuelCards', () => getFuelCards(), '/api/fuel/cards'],
     ['getFuelCard', () => getFuelCard(12), '/api/fuel/cards/12'],
+    ['getFuelManualCandidates', () => getFuelManualCandidates(), '/api/fuel/manual-candidates'],
   ] as [string, () => Promise<unknown>, string][])('%s → GET %s', async (_n, fn, path) => {
     const body = { ok: true, rows: [] }
     mockFetch.mockResolvedValueOnce(okJson(body))
@@ -104,6 +109,36 @@ describe('fuel_intank の書き込み (path は `{datetime};{card}`)', () => {
     await deleteFuelIntank('2023-12-20 07:33:00', 12)
     expect(call()[0]).toBe(`${BASE}/api/fuel/intank/2023-12-20%2007%3A33%3A00;12`)
     expect(call()[1].method).toBe('DELETE')
+  })
+})
+
+describe('手入力の追加と recheck', () => {
+  it('createFuelIntank は本文をそのまま JSON で POST し、応答の row を返す', async () => {
+    const res = { ok: true, row: { datetime: '2024-10-02 08:00:00', fuel_card_id: 40 } }
+    mockFetch.mockResolvedValueOnce(okJson(res))
+    const body = { datetime: '2024-10-02 08:00:00', slip_num: 13, fuel_card_id: 40, quantity_decimal: 123.45, slip_num_parent: 12 }
+    expect(await createFuelIntank(body)).toEqual(res)
+    const [url, init] = call()
+    expect(url).toBe(`${BASE}/api/fuel/intank`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual(body)
+  })
+
+  it('★ 409 の Error の文は describeManualError が読める形 (`API エラー (409): <本文>`)', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 409, statusText: 'Conflict',
+      text: async () => JSON.stringify({ ok: false, error: 'not_manual' }),
+    })
+    const err = await createFuelIntank({ datetime: '2024-10-02 08:00:00', slip_num: 1 }).catch((e: Error) => e)
+    expect(describeManualError((err as Error).message)).toBe('CSV から取り込んだ行は手入力で上書きできません')
+  })
+
+  it('recheckFuelIntank は行の path に /recheck を付けて本文なしで POST する', async () => {
+    await recheckFuelIntank('2023-12-20 07:33:00', 12)
+    const [url, init] = call()
+    expect(url).toBe(`${BASE}/api/fuel/intank/2023-12-20%2007%3A33%3A00;12/recheck`)
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
   })
 })
 
