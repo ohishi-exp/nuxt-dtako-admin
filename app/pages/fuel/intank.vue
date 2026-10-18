@@ -29,7 +29,13 @@ const cars = ref<FuelCar[]>([])
 /** fuel_card_id → 車番 (最新 100 行の表は応答に car を持たないので card の一覧から引く) */
 const carNameByCard = ref<Record<number, string>>({})
 const unregistered = ref<number[]>([])
-const carChoice = ref<Record<number, string | undefined>>({})
+/**
+ * 車両を選んでいる未登録カード (1 行ずつ) とその車両。★ 選択欄を全行に置かない — Reka UI の Select は
+ * 閉じていても全選択肢を文書の外に描画して持つので、行数 × 車両数 ぶん重くなる (551 件 × 20 行で
+ * 11.6 秒・ヒープ 565MB をスタブで実測。`/fuel/cards` が固まったのと同じ原因、Refs yhonda-ohishi/nginx#814)
+ */
+const choosingId = ref<number | null>(null)
+const carChoice = ref<string | undefined>(undefined)
 const registering = ref<number | null>(null)
 const registerError = ref<string | null>(null)
 
@@ -172,13 +178,20 @@ async function downloadUploaded() {
 
 // --- 未登録カードの登録 ---
 
+function startChoose(id: number) {
+  choosingId.value = id
+  carChoice.value = undefined
+  registerError.value = null
+}
+
 async function registerCard(id: number) {
-  const carId = carChoice.value[id]
+  const carId = carChoice.value
   if (!carId) return
   registering.value = id
   registerError.value = null
   try {
     await createFuelCard(id, carId)
+    choosingId.value = null
     await loadCardsAndCars()
     await loadRows()
   }
@@ -291,10 +304,19 @@ onMounted(() => {
         <tbody>
           <tr v-for="id in unregistered" :key="id">
             <td class="text-right">{{ id }}</td>
-            <td><USelect v-model="carChoice[id]" :items="carItems" placeholder="車両を選択" class="w-56" size="sm" /></td>
-            <td>
-              <UButton size="sm" label="登録" :disabled="!carChoice[id]" :loading="registering === id" @click="registerCard(id)" />
-            </td>
+            <template v-if="choosingId === id">
+              <td>
+                <USelectMenu v-model="carChoice" :items="carItems" value-key="value" :search-input="{ placeholder: '車番・id で検索' }" placeholder="車両を選択" class="w-64" size="sm" />
+              </td>
+              <td class="whitespace-nowrap">
+                <UButton size="sm" label="登録" :disabled="!carChoice" :loading="registering === id" @click="registerCard(id)" />
+                <UButton size="sm" variant="outline" label="取消" class="ml-1" @click="choosingId = null" />
+              </td>
+            </template>
+            <template v-else>
+              <td class="text-gray-500">(未登録)</td>
+              <td><UButton size="sm" variant="outline" label="車両を選ぶ" @click="startChoose(id)" /></td>
+            </template>
           </tr>
         </tbody>
       </table>

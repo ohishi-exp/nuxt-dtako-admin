@@ -2,11 +2,17 @@
 /**
  * 給油カード (CakePHP の /fuel-cards の置き換え、Refs yhonda-ohishi/nginx#814)。
  * 一覧・追加・車両の変更・終了日時の設定・削除。データは rust-fuel-worker の `/api/fuel/cards`。
+ *
+ * ★ 車両の選択は「編集」を押した 1 行にだけ出す。Reka UI の Select / SelectMenu は**閉じていても**
+ * 全選択肢を文書の外の fragment に描画して持つので、全行に置くと 行数 × 車両数 ぶんのコンポーネントが
+ * 常に生きる。本番の 115 行 × 551 件で画面が固まった (スタブで再現: 40 行 × 551 件でノード 50 万・
+ * ヒープ 1GB・30 秒超。Refs yhonda-ohishi/nginx#814)。
  */
 import { getFuelCards, getFuelCars, createFuelCard, updateFuelCard, deleteFuelCard } from '~/utils/api'
-import { carOptions, toDatetimeLocal, fromDatetimeLocal } from '~/utils/fuel-cards'
+import { carOptions, toDatetimeLocal, cardPatch } from '~/utils/fuel-cards'
+import { formatShortDatetime } from '~/utils/fuel-intank'
 import { describeCaughtError, describeListFailure } from '~/utils/api-error'
-import type { FuelCard, FuelCar, FuelCardPatch } from '~/types'
+import type { FuelCard, FuelCar } from '~/types'
 
 const cards = ref<FuelCard[]>([])
 const cars = ref<FuelCar[]>([])
@@ -14,9 +20,10 @@ const loading = ref(false)
 const listError = ref<string | null>(null)
 const actionError = ref<string | null>(null)
 
-/** 行ごとの編集中の値 (card id → 車両 / 終了日時の datetime-local) */
-const draftCar = ref<Record<number, string | undefined>>({})
-const draftEnd = ref<Record<number, string>>({})
+/** 編集中の行 (card id) とその値。編集は 1 行ずつ */
+const editingId = ref<number | null>(null)
+const draftCar = ref<string | undefined>(undefined)
+const draftEnd = ref('')
 const savingId = ref<number | null>(null)
 
 const newId = ref<number | undefined>(undefined)
@@ -28,10 +35,17 @@ const deleting = ref(false)
 
 const carItems = computed(() => carOptions(cars.value))
 
-function resetDrafts() {
-  draftCar.value = Object.fromEntries(cards.value.map(c => [c.id, c.car_id ?? undefined]))
-  draftEnd.value = Object.fromEntries(cards.value.map(c => [c.id, toDatetimeLocal(c.end_datetime)]))
+function startEdit(c: FuelCard) {
+  editingId.value = c.id
+  draftCar.value = c.car_id ?? undefined
+  draftEnd.value = toDatetimeLocal(c.end_datetime)
+  actionError.value = null
 }
+
+const editingPatch = computed(() => {
+  const c = cards.value.find(x => x.id === editingId.value)
+  return c ? cardPatch(c, draftCar.value, draftEnd.value) : null
+})
 
 async function load() {
   loading.value = true
@@ -40,7 +54,6 @@ async function load() {
     const [cardsRes, carsRes] = await Promise.all([getFuelCards(), getFuelCars()])
     cards.value = cardsRes.cards
     cars.value = carsRes.cars
-    resetDrafts()
   }
   catch (e) {
     cards.value = []
@@ -51,23 +64,14 @@ async function load() {
   }
 }
 
-/** 変わった欄だけの PATCH。何も変わっていなければ null。終了日時が読めない形なら送らない。 */
-function patchOf(c: FuelCard): FuelCardPatch | null {
-  const patch: FuelCardPatch = {}
-  const car = draftCar.value[c.id]
-  if (car && car !== c.car_id) patch.car_id = car
-  const end = fromDatetimeLocal(draftEnd.value[c.id] ?? '')
-  if (end !== undefined && end !== c.end_datetime) patch.end_datetime = end
-  return Object.keys(patch).length > 0 ? patch : null
-}
-
 async function save(c: FuelCard) {
-  const patch = patchOf(c)
+  const patch = editingPatch.value
   if (!patch) return
   savingId.value = c.id
   actionError.value = null
   try {
     await updateFuelCard(c.id, patch)
+    editingId.value = null
     await load()
   }
   catch (e) {
@@ -133,7 +137,7 @@ onMounted(load)
         <UInput v-model.number="newId" type="number" class="w-32" />
       </UFormField>
       <UFormField label="車両">
-        <USelect v-model="newCar" :items="carItems" placeholder="車両を選択" class="w-56" />
+        <USelectMenu v-model="newCar" :items="carItems" value-key="value" :search-input="{ placeholder: '車番・id で検索' }" placeholder="車両を選択" class="w-64" />
       </UFormField>
       <UButton label="追加" icon="i-lucide-plus" :disabled="newId == null || !newCar" :loading="adding" @click="add" />
     </div>
@@ -144,25 +148,36 @@ onMounted(load)
     <div v-else class="overflow-x-auto">
       <table class="fuel-table">
         <thead>
-          <tr><th>card_id</th><th>車両</th><th>変更車両</th><th>終了日時</th><th /></tr>
+          <tr><th>card_id</th><th>車両</th><th>終了日時</th><th /></tr>
         </thead>
         <tbody>
           <tr v-for="c in cards" :key="c.id">
             <td class="text-right">{{ c.id }}</td>
-            <td>{{ c.car?.name ?? c.car_id ?? '' }}</td>
-            <td><USelect v-model="draftCar[c.id]" :items="carItems" placeholder="車両を選択" class="w-56" size="sm" /></td>
-            <td><input v-model="draftEnd[c.id]" type="datetime-local" class="border rounded px-1 py-0.5 text-sm bg-white dark:bg-gray-900"></td>
-            <td class="whitespace-nowrap">
-              <UButton size="xs" label="保存" :disabled="patchOf(c) === null" :loading="savingId === c.id" @click="save(c)" />
-              <UButton size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = c" />
-            </td>
+            <template v-if="editingId === c.id">
+              <td>
+                <USelectMenu v-model="draftCar" :items="carItems" value-key="value" :search-input="{ placeholder: '車番・id で検索' }" placeholder="車両を選択" class="w-64" size="sm" />
+              </td>
+              <td><input v-model="draftEnd" type="datetime-local" class="border rounded px-1 py-0.5 text-sm bg-white dark:bg-gray-900"></td>
+              <td class="whitespace-nowrap">
+                <UButton size="xs" label="保存" :disabled="editingPatch === null" :loading="savingId === c.id" @click="save(c)" />
+                <UButton size="xs" variant="outline" label="取消" class="ml-1" @click="editingId = null" />
+              </td>
+            </template>
+            <template v-else>
+              <td>{{ c.car?.name || c.car_id || '' }}</td>
+              <td>{{ formatShortDatetime(c.end_datetime) }}</td>
+              <td class="whitespace-nowrap">
+                <UButton size="xs" variant="outline" label="編集" @click="startEdit(c)" />
+                <UButton size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = c" />
+              </td>
+            </template>
           </tr>
           <tr v-if="cards.length === 0 && !listError">
-            <td colspan="5" class="text-center text-gray-500">カードがありません</td>
+            <td colspan="4" class="text-center text-gray-500">カードがありません</td>
           </tr>
         </tbody>
       </table>
-      <p class="text-xs text-gray-500 mt-1">終了日時を空にして「保存」すると、終了日時を外します。</p>
+      <p class="text-xs text-gray-500 mt-1">「編集」で車両と終了日時を変えられます。終了日時を空にして「保存」すると、終了日時を外します。</p>
     </div>
 
     <UModal :open="deleteTarget !== null" @update:open="(v: boolean) => { if (!v) deleteTarget = null }">
@@ -170,7 +185,7 @@ onMounted(load)
         <div class="p-6 space-y-4">
           <h3 class="text-lg font-bold">給油カードの削除</h3>
           <p v-if="deleteTarget" class="text-gray-600 dark:text-gray-400">
-            card {{ deleteTarget.id }} ({{ deleteTarget.car?.name ?? deleteTarget.car_id ?? '車両なし' }}) を削除しますか？この操作は取り消せません。
+            card {{ deleteTarget.id }} ({{ deleteTarget.car?.name || deleteTarget.car_id || '車両なし' }}) を削除しますか？この操作は取り消せません。
           </p>
           <div class="flex justify-end gap-2">
             <UButton label="キャンセル" variant="outline" @click="deleteTarget = null" />
