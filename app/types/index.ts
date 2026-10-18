@@ -441,3 +441,93 @@ export interface YTimeRowsPreview {
   /** 勤務の記録が 1 本も無い月 `YYYY-MM` (勤怠の元だけ。運行の元は空) */
   missing_months: string[]
 }
+
+// --- 給油 (fuel、Refs yhonda-ohishi/nginx#814) ---
+// rust-fuel-worker の `/api/fuel/*` の応答。`request()` で `/api/proxy` を前に付けて呼ぶ。
+// 数値の欄は MariaDB のセルを数値に読めたときだけ number (読めなければ文字列のまま返ってくる)。
+
+/** start 行 (`type = 'start'`)。突き合わせの基点 */
+export interface FuelStart {
+  /** `YYYY-MM-DD HH:MM:SS` */
+  datetime: string
+  fuel_card_id: number
+  slip_num: number
+}
+
+/** 給油行が紐づく dtako の運行 (`?start=` のときだけ。運行が無ければ null) */
+export interface FuelDtakoRow {
+  id: string | null
+  car_cc: string | null
+  car_name: string | null
+  /** 出庫日時 `YYYY-MM-DD HH:MM:SS` */
+  departed_at: string | null
+  /** 帰庫日時 `YYYY-MM-DD HH:MM:SS` */
+  returned_at: string | null
+  driver_id: number | null
+  driver_name: string | null
+}
+
+/** fuel_intank の 1 行 */
+export interface FuelIntankRow {
+  /** `YYYY-MM-DD HH:MM:SS` */
+  datetime: string
+  fuel_card_id: number
+  slip_num: number | null
+  slip_num_parent: number | null
+  /** ×100 の整数のまま */
+  quantity: number | null
+  /** quantity / 100 (リットル) */
+  qt: number | null
+  type: string | null
+  detail: string | null
+  dtako_row_id: string | null
+  manual: boolean | null
+  /** `{datetime};{fuel_card_id}`。編集・削除の path の元 */
+  id_st: string | null
+  // ↓ `?start=` のときだけ載る
+  car?: { id: string | null, name: string | null } | null
+  dtako_row?: FuelDtakoRow | null
+  /** その運行の当日の dtako 給油量の合計 (集計できなければ null) */
+  dtako_fuel_sum?: number | null
+  /** `{dtako_row_id: ["yyyyMMddHHmm_1,234.50", …]}` (dtako_row_id が NULL の給油は `""` のキー) */
+  dtako_fuel_array?: Record<string, string[]> | null
+}
+
+export interface FuelStartsResponse { ok: boolean, rows: FuelStart[] }
+export interface FuelIntankResponse {
+  ok: boolean
+  rows: FuelIntankRow[]
+  /** `?start=` のときだけ */
+  start?: FuelStart
+  end_time?: string | null
+}
+export interface FuelUnregisteredCardsResponse { ok: boolean, fuel_card_ids: number[] }
+
+export interface FuelCar { id: string, name: string | null }
+export interface FuelCarsResponse { ok: boolean, cars: FuelCar[] }
+
+export interface FuelCard {
+  id: number
+  car_id: string | null
+  /** `YYYY-MM-DD HH:MM:SS` か null */
+  end_datetime: string | null
+  car: { id: string | null, name: string | null } | null
+}
+export interface FuelCardsResponse { ok: boolean, cards: FuelCard[] }
+
+export interface FuelCardPatch {
+  car_id?: string
+  /** `YYYY-MM-DD HH:MM:SS`。空文字か null で解除 */
+  end_datetime?: string | null
+}
+
+/** `POST /api/fuel/uploads` の応答 */
+export interface FuelUploadResponse {
+  ok: boolean
+  /** `utran/<sha256>.csv` */
+  key: string
+  inserted: number
+  skipped: number
+  latest_start: { datetime: string, fuel_card_id: number } | null
+}
+export interface FuelCardResponse { ok: boolean, card: FuelCard, intank?: FuelIntankRow[] }

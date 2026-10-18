@@ -13,10 +13,13 @@ import type {
   ScrapeRequest, ScrapeHistoryItem,
   CalendarResponse,
   YTimeRowsPreview,
+  FuelStartsResponse, FuelIntankResponse, FuelUnregisteredCardsResponse,
+  FuelCarsResponse, FuelCardsResponse, FuelCardResponse, FuelCardPatch, FuelUploadResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
 import { caughtErrorStatus, describeFetchThrow, describeResponseFailure, pickBodyReason, ResponseFailure } from '~/utils/api-error'
 import { parseYTimeRowsPreview } from '~/utils/litigation-output'
+import { downloadBlobResponse } from '~/utils/download-blob'
 import { parseViewerComps } from '~/utils/dtako-comps'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
@@ -1120,4 +1123,93 @@ export async function switchTenant(tenantId: string): Promise<SwitchTenantRespon
     expires_in: Math.max(0, Number(res.expires_at) - nowSec),
     tenant_id: res.organization_id,
   }
+}
+
+// --- 給油 (fuel、Refs yhonda-ohishi/nginx#814) ---
+// rust-fuel-worker の `/api/fuel/*` を alc-proxy 経由で叩く (CakePHP の /fuel-intank・/fuel-cards の置き換え)。
+
+/** start 行の一覧 (新しい順)。 */
+export async function getFuelStarts(): Promise<FuelStartsResponse> {
+  return request<FuelStartsResponse>('/api/fuel/starts')
+}
+
+/** 給油行。`start` (`YYYY-MM-DD HH:MM:SS`) を省くと最新 100 行、渡すとその start の突き合わせ。 */
+export async function getFuelIntank(start?: string): Promise<FuelIntankResponse> {
+  return request<FuelIntankResponse>(`/api/fuel/intank${toParams({ start })}`)
+}
+
+/** fuel_intank にあって fuel_cards に無い card の id。 */
+export async function getFuelUnregisteredCards(): Promise<FuelUnregisteredCardsResponse> {
+  return request<FuelUnregisteredCardsResponse>('/api/fuel/unregistered-cards')
+}
+
+export async function getFuelCars(): Promise<FuelCarsResponse> {
+  return request<FuelCarsResponse>('/api/fuel/cars')
+}
+
+export async function getFuelCards(): Promise<FuelCardsResponse> {
+  return request<FuelCardsResponse>('/api/fuel/cards')
+}
+
+export async function getFuelCard(id: number): Promise<FuelCardResponse> {
+  return request<FuelCardResponse>(`/api/fuel/cards/${id}`)
+}
+
+export async function createFuelCard(id: number, carId: string): Promise<FuelCardResponse> {
+  return request<FuelCardResponse>('/api/fuel/cards', {
+    method: 'POST',
+    body: JSON.stringify({ id, car_id: carId }),
+  })
+}
+
+export async function updateFuelCard(id: number, patch: FuelCardPatch): Promise<FuelCardResponse> {
+  return request<FuelCardResponse>(`/api/fuel/cards/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+}
+
+export async function deleteFuelCard(id: number): Promise<void> {
+  await request<void>(`/api/fuel/cards/${id}`, { method: 'DELETE' })
+}
+
+/** 給油行の path の鍵 (`{datetime};{card}`)。datetime の空白と `:` は符号化する。 */
+function fuelIntankPath(datetime: string, fuelCardId: number): string {
+  return `/api/fuel/intank/${encodeURIComponent(datetime)};${fuelCardId}`
+}
+
+/** dtako_row_id の付け替え。空文字か null で NULL にする。 */
+export async function updateFuelIntankDtakoRow(datetime: string, fuelCardId: number, dtakoRowId: string | null): Promise<void> {
+  await request<void>(fuelIntankPath(datetime, fuelCardId), {
+    method: 'PATCH',
+    body: JSON.stringify({ dtako_row_id: dtakoRowId }),
+  })
+}
+
+/** manual の行の削除 (それ以外は 409)。 */
+export async function deleteFuelIntank(datetime: string, fuelCardId: number): Promise<void> {
+  await request<void>(fuelIntankPath(datetime, fuelCardId), { method: 'DELETE' })
+}
+
+/**
+ * UTRAN.CSV の取り込み。**本文は CSV の生バイト** — `Content-Type` を明示しないと
+ * `createAuthFetch` が `application/json` を付け、proxy が JSON として読み直そうとする。
+ */
+export async function uploadFuelCsv(bytes: ArrayBuffer): Promise<FuelUploadResponse> {
+  return request<FuelUploadResponse>('/api/fuel/uploads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/csv' },
+    body: bytes,
+  })
+}
+
+/** 取り込んだ CSV のダウンロード (R2 にある 1 日の間だけ)。素の fetch + blob。 */
+export async function downloadFuelUpload(sha256: string, retry: string): Promise<void> {
+  const token = getAccessToken?.()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
+  const res = await fetchOrDescribe(`${apiBase}/api/fuel/uploads/${sha256}`, { headers })
+  await ensureOk(res, retry)
+  await downloadBlobResponse(res, 'UTRAN.CSV')
 }
