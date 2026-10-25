@@ -7,7 +7,7 @@ export const UIconStub = { template: '<span />' }
  *
  * **Nuxt UI の実コンポーネントは vitest で mount できない。** `UButton` は setup で
  * `useAppConfig()` を呼ぶため `[nuxt] instance unavailable` で落ちる (実測 2026-08-25、
- * `app/pages/members.vue` を素で mount して確認)。**1 つでも stub し忘れると
+ * 当時の `app/pages/members.vue` (消した画面) を素で mount して確認)。**1 つでも stub し忘れると
  * ページ全体が mount できず、原因が「Invalid vnode type ... undefined」や
  * 「instance unavailable」という、そのコンポーネント名が出ない形で出る。**
  *

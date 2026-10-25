@@ -16,7 +16,7 @@
  * 3. **リランの成功と失敗** (同じ場所に出るので色と文言で撃ち分ける)
  * 4. **分割の「完了」と「N 件失敗したまま」** — 200 が返っても個別 PUT は失敗しうる
  *
- * テストの型は `members-page.test.ts` と同じ。
+ * テストの型 (`~/utils/api` を `vi.mock` + Nuxt UI を stub) は、ほかの `tests/components/*-page.test.ts` と同じ。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
