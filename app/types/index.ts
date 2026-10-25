@@ -32,33 +32,6 @@ export interface SwitchTenantResponse {
   tenant_name?: string
 }
 
-// --- Tenant Members ---
-
-export interface TenantMember {
-  email: string
-  role: string
-  created_at: string
-}
-
-// --- API Tokens ---
-
-export interface ApiTokenListItem {
-  id: string
-  name: string
-  token_prefix: string
-  expires_at: string | null
-  revoked_at: string | null
-  last_used_at: string | null
-  created_at: string
-}
-
-export interface CreateApiTokenResponse {
-  id: string
-  name: string
-  token: string
-  token_prefix: string
-}
-
 // --- Domain ---
 
 export interface Driver {

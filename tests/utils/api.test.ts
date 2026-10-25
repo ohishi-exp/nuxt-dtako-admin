@@ -21,13 +21,6 @@ import {
   getYTimeRows,
   getDtakoOperationChanges,
   getRestraintReport,
-  getMembers,
-  inviteMember,
-  updateMemberRole,
-  deleteMember,
-  getApiTokens,
-  createApiToken,
-  revokeApiToken,
   getCalendar,
   getScrapeHistory,
   saveScrapeHistory,
@@ -388,9 +381,7 @@ describe('api', () => {
       ['getDrivers', () => getDrivers(), '/api/drivers'],
       ['getVehicles', () => getVehicles(), '/api/vehicles'],
       ['getEventClassifications', () => getEventClassifications(), '/api/event-classifications'],
-      ['getMembers', () => getMembers(), '/api/members'],
       ['getPendingUploads', () => getPendingUploads(), '/api/internal/pending'],
-      ['getApiTokens', () => getApiTokens(), '/api/api-tokens'],
       ['getUploads', () => getUploads(), '/api/uploads'],
     ] as [string, () => Promise<unknown>, string][])('%s → GET %s', async (_name, fn, expectedPath) => {
       stubOk({})
@@ -606,37 +597,6 @@ describe('api', () => {
       })
     })
 
-    it('inviteMember', async () => {
-      stubOk({ email: 'a@b.com', role: 'admin' })
-      await callApi(() => inviteMember('a@b.com', 'admin'))
-      assertMock(() => {
-        const [url, opts] = mockFetch.mock.calls[0]
-        expect(url).toBe(`${API_BASE}/api/members`)
-        expect(opts.method).toBe('POST')
-        expect(JSON.parse(opts.body)).toEqual({ email: 'a@b.com', role: 'admin' })
-      })
-    })
-
-    it('createApiToken', async () => {
-      stubOk({ id: '1', name: 'test', token: 'abc', token_prefix: 'ab' })
-      await callApi(() => createApiToken('test', 30))
-      assertMock(() => {
-        const [url, opts] = mockFetch.mock.calls[0]
-        expect(url).toBe(`${API_BASE}/api/api-tokens`)
-        expect(opts.method).toBe('POST')
-        expect(JSON.parse(opts.body)).toEqual({ name: 'test', expires_in_days: 30 })
-      })
-    })
-
-    it('createApiToken with no expiry sends null', async () => {
-      stubOk({ id: '1', name: 'test', token: 'abc', token_prefix: 'ab' })
-      await callApi(() => createApiToken('test'))
-      assertMock(() => {
-        const body = JSON.parse(mockFetch.mock.calls[0][1].body)
-        expect(body.expires_in_days).toBeNull()
-      })
-    })
-
   })
 
   // ===== PUT/PATCH functions =====
@@ -653,16 +613,6 @@ describe('api', () => {
       })
     })
 
-    it('updateMemberRole', async () => {
-      stub204()
-      await callApi(() => updateMemberRole('a@b.com', 'viewer'))
-      assertMock(() => {
-        const [url, opts] = mockFetch.mock.calls[0]
-        expect(url).toBe(`${API_BASE}/api/members/a%40b.com`)
-        expect(opts.method).toBe('PATCH')
-        expect(JSON.parse(opts.body)).toEqual({ role: 'viewer' })
-      })
-    })
   })
 
   // ===== DELETE functions =====
@@ -670,8 +620,6 @@ describe('api', () => {
   describe('DELETE functions', () => {
     it.each([
       ['deleteOperation', () => deleteOperation('U001'), '/api/operations/U001'],
-      ['deleteMember', () => deleteMember('a@b.com'), '/api/members/a%40b.com'],
-      ['revokeApiToken', () => revokeApiToken('tok-1'), '/api/api-tokens/tok-1'],
     ] as [string, () => Promise<unknown>, string][])('%s → DELETE %s', async (_name, fn, expectedPath) => {
       stub204()
       await callApi(fn)
