@@ -102,7 +102,8 @@ const UPSTREAM_PATHS: UpstreamPathEntry[] = [
   {
     path: '/api/vehicles',
     caller: 'server/api/vehicle-settings/unconfirmed.get.ts',
-    liveProbe: true,
+    liveProbe: false,
+    reason: 'ippoan/alc-dtako-worker へ移り、rust-alc-api から消える (W5c-1、Refs ippoan/rust-alc-api#680。本番は auth-worker v0.2.341 で worker に回っている)。live の相手は rust-alc-api のコンテナなので 404 になる。worker 側の在る・無いは alc-dtako-worker の tests/screen_flow.rs が縛る',
   },
   {
     path: '/api/dtako/y-time-export',
@@ -118,22 +119,23 @@ const UPSTREAM_PATHS: UpstreamPathEntry[] = [
   {
     path: '/api/internal/operations',
     caller: 'server/api/tariff/dtako-operations.get.ts',
-    // `docker-compose.test.yml` に `INTERNAL_SHARED_SECRET` を足すまでは 404 で、
-    // 「上流から消えた」と区別できなかった (経緯は冒頭の docstring)。
-    // env を足して 401 になったので live で測れる。
-    liveProbe: true,
+    // `docker-compose.test.yml` に `INTERNAL_SHARED_SECRET` を足して 401 で測れるようになったが (経緯は冒頭の docstring)、
+    // 口ごと alc-dtako-worker へ移ったので rust-alc-api のコンテナではもう測れない
+    liveProbe: false,
+    reason: 'ippoan/alc-dtako-worker へ移り、rust-alc-api から消える (W5c-1、Refs ippoan/rust-alc-api#680。本番は auth-worker v0.2.341 で worker に回っている)。live の相手は rust-alc-api のコンテナなので 404 になる。worker 側の在る・無いは alc-dtako-worker の tests/screen_flow.rs が縛る',
   },
 ]
 
 /**
- * live 実測から外れている path の件数。**現在 0 件**。
+ * live 実測から外れている path の件数。**現在 2 件** (`/api/vehicles`・`/api/internal/operations`。どちらも
+ * alc-dtako-worker へ移った口。W5c-1)。
  *
  * ここを固定しておくと、次に誰かが `liveProbe: false` を黙って足したときに落ちる。
  * 外すのが正当なら**この数と `reason` を一緒に**直すことになるので、除外が
  * 「気づかれないまま増える」ことがなくなる (この repo が何度も踏んでいる
  * 「緑だが検証ゼロ」の穴を、件数側からも塞ぐ)。
  */
-const EXPECTED_EXCLUDED_FROM_LIVE = 0
+const EXPECTED_EXCLUDED_FROM_LIVE = 2
 
 // ---------------------------------------------------------------------------
 // ② server/ を走査して実装側の path: リテラルを抜く
