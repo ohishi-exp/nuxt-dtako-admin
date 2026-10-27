@@ -108,13 +108,15 @@ const UPSTREAM_PATHS: UpstreamPathEntry[] = [
   {
     path: '/api/dtako/y-time-export',
     caller: 'server/utils/y-time-rows.ts',
-    liveProbe: true,
+    liveProbe: false,
+    reason: 'ippoan/alc-dtako-worker へ移り、rust-alc-api から消える (W5c-2、Refs ippoan/rust-alc-api#680。本番は auth-worker v0.2.343 で worker に回っている)。live の相手は rust-alc-api のコンテナなので 404 になる。worker 側の在る・無いは alc-dtako-worker の tests/ytime_flow.rs が縛る',
   },
   {
     // 勤務の列を Y時間 の行にする口 (POST)。実測は GET で投げるが、見るのは「404 でない」だけ
     path: '/api/dtako/y-time-rows',
     caller: 'server/utils/y-time-rows.ts',
-    liveProbe: true,
+    liveProbe: false,
+    reason: 'ippoan/alc-dtako-worker へ移り、rust-alc-api から消える (W5c-2、Refs ippoan/rust-alc-api#680。本番は auth-worker v0.2.343 で worker に回っている)。live の相手は rust-alc-api のコンテナなので 404 になる。worker 側の在る・無いは alc-dtako-worker の tests/ytime_flow.rs が縛る',
   },
   {
     path: '/api/internal/operations',
@@ -127,15 +129,15 @@ const UPSTREAM_PATHS: UpstreamPathEntry[] = [
 ]
 
 /**
- * live 実測から外れている path の件数。**現在 2 件** (`/api/vehicles`・`/api/internal/operations`。どちらも
- * alc-dtako-worker へ移った口。W5c-1)。
+ * live 実測から外れている path の件数。**現在 4 件** (`/api/vehicles`・`/api/internal/operations` = W5c-1、
+ * `/api/dtako/y-time-export`・`/api/dtako/y-time-rows` = W5c-2。どれも alc-dtako-worker へ移った口)。
  *
  * ここを固定しておくと、次に誰かが `liveProbe: false` を黙って足したときに落ちる。
  * 外すのが正当なら**この数と `reason` を一緒に**直すことになるので、除外が
  * 「気づかれないまま増える」ことがなくなる (この repo が何度も踏んでいる
  * 「緑だが検証ゼロ」の穴を、件数側からも塞ぐ)。
  */
-const EXPECTED_EXCLUDED_FROM_LIVE = 2
+const EXPECTED_EXCLUDED_FROM_LIVE = 4
 
 // ---------------------------------------------------------------------------
 // ② server/ を走査して実装側の path: リテラルを抜く
@@ -279,9 +281,18 @@ describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
       }
     })
 
-    it('④ 穴塞ぎ: 少なくとも 1 本は live 実測の対象になっている', () => {
-      // 全部が liveProbe: false になると ③ が丸ごと空回りする。
-      expect(UPSTREAM_PATHS.filter(e => e.liveProbe).length).toBeGreaterThan(0)
+    it('④ 穴塞ぎ: live 実測の対象が 0 本なのは、全部が worker へ移ったときだけ', () => {
+      // 全部が liveProbe: false になると ③ が丸ごと空回りする (陰性対照だけが走る)。
+      // W5c-2 (Refs ippoan/rust-alc-api#680) でこの repo が呼ぶ上流の口は全部 ippoan/alc-dtako-worker へ移り、
+      // rust-alc-api のコンテナで測れる口は無くなった。0 本を許すのはその理由のときだけにする。
+      if (UPSTREAM_PATHS.some(e => e.liveProbe)) return
+      for (const e of UPSTREAM_PATHS) {
+        expect(
+          e.reason,
+          `${e.path} が live 実測から外れているが、worker へ移った以外の理由に見える。`
+          + '全部を外すと ③ が空回りするので、worker へ移った口でなければ live で測ること。',
+        ).toContain('ippoan/alc-dtako-worker へ移り')
+      }
     })
 
     it('④ 穴塞ぎ: live 実測から外れている path の件数が想定どおり (陰性対照)', () => {
