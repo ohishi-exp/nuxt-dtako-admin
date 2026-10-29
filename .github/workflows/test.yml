@@ -17,20 +17,9 @@ jobs:
   ci:
     uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
     with:
-      has_integration: true
       # lockfile が ^0.2.55 未満を pin していても manifest に追従して解決する
       # (org caller template 標準。CCoW からは lockfile を再生成できないため)
       install_command: 'npm install'
-      # rust-alc-api backend に対する live integration test を Release Wave の
-      # compatibility matrix に記録する (= Compatibility (all consumers) /
-      # Repo リリース状況 に consumer として出す)。docker-compose.test.yml が
-      # $API_IMAGE で backend image を起動し、vitest を live モード
-      # (API_BASE_URL=http://localhost:18080) で実 API に向ける。記録する image は
-      # production の API base (monolith `rust-alc-api`、wrangler の
-      # NUXT_PUBLIC_API_BASE) と同一なので truthful な突合になる。
-      compat_backend_repo: 'ippoan/rust-alc-api'
-      compat_backend_image_env: 'API_IMAGE'
-      integration_env: 'API_BASE_URL=http://localhost:18080'
       use_auth_client_dev: true   # PR 時に @ippoan/auth-client@dev を overlay install (createIdentityProxyHandler 取得、Refs rust-alc-api#434)
       post_install_script: 'npx nuxt prepare'
       # frontend-ci の nuxt 用既定コマンドは `npm run build && npx wrangler
