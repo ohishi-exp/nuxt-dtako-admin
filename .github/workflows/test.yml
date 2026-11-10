@@ -17,6 +17,9 @@ jobs:
   ci:
     uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
     with:
+      # staging deploy 後に、この frontend が実際に呼ぶ staging の CF Worker の SHA を tested として
+      # ci-dashboard に報告する (Refs ippoan/ci-dashboard#520)。呼ぶ証拠のある worker だけを並べる。
+      compat_staging_backends: 'ippoan/alc-dtako-worker,ippoan/alc-notify-worker'
       # lockfile が ^0.2.55 未満を pin していても manifest に追従して解決する
       # (org caller template 標準。CCoW からは lockfile を再生成できないため)
       install_command: 'npm install'
