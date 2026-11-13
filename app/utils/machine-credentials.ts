@@ -100,16 +100,52 @@ export function labelError(raw: string): string | null {
 }
 
 /**
+ * auth-worker が本文の `error` に入れるコードごとの文 (Refs yhonda-ohishi/nginx#814)。
+ * コード (英語) は画面に出さない — 押した人が次に何をすればいいかだけを書く。
+ * `invalid_label` / `invalid_purpose` は 400、`store_failed` は 502 (保存先の失敗)。
+ */
+const CODE_TEXT: Record<string, string> = {
+  invalid_label: `PC 名を 1〜${LABEL_MAX} 文字で入れてください`,
+  store_failed: '資格情報を保存できませんでした。時間をおいてもう一度試し、続くときは管理者に連絡してください',
+  invalid_purpose: 'この種類の資格情報は発行できません (設定の不足)。管理者に連絡してください',
+}
+
+/** 失敗の本文 (`$fetch` の `e.data`) の `error` コードが既知なら、その文。無ければ null */
+export function errorCodeText(e: unknown): string | null {
+  const code = (e as { data?: { error?: unknown } } | null)?.data?.error
+  return typeof code === 'string' && Object.hasOwn(CODE_TEXT, code) ? CODE_TEXT[code]! : null
+}
+
+/**
  * 管理 API の失敗を画面の文にする。403 は管理者以外、404 は rotate・revoke の対象が無い
- * (`notFoundIsMissing`)。それ以外は dtako 共通の `describeCaughtError` (通信失敗・5xx 等)。
+ * (`notFoundIsMissing`)、既知のコードはその文 ({@link errorCodeText})。
+ * それ以外は dtako 共通の `describeCaughtError` (通信失敗・401・5xx 等)。
  * 401 は fetcher 側でログインし直しへ飛ばすので、ここには来ても共通の文で足りる。
  */
 export function credentialErrorText(e: unknown, retry: string, notFoundIsMissing = false): string {
   const status = caughtErrorStatus(e)
   if (status === 403) return '管理者だけが使えます'
   if (status === 404 && notFoundIsMissing) return 'この資格情報は失効しているか見つかりません'
-  return describeCaughtError(e, retry)
+  return errorCodeText(e) ?? describeCaughtError(e, retry)
 }
+
+/**
+ * 「発行」の失敗の文。{@link credentialErrorText} と同じ枝に加えて、status は読めたが
+ * コードを知らない失敗を「発行できませんでした (HTTP <status>)」にする — 共通の文の
+ * 「上の理由のとおりに直して」は、理由がコード (英語) しか無いと何を直すのか分からないため。
+ * 通信失敗 (status 無し) と 401・403 は共通の文のまま (次の一手が決まっている)。
+ */
+export function issueErrorText(e: unknown): string {
+  const status = caughtErrorStatus(e)
+  if (status === null || status === 401 || status === 403 || errorCodeText(e) !== null) {
+    return credentialErrorText(e, 'もう一度「発行」を押してください')
+  }
+  return `発行できませんでした (HTTP ${status})`
+}
+
+/** 発行の前に入力欄の上に出す説明 */
+export const ISSUE_GUIDE
+  = '発行すると username と password が 1 回だけ表示されます。Windows アプリのトレイのアイコンを右クリック →『資格情報を設定』に入れてください'
 
 /** 作成日を `YYYY-MM-DD` (日本時間) で出す。読めなければそのまま */
 export function formatIssuedDate(iso: string): string {
