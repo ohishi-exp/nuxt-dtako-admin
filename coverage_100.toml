@@ -1380,3 +1380,8 @@ branches = true
 [[files]]
 path = "app/utils/fuel-manual.ts"
 branches = true
+
+# 給油データ USB アップローダーの資格情報 (purpose fuel-utran) の純粋ロジック (Refs yhonda-ohishi/nginx#814)。
+[[files]]
+path = "app/utils/machine-credentials.ts"
+branches = true
