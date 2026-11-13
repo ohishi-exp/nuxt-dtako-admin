@@ -4,7 +4,10 @@ import {
   ONE_TIME_NOTICE,
   PURPOSE,
   createMachineCredentialApi,
+  ISSUE_GUIDE,
   credentialErrorText,
+  errorCodeText,
+  issueErrorText,
   formatIssuedDate,
   labelError,
   listUrl,
@@ -30,8 +33,8 @@ const row = (o: Partial<MachineCredential>): MachineCredential => ({
 })
 
 /** $fetch (ofetch) の FetchError と同じく statusCode を持つ例外 */
-function httpError(statusCode: number) {
-  return Object.assign(new Error(`[POST] x: ${statusCode}`), { statusCode })
+function httpError(statusCode: number, data?: unknown) {
+  return Object.assign(new Error(`[POST] x: ${statusCode}`), { statusCode, data })
 }
 
 describe('PURPOSE', () => {
@@ -121,6 +124,67 @@ describe('credentialErrorText', () => {
     const text = credentialErrorText(new TypeError('Failed to fetch'), RETRY)
     expect(text).not.toBe('管理者だけが使えます')
     expect(text.length).toBeGreaterThan(0)
+  })
+})
+
+describe('errorCodeText', () => {
+  it('既知のコードは日本語の文 (コードそのものは出さない)', () => {
+    expect(errorCodeText(httpError(400, { error: 'invalid_label' }))).toBe(`PC 名を 1〜${LABEL_MAX} 文字で入れてください`)
+    expect(errorCodeText(httpError(502, { error: 'store_failed' })))
+      .toBe('資格情報を保存できませんでした。時間をおいてもう一度試し、続くときは管理者に連絡してください')
+    expect(errorCodeText(httpError(400, { error: 'invalid_purpose' })))
+      .toBe('この種類の資格情報は発行できません (設定の不足)。管理者に連絡してください')
+  })
+  it('知らないコード・文字列でないコード・本文なし・prototype の名前は null', () => {
+    expect(errorCodeText(httpError(400, { error: 'other' }))).toBeNull()
+    expect(errorCodeText(httpError(400, { error: true }))).toBeNull()
+    expect(errorCodeText(httpError(400, { error: 'toString' }))).toBeNull()
+    expect(errorCodeText(httpError(400))).toBeNull()
+    expect(errorCodeText(null)).toBeNull()
+  })
+})
+
+describe('credentialErrorText と既知のコード', () => {
+  it('rotate の store_failed もコードの文 (英語のコードを出さない)', () => {
+    const text = credentialErrorText(httpError(502, { error: 'store_failed' }), 'x', true)
+    expect(text).toContain('資格情報を保存できませんでした')
+    expect(text).not.toContain('store_failed')
+  })
+  it('403・404 はコードより先', () => {
+    expect(credentialErrorText(httpError(403, { error: 'invalid_label' }), 'x')).toBe('管理者だけが使えます')
+    expect(credentialErrorText(httpError(404, { error: 'store_failed' }), 'x', true)).toBe('この資格情報は失効しているか見つかりません')
+  })
+})
+
+describe('issueErrorText', () => {
+  it('400 invalid_label は PC 名の文だけ (「上の理由のとおりに」を出さない)', () => {
+    const text = issueErrorText(httpError(400, { error: 'invalid_label' }))
+    expect(text).toBe(`PC 名を 1〜${LABEL_MAX} 文字で入れてください`)
+    expect(text).not.toContain('上の理由')
+    expect(text).not.toContain('invalid_label')
+  })
+  it('502 store_failed・400 invalid_purpose はそれぞれの文', () => {
+    expect(issueErrorText(httpError(502, { error: 'store_failed' }))).toContain('時間をおいてもう一度試し')
+    expect(issueErrorText(httpError(400, { error: 'invalid_purpose' }))).toContain('設定の不足')
+  })
+  it('403 は管理者だけ、401 はログインし直し (共通の文)', () => {
+    expect(issueErrorText(httpError(403))).toBe('管理者だけが使えます')
+    expect(issueErrorText(httpError(401))).toContain('再ログイン')
+  })
+  it('知らない失敗は「発行できませんでした (HTTP <status>)」', () => {
+    expect(issueErrorText(httpError(500, { error: 'boom' }))).toBe('発行できませんでした (HTTP 500)')
+    expect(issueErrorText(httpError(400))).toBe('発行できませんでした (HTTP 400)')
+  })
+  it('通信そのものの失敗は共通の文 (「発行」のやり直しつき)', () => {
+    expect(issueErrorText(new TypeError('Failed to fetch'))).toContain('もう一度「発行」を押してください')
+  })
+})
+
+describe('ISSUE_GUIDE', () => {
+  it('1 回だけ表示されることと、トレイの右クリックからの入れ先を言う', () => {
+    expect(ISSUE_GUIDE).toContain('1 回だけ表示されます')
+    expect(ISSUE_GUIDE).toContain('トレイのアイコンを右クリック')
+    expect(ISSUE_GUIDE).toContain('『資格情報を設定』')
   })
 })
 
