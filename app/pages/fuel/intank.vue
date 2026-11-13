@@ -291,6 +291,7 @@ onMounted(() => {
       <USelect v-model="selected" :items="startItems" class="w-64" />
       <UButton to="/fuel/manual" icon="i-lucide-pencil" variant="outline" label="手入力" />
       <UButton to="/fuel/cards" icon="i-lucide-credit-card" variant="outline" label="カード" />
+      <UButton to="/fuel/credentials" icon="i-lucide-key-round" variant="outline" label="アップローダーの資格情報" />
       <UButton icon="i-lucide-printer" variant="outline" label="印刷" @click="printPage" />
     </div>
 
