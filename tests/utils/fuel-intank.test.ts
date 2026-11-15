@@ -9,6 +9,8 @@ import {
   quantityDiff,
   isDiffHighlighted,
   dailyReportEditQuery,
+  normalizeVehicleCd,
+  dvrMapQuery,
   totalQuantity,
   uploadResultText,
   sha256FromKey,
@@ -161,6 +163,45 @@ describe('dailyReportEditQuery', () => {
   it('乗務員名が無い・空白だけなら driver を付けない', () => {
     expect(dailyReportEditQuery(row({ dtako_row: dtako({ driver_name: null }) }))).not.toHaveProperty('driver')
     expect(dailyReportEditQuery(row({ dtako_row: dtako({ driver_name: '  ' }) }))).not.toHaveProperty('driver')
+  })
+  it('車輌CD があれば先頭ゼロを落として vehicleCd に付ける', () => {
+    expect(dailyReportEditQuery(row({ dtako_row: dtako(), car: { id: '5', name: '1号車', vehicle_cd: '0000002158' } }))).toEqual({
+      from: '2023-12-31T00:00', to: '2024-01-02T23:59', driver: '山田 太郎', vehicleCd: '2158',
+    })
+  })
+  it('車輌CD が無い・読めない・9 桁以上なら vehicleCd を付けない', () => {
+    expect(dailyReportEditQuery(row({ car: { id: '5', name: '1号車' } }))).not.toHaveProperty('vehicleCd')
+    expect(dailyReportEditQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: null } }))).not.toHaveProperty('vehicleCd')
+    expect(dailyReportEditQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: '12a' } }))).not.toHaveProperty('vehicleCd')
+    expect(dailyReportEditQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: '123456789' } }))).not.toHaveProperty('vehicleCd')
+    expect(dailyReportEditQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: '0012345678' } }))).toMatchObject({ vehicleCd: '12345678' })
+  })
+})
+
+describe('normalizeVehicleCd', () => {
+  it('数字だけなら先頭ゼロを落とす (全部 0 なら "0")', () => {
+    expect(normalizeVehicleCd('0000002158')).toBe('2158')
+    expect(normalizeVehicleCd('2158')).toBe('2158')
+    expect(normalizeVehicleCd('0000')).toBe('0')
+  })
+  it('空・null・undefined・数字以外を含むなら null', () => {
+    expect(normalizeVehicleCd('')).toBeNull()
+    expect(normalizeVehicleCd(null)).toBeNull()
+    expect(normalizeVehicleCd(undefined)).toBeNull()
+    expect(normalizeVehicleCd('12a')).toBeNull()
+  })
+})
+
+describe('dvrMapQuery', () => {
+  it('車輌CD があれば vehicle (先頭ゼロなし) と at (給油日時の YYYY-MM-DDTHH:mm)', () => {
+    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: '0000002158' } })))
+      .toEqual({ vehicle: '2158', at: '2023-12-20T08:10' })
+  })
+  it('car・車輌CD が無い・読めなければ null', () => {
+    expect(dvrMapQuery(row())).toBeNull()
+    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車' } }))).toBeNull()
+    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: null } }))).toBeNull()
+    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: 'x1' } }))).toBeNull()
   })
 })
 

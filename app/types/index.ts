@@ -458,7 +458,8 @@ export interface FuelIntankRow {
   /** `{datetime};{fuel_card_id}`。編集・削除の path の元 */
   id_st: string | null
   // ↓ `?start=` のときだけ載る
-  car?: { id: string | null, name: string | null } | null
+  /** `vehicle_cd` は車輌CD (dtako_cars の値のまま。先頭ゼロ付きもありうる。rust-fuel-worker が足すまでは無い) */
+  car?: { id: string | null, name: string | null, vehicle_cd?: string | null } | null
   dtako_row?: FuelDtakoRow | null
   /** その運行の当日の dtako 給油量の合計 (集計できなければ null) */
   dtako_fuel_sum?: number | null

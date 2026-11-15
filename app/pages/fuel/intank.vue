@@ -10,7 +10,7 @@ import {
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
-  isDiffHighlighted, dailyReportEditQuery, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  isDiffHighlighted, dailyReportEditQuery, dvrMapQuery, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
 import { canRecheck, describeManualError } from '~/utils/fuel-manual'
@@ -411,6 +411,11 @@ onMounted(() => {
                   v-if="isMatching && isDiffHighlighted(r)" size="xs" variant="outline" label="日報を直す" class="ml-1"
                   icon="i-lucide-external-link" target="_blank"
                   :to="{ path: '/daily-report-edit', query: dailyReportEditQuery(r) }"
+                />
+                <UButton
+                  v-if="isMatching && dvrMapQuery(r)" size="xs" variant="outline" label="位置を見る" class="ml-1"
+                  icon="i-lucide-map-pin" target="_blank"
+                  :to="{ path: '/dvr-map', query: dvrMapQuery(r)! }"
                 />
                 <UButton v-if="canRecheck(r)" size="xs" variant="outline" label="再照合" class="ml-1" :loading="rechecking === rowKey(r)" :disabled="rechecking !== null" @click="recheck(r)" />
                 <UButton v-if="r.manual" size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = r" />
