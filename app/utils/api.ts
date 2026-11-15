@@ -1131,9 +1131,15 @@ export async function deleteFuelCard(id: number): Promise<void> {
   await request<void>(`/api/fuel/cards/${id}`, { method: 'DELETE' })
 }
 
-/** 給油行の path の鍵 (`{datetime};{card}`)。datetime の空白と `:` は符号化する。 */
+/**
+ * 給油行の path の鍵 (`{datetime};{card}`)。datetime の空白は `+` にする
+ * (`%` を含む path は auth-worker が 403 にするため。rust-fuel-worker は `+` を空白に戻して読む)。
+ */
 function fuelIntankPath(datetime: string, fuelCardId: number): string {
-  return `/api/fuel/intank/${encodeURIComponent(datetime)};${fuelCardId}`
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(datetime)) {
+    throw new Error(`給油行の日時の形式が不正です: ${datetime}`)
+  }
+  return `/api/fuel/intank/${datetime.replace(' ', '+')};${fuelCardId}`
 }
 
 /** dtako_row_id の付け替え。空文字か null で NULL にする。 */
