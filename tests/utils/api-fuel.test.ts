@@ -92,10 +92,11 @@ describe('fuel の card の書き込み', () => {
 })
 
 describe('fuel_intank の書き込み (path は `{datetime};{card}`)', () => {
-  it('updateFuelIntankDtakoRow は datetime を符号化し、card は素のまま `;` で繋ぐ', async () => {
+  it('updateFuelIntankDtakoRow は datetime の空白を `+` にし、card は素のまま `;` で繋ぐ (`%` を出さない)', async () => {
     await updateFuelIntankDtakoRow('2023-12-20 07:33:00', 12, '231220073300000000351')
     const [url, init] = call()
-    expect(url).toBe(`${BASE}/api/fuel/intank/2023-12-20%2007%3A33%3A00;12`)
+    expect(url).toBe(`${BASE}/api/fuel/intank/2023-12-20+07:33:00;12`)
+    expect(url).not.toContain('%')
     expect(init.method).toBe('PATCH')
     expect(JSON.parse(init.body as string)).toEqual({ dtako_row_id: '231220073300000000351' })
   })
@@ -107,8 +108,19 @@ describe('fuel_intank の書き込み (path は `{datetime};{card}`)', () => {
 
   it('deleteFuelIntank は同じ path を DELETE する', async () => {
     await deleteFuelIntank('2023-12-20 07:33:00', 12)
-    expect(call()[0]).toBe(`${BASE}/api/fuel/intank/2023-12-20%2007%3A33%3A00;12`)
+    expect(call()[0]).toBe(`${BASE}/api/fuel/intank/2023-12-20+07:33:00;12`)
+    expect(call()[0]).not.toContain('%')
     expect(call()[1].method).toBe('DELETE')
+  })
+
+  it.each([
+    ['T 区切り', '2023-12-20T07:33:00'],
+    ['path の継ぎ足し', '2023-12-20 07:33:00/../x'],
+  ])('★ datetime が `YYYY-MM-DD HH:MM:SS` でなければ (%s) fetch せずに throw する', async (_label, datetime) => {
+    await expect(updateFuelIntankDtakoRow(datetime, 12, null)).rejects.toThrow('給油行の日時の形式が不正です')
+    await expect(deleteFuelIntank(datetime, 12)).rejects.toThrow('給油行の日時の形式が不正です')
+    await expect(recheckFuelIntank(datetime, 12)).rejects.toThrow('給油行の日時の形式が不正です')
+    expect(mockFetch).not.toHaveBeenCalled()
   })
 })
 
@@ -136,7 +148,8 @@ describe('手入力の追加と recheck', () => {
   it('recheckFuelIntank は行の path に /recheck を付けて本文なしで POST する', async () => {
     await recheckFuelIntank('2023-12-20 07:33:00', 12)
     const [url, init] = call()
-    expect(url).toBe(`${BASE}/api/fuel/intank/2023-12-20%2007%3A33%3A00;12/recheck`)
+    expect(url).toBe(`${BASE}/api/fuel/intank/2023-12-20+07:33:00;12/recheck`)
+    expect(url).not.toContain('%')
     expect(init.method).toBe('POST')
     expect(init.body).toBeUndefined()
   })
