@@ -8,6 +8,7 @@
  * relay 側で DDMM → 十進度に変換済み。
  */
 import type { DvrMapMarker } from '~/components/DvrMap.vue'
+import { normalizeVehicleCd } from '~/utils/fuel-intank'
 
 
 interface VehicleStatePoint {
@@ -157,14 +158,41 @@ function markerIndexOfState(row: VehicleStatePoint): number | null {
   return idx >= 0 ? idx : null
 }
 
-/** 現在地行のダブルクリック → その車輌の動態履歴 (当日) を検索して履歴タブへ。 */
-function openTrackForVehicle(v: VehicleStatePoint) {
-  if (!v.vehicleCd) return
+/** 現在地行のダブルクリック → その車輌の動態履歴 (`day`、省略時は当日) を検索して履歴タブへ。 */
+function openTrackForVehicle(v: Pick<VehicleStatePoint, 'vehicleCd'>, day?: string): Promise<void> {
+  if (!v.vehicleCd) return Promise.resolve()
   trackForm.vehicleCd = v.vehicleCd
-  trackForm.startDay = todayDateInput()
-  trackForm.endDay = todayDateInput()
+  trackForm.startDay = day ?? todayDateInput()
+  trackForm.endDay = day ?? todayDateInput()
   activeTab.value = 'track'
-  loadTrack()
+  return loadTrack()
+}
+
+// --- URL query で開く (インタンク画面の「位置を見る」`?vehicle=<車輌CD>&at=YYYY-MM-DDTHH:mm`。Refs yhonda-ohishi/nginx#814) ---
+
+const route = useRoute()
+/** query を処理したか (onMounted と onLogin の両方から呼ぶので 1 回だけにする)。 */
+let routeQueryHandled = false
+
+/** `vehicle` と `at` がそろっていれば、その車輌のその日の動態履歴を読み、`at` に最も近い点を選ぶ。
+ * masters の code とは `normalizeVehicleCd` どうしで比べる (先頭ゼロの差を吸収)。 */
+async function openFromRouteQuery() {
+  const vehicle = typeof route.query.vehicle === 'string' ? route.query.vehicle : ''
+  const at = typeof route.query.at === 'string' ? route.query.at : ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(at)
+  if (routeQueryHandled || !masters.value || !/^\d{1,8}$/.test(vehicle) || !m) return
+  routeQueryHandled = true
+  const want = normalizeVehicleCd(vehicle)
+  const found = masters.value.vehicles.find(v => normalizeVehicleCd(v.code) === want)
+  activeTab.value = 'track'
+  if (!found) {
+    trackError.value = `車両 ${vehicle} が見つかりません`
+    return
+  }
+  await openTrackForVehicle({ vehicleCd: found.code }, at.slice(0, 10))
+  if (trackError.value || track.value.length === 0) return
+  // parseTrackTs と同じ単位 (naive epoch 秒)
+  onChartSeek(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) / 1000)
 }
 
 // --- 動態履歴 (VehicleStateTable) ---
@@ -348,7 +376,7 @@ const trackMarkers = computed<DvrMapMarker[]>(() => {
 // --- セッションライフサイクル ---
 
 function onLogin() {
-  loadMasters()
+  loadMasters().then(openFromRouteQuery)
   if (branchCode.value) loadStates()
 }
 
@@ -380,6 +408,7 @@ onMounted(() => {
   if (session.value) {
     loadMasters().then(() => {
       if (branchCode.value) loadStates()
+      return openFromRouteQuery()
     })
   }
   else {

@@ -111,7 +111,8 @@ function shiftDate(ymd: string, days: number): string {
  * 「日報を直す」で開く `/daily-report-edit` の query。値は日報編集の期間欄 (datetime-local の
  * `YYYY-MM-DDTHH:mm`) の形。日報の一覧は読取日 (退社日時) で絞るので、`to` は帰庫日の**翌日** 23:59
  * にして、読取日が帰庫より後になる運行を落とさない。出庫・帰庫が無い (集計なし) 行は給油日の
- * 前日 00:00 〜 翌日 23:59。`driver` は乗務員名 (無ければ付けない)。
+ * 前日 00:00 〜 翌日 23:59。`driver` は乗務員名 (無ければ付けない)。`vehicleCd` は車輌CD
+ * (`normalizeVehicleCd` で 1〜8 桁になるときだけ。日報編集の車輌CD 欄の形)。
  */
 export function dailyReportEditQuery(row: FuelIntankRow): Record<string, string> {
   const departed = row.dtako_row?.departed_at || row.dtako_row?.returned_at
@@ -121,7 +122,29 @@ export function dailyReportEditQuery(row: FuelIntankRow): Record<string, string>
   const query: Record<string, string> = { from: `${from}T00:00`, to: `${to}T23:59` }
   const driver = row.dtako_row?.driver_name?.trim()
   if (driver) query.driver = driver
+  const vehicleCd = normalizeVehicleCd(row.car?.vehicle_cd)
+  if (vehicleCd && vehicleCd.length <= 8) query.vehicleCd = vehicleCd
   return query
+}
+
+/**
+ * 車輌CD の比較・受け渡し用の形。数字だけなら先頭ゼロを落とした文字列 (全部 0 なら `"0"`)、
+ * それ以外 (空・null・数字以外を含む) は null。DB の値 (`"0000002158"`) と theearth の
+ * masters の code (`"2158"`) の先頭ゼロの差は、ここ 1 か所だけで吸収する。
+ */
+export function normalizeVehicleCd(v: string | null | undefined): string | null {
+  if (!v || !/^\d+$/.test(v)) return null
+  return v.replace(/^0+(?=\d)/, '')
+}
+
+/**
+ * 「位置を見る」で開く `/dvr-map` の query。`vehicle` は車輌CD、`at` は給油日時 (`YYYY-MM-DDTHH:mm`)。
+ * 車輌CD が無い・読めない行は null (ボタンを出さない)。`at` の形は dvr-map 側が検査する。
+ */
+export function dvrMapQuery(row: FuelIntankRow): { vehicle: string, at: string } | null {
+  const vehicle = normalizeVehicleCd(row.car?.vehicle_cd)
+  if (!vehicle) return null
+  return { vehicle, at: row.datetime.slice(0, 16).replace(' ', 'T') }
 }
 
 /** 数量の合計 (表の最下行。CakePHP の `$sum += $fuelIntank->Qt`)。小数 2 桁に丸める。 */

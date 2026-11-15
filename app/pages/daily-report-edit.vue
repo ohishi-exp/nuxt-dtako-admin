@@ -208,7 +208,8 @@ const SEARCH_STORAGE_KEY = 'daily-report-edit:search'
 let openedFromQuery = false
 const route = useRoute()
 
-/** `?from=&to=&driver=` のどれかがあれば検索条件に入れて true。車輌CD は空にする (保存値を混ぜない)。
+/** `?from=&to=&driver=&vehicleCd=` のどれかがあれば検索条件に入れて true。車輌CD は query の値が
+ * `VEHICLE_CD_RE` に合えばそれ、合わなければ空にする (保存値を混ぜない)。
  * 検索は自動では走らせない (利用者が「日報を検索」を押す)。 */
 function applySearchQuery(): boolean {
   const q = route.query
@@ -216,11 +217,12 @@ function applySearchQuery(): boolean {
   const from = pick(q.from)
   const to = pick(q.to)
   const driver = pick(q.driver)
-  if (!from && !to && !driver) return false
+  const vehicle = pick(q.vehicleCd)
+  if (!from && !to && !driver && !vehicle) return false
   openedFromQuery = true
   if (from) periodForm.from = from
   if (to) periodForm.to = to
-  vehicleCd.value = ''
+  vehicleCd.value = VEHICLE_CD_RE.test(vehicle) ? vehicle : ''
   driverFilter.value = driver
   return true
 }
