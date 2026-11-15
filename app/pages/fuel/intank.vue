@@ -10,7 +10,7 @@ import {
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
-  isDiffHighlighted, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  isDiffHighlighted, dailyReportEditQuery, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
 import { canRecheck, describeManualError } from '~/utils/fuel-manual'
@@ -378,7 +378,7 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="r in rows" :key="rowKey(r)">
+            <tr v-for="r in rows" :key="rowKey(r)" :class="{ 'fuel-diff-row': isMatching && isDiffHighlighted(r) }">
               <td class="text-right">{{ r.slip_num }}</td>
               <td class="text-right">{{ r.fuel_card_id }}</td>
               <td>{{ carName(r) }}</td>
@@ -386,7 +386,7 @@ onMounted(() => {
               <td class="text-right">{{ r.qt == null ? '' : formatQuantity(r.qt) }}</td>
               <template v-if="isMatching">
                 <td class="text-right">{{ r.dtako_fuel_sum == null ? '' : formatQuantity(r.dtako_fuel_sum) }}</td>
-                <td class="text-right" :class="{ 'fuel-diff': isDiffHighlighted(r) }">
+                <td class="text-right">
                   {{ quantityDiff(r) == null ? '集計なし' : formatQuantity(quantityDiff(r)!) }}
                 </td>
                 <td>{{ r.dtako_row?.driver_name ?? '' }}</td>
@@ -407,6 +407,11 @@ onMounted(() => {
               </template>
               <td class="fuel-no-print whitespace-nowrap">
                 <UButton v-if="isMatching && editingKey !== rowKey(r)" size="xs" variant="outline" label="編集" @click="startEdit(r)" />
+                <UButton
+                  v-if="isMatching && isDiffHighlighted(r)" size="xs" variant="outline" label="日報を直す" class="ml-1"
+                  icon="i-lucide-external-link" target="_blank"
+                  :to="{ path: '/daily-report-edit', query: dailyReportEditQuery(r) }"
+                />
                 <UButton v-if="canRecheck(r)" size="xs" variant="outline" label="再照合" class="ml-1" :loading="rechecking === rowKey(r)" :disabled="rechecking !== null" @click="recheck(r)" />
                 <UButton v-if="r.manual" size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = r" />
               </td>
@@ -452,11 +457,19 @@ onMounted(() => {
   padding: 2px 4px;
   white-space: nowrap;
 }
-.fuel-diff {
+/* Dtako とずれている行 (差異 ≠ 0 か集計なし) を行ごと色付けする。
+   印刷は既定で背景色を落とすので、この強調だけは紙に残す。印刷では main.css が dark variant を
+   無効にするので、ダークの色は screen の中だけで当て、紙はライトの色になる */
+.fuel-diff-row td {
   background-color: #fde68a;
-  /* 印刷は既定で背景色を落とすので、差異の強調だけは紙に残す */
   print-color-adjust: exact;
   -webkit-print-color-adjust: exact;
+}
+@media screen {
+  :global(.dark) .fuel-diff-row td {
+    background-color: #713f12;
+    color: #fef3c7;
+  }
 }
 </style>
 
