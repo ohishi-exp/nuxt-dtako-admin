@@ -92,12 +92,36 @@ export function quantityDiff(row: FuelIntankRow): number | null {
 }
 
 /**
- * 差異を強調するか。0 でなければ強調し、dtako の合計が無い行も強調する
- * (CakePHP は `Qt - null` を差異とみなすので、数量が 0 でない限り強調していた)。
+ * Dtako とずれている行か (画面は行ごと色付けする)。差異が 0 でなければ true、dtako の合計が無い
+ * (集計なし) 行は数量が 0 でも true。ユーザーの依頼 (nginx#814) で、集計なしは常に強調する
+ * — CakePHP は `Qt - null` を差異とみなしたので数量 0 の集計なしを強調しなかったが、そこは変えた。
  */
 export function isDiffHighlighted(row: FuelIntankRow): boolean {
   const d = quantityDiff(row)
-  return d === null ? (row.qt ?? 0) !== 0 : d !== 0
+  return d === null || d !== 0
+}
+
+/** `YYYY-MM-DD…` の日付に日数を足して `YYYY-MM-DD` にする (暦の計算だけなので UTC で数える)。 */
+function shiftDate(ymd: string, days: number): string {
+  const [y, m, d] = ymd.slice(0, 10).split('-').map(Number)
+  return new Date(Date.UTC(y!, m! - 1, d! + days)).toISOString().slice(0, 10)
+}
+
+/**
+ * 「日報を直す」で開く `/daily-report-edit` の query。値は日報編集の期間欄 (datetime-local の
+ * `YYYY-MM-DDTHH:mm`) の形。日報の一覧は読取日 (退社日時) で絞るので、`to` は帰庫日の**翌日** 23:59
+ * にして、読取日が帰庫より後になる運行を落とさない。出庫・帰庫が無い (集計なし) 行は給油日の
+ * 前日 00:00 〜 翌日 23:59。`driver` は乗務員名 (無ければ付けない)。
+ */
+export function dailyReportEditQuery(row: FuelIntankRow): Record<string, string> {
+  const departed = row.dtako_row?.departed_at || row.dtako_row?.returned_at
+  const returned = row.dtako_row?.returned_at || row.dtako_row?.departed_at
+  const from = departed ? shiftDate(departed, 0) : shiftDate(row.datetime, -1)
+  const to = returned ? shiftDate(returned, 1) : shiftDate(row.datetime, 1)
+  const query: Record<string, string> = { from: `${from}T00:00`, to: `${to}T23:59` }
+  const driver = row.dtako_row?.driver_name?.trim()
+  if (driver) query.driver = driver
+  return query
 }
 
 /** 数量の合計 (表の最下行。CakePHP の `$sum += $fuelIntank->Qt`)。小数 2 桁に丸める。 */

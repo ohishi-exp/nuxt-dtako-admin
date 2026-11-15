@@ -203,6 +203,28 @@ const VEHICLE_CD_RE = /^\d{1,8}$/
  * ユーザー要望)。タブを閉じれば消える (localStorage にはしない)。 */
 const SEARCH_STORAGE_KEY = 'daily-report-edit:search'
 
+/** インタンク画面の「日報を直す」(`?from=&to=&driver=`) で開いたか。そのときは query で検索条件を
+ * 入れ、利用者が保存していた検索条件 (sessionStorage) を上書きしない (Refs yhonda-ohishi/nginx#814)。 */
+let openedFromQuery = false
+const route = useRoute()
+
+/** `?from=&to=&driver=` のどれかがあれば検索条件に入れて true。車輌CD は空にする (保存値を混ぜない)。
+ * 検索は自動では走らせない (利用者が「日報を検索」を押す)。 */
+function applySearchQuery(): boolean {
+  const q = route.query
+  const pick = (v: unknown) => (typeof v === 'string' ? v : '')
+  const from = pick(q.from)
+  const to = pick(q.to)
+  const driver = pick(q.driver)
+  if (!from && !to && !driver) return false
+  openedFromQuery = true
+  if (from) periodForm.from = from
+  if (to) periodForm.to = to
+  vehicleCd.value = ''
+  driverFilter.value = driver
+  return true
+}
+
 function restoreSearchForm() {
   try {
     const raw = sessionStorage.getItem(SEARCH_STORAGE_KEY)
@@ -235,6 +257,7 @@ const filteredRows = computed(() => {
 })
 
 watch([() => periodForm.from, () => periodForm.to, vehicleCd, driverFilter], () => {
+  if (openedFromQuery) return
   try {
     sessionStorage.setItem(SEARCH_STORAGE_KEY, JSON.stringify({
       from: periodForm.from,
@@ -494,6 +517,9 @@ const linking = ref(false)
 const linkResult = ref<string | null>(null)
 // この運行の csvdata.zip ダウンロード (モーダル内、単一運行のみ)
 const opeZipLoading = ref(false)
+// dtako (社内 MariaDB) への取り込み直し (インタンク画面の D数量を直す、Refs yhonda-ohishi/nginx#814)
+const reimporting = ref(false)
+const reimportResult = ref<string | null>(null)
 
 const deletingCtrlIndex = ref<number | null>(null)
 
@@ -562,6 +588,8 @@ async function openExpenseModal(row: DailyReportRow) {
   resetNewFuelRow()
   linkSysEnabled.value = false
   linkResult.value = null
+  reimportResult.value = null
+  reimporting.value = false
   // 前の運行編集中の進行状態 (保存/削除/追加中フラグ) を持ち越さない
   savingCtrlIndex.value = null
   deletingCtrlIndex.value = null
@@ -796,6 +824,47 @@ async function startSystemLink() {
   }
   finally {
     linking.value = false
+  }
+}
+
+/** この運行を theearth から dtako (社内 MariaDB) に取り込み直す。インタンク画面の D数量
+ * (`dtako_fuel` の合計) は取り込みで運行ごと入れ替わるので、theearth の給油を直した後にこれを押す。
+ * 新しい口は作らず、拘束×賃金の「②」と同じ `POST /restraint-api/kintai/refresh/mysql` を
+ * apply で呼ぶ (reset_timecard は渡さない = 勤務時間再登録 ③ はしない)。この口は theearth の
+ * 作業時間の再集計も走らせる (dtako-reimport の `runDtakoReimport`) ので確認ダイアログに書く。
+ * 応答の http_status は取り込みの成否の証明にならないので、成功とは書かない。 */
+async function reimportToDtako() {
+  const s = session.value
+  const target = selectedRow.value
+  if (!s || !target || reimporting.value) return
+  if (!window.confirm('この運行を theearth から dtako に取り込み直します。theearth の作業時間の再集計も走ります。よろしいですか')) return
+  reimporting.value = true
+  expenseError.value = null
+  reimportResult.value = null
+  try {
+    await $fetch('/restraint-api/kintai/refresh/mysql', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { unko_no: target.operationNo, ope_no: target.operationNo, start_ope: target.startDateTime, apply: true },
+    })
+    if (isStaleOperationResponse(target, selectedRow.value)) return
+    reimportResult.value = '取り込みを送りました。インタンク画面で start を選び直して D数量を確かめてください'
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      expenseModalOpen.value = false
+      return
+    }
+    if (isStaleOperationResponse(target, selectedRow.value)) return
+    // push が送れたか分からない (relay の `uncertain: true`)。取り込みは応答より前に走りうる
+    const uncertain = (e as { data?: { uncertain?: unknown } } | null)?.data?.uncertain === true
+    expenseError.value = uncertain
+      ? '送れたか分かりません。インタンク画面で確かめてから、必要ならもう一度押してください'
+      : dailyReportErrorMessage(e)
+  }
+  finally {
+    reimporting.value = false
   }
 }
 
@@ -1362,7 +1431,7 @@ async function saveReviseDriver() {
 }
 
 onMounted(() => {
-  restoreSearchForm()
+  if (!applySearchQuery()) restoreSearchForm()
   restoreSession()
   // 初期検索はしない (ログイン直後にすぐ検索条件を触れるように)
   if (!session.value) showLoginPanel.value = true
@@ -1692,6 +1761,9 @@ onMounted(() => {
             <div v-if="linkResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
               {{ linkResult }}
             </div>
+            <div v-if="reimportResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
+              {{ reimportResult }}
+            </div>
 
             <div class="flex justify-between items-center pt-2 border-t border-gray-200 dark:border-gray-800">
               <div class="flex gap-2">
@@ -1711,6 +1783,15 @@ onMounted(() => {
                   :loading="linking"
                   title="評価点再集計の成功後に有効化されます (theearth へデータ連動)"
                   @click="startSystemLink"
+                />
+                <UButton
+                  icon="i-lucide-database"
+                  label="dtako に取り込み直す"
+                  variant="outline"
+                  :loading="reimporting"
+                  :disabled="reimporting"
+                  title="この運行を theearth から dtako (社内) に取り込み直す (インタンク画面の D数量が入れ替わる)"
+                  @click="reimportToDtako"
                 />
                 <UButton
                   icon="i-lucide-file-archive"

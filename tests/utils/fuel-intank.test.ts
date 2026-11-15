@@ -8,6 +8,7 @@ import {
   dtakoRowOptions,
   quantityDiff,
   isDiffHighlighted,
+  dailyReportEditQuery,
   totalQuantity,
   uploadResultText,
   sha256FromKey,
@@ -124,10 +125,42 @@ describe('quantityDiff / isDiffHighlighted', () => {
     expect(isDiffHighlighted(row({ qt: 10, dtako_fuel_sum: 10 }))).toBe(false)
     expect(isDiffHighlighted(row({ qt: 10, dtako_fuel_sum: 9.99 }))).toBe(true)
   })
-  it('dtako 合計が無い行は数量が 0 でない限り強調 (CakePHP の Qt - null と同じ)', () => {
+  it('dtako 合計が無い (集計なし) 行は数量が 0 でも強調 (ユーザーの依頼で集計なしは常に強調。CakePHP とは意図して変えた)', () => {
     expect(isDiffHighlighted(row({ qt: 10, dtako_fuel_sum: null }))).toBe(true)
-    expect(isDiffHighlighted(row({ qt: 0, dtako_fuel_sum: null }))).toBe(false)
-    expect(isDiffHighlighted(row({ qt: null, dtako_fuel_sum: null }))).toBe(false)
+    expect(isDiffHighlighted(row({ qt: 0, dtako_fuel_sum: null }))).toBe(true)
+    expect(isDiffHighlighted(row({ qt: null, dtako_fuel_sum: null }))).toBe(true)
+    expect(isDiffHighlighted(row())).toBe(true)
+  })
+})
+
+describe('dailyReportEditQuery', () => {
+  const dtako = (over: Partial<NonNullable<FuelIntankRow['dtako_row']>> = {}) => ({
+    id: '1', car_cc: null, car_name: null, driver_id: 7, driver_name: '山田 太郎',
+    departed_at: '2023-12-31 22:00:00', returned_at: '2024-01-01 06:00:00', ...over,
+  })
+  it('出庫・帰庫が在れば 出庫日 00:00 〜 帰庫日の翌日 23:59 (月・年をまたぐ)', () => {
+    expect(dailyReportEditQuery(row({ dtako_row: dtako() }))).toEqual({
+      from: '2023-12-31T00:00', to: '2024-01-02T23:59', driver: '山田 太郎',
+    })
+  })
+  it('出庫・帰庫が無ければ給油日の前日 00:00 〜 翌日 23:59', () => {
+    expect(dailyReportEditQuery(row({ datetime: '2024-03-01 08:10:00' }))).toEqual({
+      from: '2024-02-29T00:00', to: '2024-03-02T23:59',
+    })
+    expect(dailyReportEditQuery(row({ dtako_row: dtako({ departed_at: null, returned_at: null, driver_name: null }) })))
+      .toEqual({ from: '2023-12-19T00:00', to: '2023-12-21T23:59' })
+  })
+  it('片方だけ在ればもう片方にも同じ日を使う', () => {
+    expect(dailyReportEditQuery(row({ dtako_row: dtako({ returned_at: null }) }))).toMatchObject({
+      from: '2023-12-31T00:00', to: '2024-01-01T23:59',
+    })
+    expect(dailyReportEditQuery(row({ dtako_row: dtako({ departed_at: null }) }))).toMatchObject({
+      from: '2024-01-01T00:00', to: '2024-01-02T23:59',
+    })
+  })
+  it('乗務員名が無い・空白だけなら driver を付けない', () => {
+    expect(dailyReportEditQuery(row({ dtako_row: dtako({ driver_name: null }) }))).not.toHaveProperty('driver')
+    expect(dailyReportEditQuery(row({ dtako_row: dtako({ driver_name: '  ' }) }))).not.toHaveProperty('driver')
   })
 })
 
