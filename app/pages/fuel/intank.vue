@@ -394,7 +394,7 @@ onMounted(() => {
                   <div v-if="editingKey === rowKey(r)" class="flex items-center gap-1 fuel-no-print">
                     <select v-model="editValue" class="border rounded px-1 py-0.5 text-sm bg-white dark:bg-gray-900">
                       <option value="">(紐づけを外す)</option>
-                      <option v-for="(o, i) in dtakoRowOptions(r.dtako_fuel_array, r.dtako_row_id)" :key="i" :value="o.value">{{ o.label }}</option>
+                      <option v-for="(o, i) in dtakoRowOptions(r.dtako_fuel_array, r.dtako_row_id, r.dtako_row_times)" :key="i" :value="o.value">{{ o.label }}</option>
                     </select>
                     <UButton size="xs" label="保存" :loading="saving" @click="saveEdit(r)" />
                     <UButton size="xs" variant="outline" label="取消" @click="editingKey = null" />

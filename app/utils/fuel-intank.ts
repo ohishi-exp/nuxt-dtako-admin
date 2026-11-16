@@ -3,7 +3,7 @@
  * 移植元は CakePHP の `templates/FuelIntank/index.php` と `FuelIntankController::index`。
  * 画面 (`app/pages/fuel/intank.vue`) はここで組んだ文字列と判定を並べるだけ。
  */
-import type { FuelIntankRow, FuelStart, FuelUploadResponse } from '~/types'
+import type { DtakoRowTimes, FuelIntankRow, FuelStart, FuelUploadResponse } from '~/types'
 
 /** `YYYY-MM-DD HH:MM:SS` を数字だけに分ける。形が違えば null。 */
 function splitDatetime(s: string): string[] | null {
@@ -69,12 +69,21 @@ export interface DtakoRowOption {
  * 1 つの運行に給油が複数あれば同じ value が複数並ぶ (CakePHP と同じ)。読めない項目は原文を表示する。
  * `current` (いま紐づいている dtako_row_id) が選択肢に無ければ先頭に足す — 無いままだと select が
  * 別の項目を選んだ見た目になり、「保存」で黙って付け替わる。
+ * `times` (`dtako_row_times`) にその運行があれば、運行の出庫・帰庫日時も並べる (null の側は「—」)。
  */
-export function dtakoRowOptions(array: Record<string, string[]> | null | undefined, current?: string | null): DtakoRowOption[] {
+export function dtakoRowOptions(
+  array: Record<string, string[]> | null | undefined,
+  current?: string | null,
+  times?: Record<string, DtakoRowTimes> | null,
+): DtakoRowOption[] {
   const options = Object.entries(array ?? {}).flatMap(([id, entries]) => entries.map((raw) => {
     const e = parseFuelArrayEntry(raw)
     const what = e ? `${e.datetime} ${formatQuantity(e.quantity)}` : raw
-    return { value: id, label: `${what} (${id === '' ? '運行なし' : id})` }
+    const idText = id === '' ? '運行なし' : id
+    const t = times?.[id]
+    if (!t) return { value: id, label: `${what} (${idText})` }
+    const span = `出庫 ${formatShortDatetime(t.departed_at) || '—'} 〜 帰庫 ${formatShortDatetime(t.returned_at) || '—'}`
+    return { value: id, label: `給油 ${what} ｜ ${span} ｜ ${idText}` }
   }))
   if (current && !options.some(o => o.value === current)) {
     options.unshift({ value: current, label: `${current} (いまの値・当日の給油に無し)` })

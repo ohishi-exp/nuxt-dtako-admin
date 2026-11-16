@@ -465,7 +465,12 @@ export interface FuelIntankRow {
   dtako_fuel_sum?: number | null
   /** `{dtako_row_id: ["yyyyMMddHHmm_1,234.50", …]}` (dtako_row_id が NULL の給油は `""` のキー) */
   dtako_fuel_array?: Record<string, string[]> | null
+  /** `{dtako_row_id: {departed_at, returned_at}}` (運行の出庫・帰庫日時。rust-fuel-worker が足すまでは無い) */
+  dtako_row_times?: Record<string, DtakoRowTimes> | null
 }
+
+/** 運行 1 本の出庫・帰庫日時 (dtako_rows の `出庫日時` / `帰庫日時`)。 */
+export interface DtakoRowTimes { departed_at: string | null, returned_at: string | null }
 
 export interface FuelStartsResponse { ok: boolean, rows: FuelStart[] }
 export interface FuelIntankResponse {
