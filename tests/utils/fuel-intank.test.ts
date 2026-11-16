@@ -111,6 +111,28 @@ describe('dtakoRowOptions', () => {
     expect(dtakoRowOptions({ 1: ['202312200810_1.00'] }, '1')).toHaveLength(1)
     expect(dtakoRowOptions({ 1: ['202312200810_1.00'] }, null)).toHaveLength(1)
   })
+  it('times にある運行は出庫・帰庫を並べ、無い運行といまの値の行は今の形のまま', () => {
+    const times = { 2312200733: { departed_at: '2023-12-19 07:33:00', returned_at: '2023-12-21 18:05:00' } }
+    expect(dtakoRowOptions({
+      9: ['202312201200_10.00'],
+      2312200733: ['202312200810_120.00'],
+    }, '77', times)).toEqual([
+      { value: '77', label: '77 (いまの値・当日の給油に無し)' },
+      { value: '9', label: '2023/12/20 12:00 10.00 (9)' },
+      { value: '2312200733', label: '給油 2023/12/20 08:10 120.00 ｜ 出庫 23/12/19 07:33 〜 帰庫 23/12/21 18:05 ｜ 2312200733' },
+    ])
+  })
+  it('times が null・undefined なら今の形のまま', () => {
+    const plain = [{ value: '1', label: '2023/12/20 08:10 1.00 (1)' }]
+    expect(dtakoRowOptions({ 1: ['202312200810_1.00'] }, null, null)).toEqual(plain)
+    expect(dtakoRowOptions({ 1: ['202312200810_1.00'] }, null, undefined)).toEqual(plain)
+  })
+  it('出庫・帰庫の片方が null ならその側は「—」', () => {
+    expect(dtakoRowOptions({ 1: ['202312200810_1.00'] }, null, { 1: { departed_at: '2023-12-19 07:33:00', returned_at: null } }))
+      .toEqual([{ value: '1', label: '給油 2023/12/20 08:10 1.00 ｜ 出庫 23/12/19 07:33 〜 帰庫 — ｜ 1' }])
+    expect(dtakoRowOptions({ 1: ['202312200810_1.00'] }, null, { 1: { departed_at: null, returned_at: '2023-12-21 18:05:00' } }))
+      .toEqual([{ value: '1', label: '給油 2023/12/20 08:10 1.00 ｜ 出庫 — 〜 帰庫 23/12/21 18:05 ｜ 1' }])
+  })
 })
 
 describe('quantityDiff / isDiffHighlighted', () => {
