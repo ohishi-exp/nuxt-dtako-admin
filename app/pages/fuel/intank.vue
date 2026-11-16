@@ -378,7 +378,7 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="r in rows" :key="rowKey(r)" :class="{ 'fuel-diff-row': isMatching && isDiffHighlighted(r) }">
+            <tr v-for="r in rows" :key="rowKey(r)" :class="{ 'fuel-diff-row [&>td]:bg-amber-200 dark:[&>td]:bg-amber-900 dark:[&>td]:text-amber-50': isMatching && isDiffHighlighted(r) }">
               <td class="text-right">{{ r.slip_num }}</td>
               <td class="text-right">{{ r.fuel_card_id }}</td>
               <td>{{ carName(r) }}</td>
@@ -462,19 +462,14 @@ onMounted(() => {
   padding: 2px 4px;
   white-space: nowrap;
 }
-/* Dtako とずれている行 (差異 ≠ 0 か集計なし) を行ごと色付けする。
-   印刷は既定で背景色を落とすので、この強調だけは紙に残す。印刷では main.css が dark variant を
-   無効にするので、ダークの色は screen の中だけで当て、紙はライトの色になる */
+/* Dtako とずれている行 (差異 ≠ 0 か集計なし) の色は <tr> の Tailwind class (`[&>td]:bg-amber-200`
+   と dark variant) で付ける。印刷では main.css が dark variant を無効にするので紙はライトの色になる。
+   ここで背景色を書かないこと — scoped CSS は layer 外なので @layer utilities の dark: を上書きする。
+   また `:global(.dark) .x` は Vue が `.dark` 単体に潰す (#814 で本番の html 全体が茶色になった)。
+   印刷は既定で背景色を落とすので、この強調だけは紙に残す */
 .fuel-diff-row td {
-  background-color: #fde68a;
   print-color-adjust: exact;
   -webkit-print-color-adjust: exact;
-}
-@media screen {
-  :global(.dark) .fuel-diff-row td {
-    background-color: #713f12;
-    color: #fef3c7;
-  }
 }
 </style>
 
