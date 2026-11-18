@@ -894,6 +894,32 @@ async function reimportToDtako() {
   }
 }
 
+/** 作業モーダルの「dtako に取り込み直す」(経費モーダルと同じ口・同じ文言) */
+async function reimportFromWork() {
+  const target = workSelectedRow.value
+  if (!session.value || !target || workReimporting.value) return
+  if (!window.confirm(REIMPORT_CONFIRM)) return
+  workReimporting.value = true
+  workError.value = null
+  workReimportResult.value = null
+  try {
+    await postReimport(target)
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
+    workReimportResult.value = REIMPORT_SENT
+  }
+  catch (e) {
+    if (!session.value) {
+      workModalOpen.value = false
+      return
+    }
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
+    workError.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    workReimporting.value = false
+  }
+}
+
 // 一覧の行の「dtako に取り込み」(作業・乗務員を直した後にも押せるよう、モーダルの外にも置く)
 const rowReimportingNo = ref<string | null>(null)
 const rowReimportResult = ref<string | null>(null)
@@ -970,6 +996,9 @@ const workLinking = ref(false)
 const workLinkResult = ref<string | null>(null)
 // この運行の csvdata.zip ダウンロード (作業モーダル内、単一運行のみ)
 const workOpeZipLoading = ref(false)
+// dtako への取り込み直し (作業モーダル内。旅費編集から開いたとき、作業を直したその場で押せるように)
+const workReimporting = ref(false)
+const workReimportResult = ref<string | null>(null)
 // 編集モード中の行 (edit-start の応答をそのまま編集する)。null = 編集中でない
 const workEditing = ref<WorkEditFormRow | null>(null)
 const workEditStarting = ref<number | null>(null)
@@ -1018,6 +1047,7 @@ async function openWorkModal(row: DailyReportRow) {
   workRows.value = []
   workEventOptions.value = []
   workError.value = null
+  workReimportResult.value = null
   workRecalculateResult.value = null
   workLinkSysEnabled.value = false
   workLinkResult.value = null
@@ -2058,6 +2088,9 @@ onMounted(() => {
             <div v-if="workLinkResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
               {{ workLinkResult }}
             </div>
+            <div v-if="workReimportResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
+              {{ workReimportResult }}
+            </div>
 
             <div class="flex justify-between items-center pt-2 border-t border-gray-200 dark:border-gray-800">
               <div class="flex gap-2">
@@ -2078,6 +2111,15 @@ onMounted(() => {
                   :loading="workLinking"
                   title="作業時間再集計の成功後に有効化されます (theearth へデータ連動)"
                   @click="startWorkLink"
+                />
+                <UButton
+                  icon="i-lucide-database"
+                  label="dtako に取り込み直す"
+                  variant="outline"
+                  :loading="workReimporting"
+                  :disabled="workReimporting"
+                  title="この運行を theearth から dtako (社内) に取り込み直す (旅費編集の運行データ・インタンクの D数量が入れ替わる)"
+                  @click="reimportFromWork"
                 />
                 <UButton
                   icon="i-lucide-file-archive"
