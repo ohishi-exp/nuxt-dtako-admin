@@ -208,9 +208,15 @@ const SEARCH_STORAGE_KEY = 'daily-report-edit:search'
 let openedFromQuery = false
 const route = useRoute()
 
-/** `?from=&to=&driver=&vehicleCd=` のどれかがあれば検索条件に入れて true。車輌CD は query の値が
+/** `?unko_no=` (22/23 桁) で名指しされた運行の先頭 22 桁。旅費編集 (CakePHP `ryohi-rows/view`)
+ * から開いたとき、その行を強調し、ログイン済みなら検索を自動で走らせる。 */
+const targetOpeNo = ref<string | null>(null)
+/** 名指しの運行で自動検索を 1 回だけ走らせたか (ログイン後の再検索を繰り返さない) */
+let targetSearched = false
+
+/** `?from=&to=&driver=&vehicleCd=&unko_no=` のどれかがあれば検索条件に入れて true。車輌CD は query の値が
  * `VEHICLE_CD_RE` に合えばそれ、合わなければ空にする (保存値を混ぜない)。
- * 検索は自動では走らせない (利用者が「日報を検索」を押す)。 */
+ * 検索は `unko_no` があるときだけ自動で走らせる (それ以外は利用者が「日報を検索」を押す)。 */
 function applySearchQuery(): boolean {
   const q = route.query
   const pick = (v: unknown) => (typeof v === 'string' ? v : '')
@@ -218,7 +224,8 @@ function applySearchQuery(): boolean {
   const to = pick(q.to)
   const driver = pick(q.driver)
   const vehicle = pick(q.vehicleCd)
-  if (!from && !to && !driver && !vehicle) return false
+  targetOpeNo.value = parseTargetOpeNo(q.unko_no)
+  if (!from && !to && !driver && !vehicle && !targetOpeNo.value) return false
   openedFromQuery = true
   if (from) periodForm.from = from
   if (to) periodForm.to = to
@@ -829,44 +836,84 @@ async function startSystemLink() {
   }
 }
 
+const REIMPORT_CONFIRM = 'この運行を theearth から dtako に取り込み直します。theearth の作業時間の再集計も走ります。よろしいですか'
+const REIMPORT_SENT = '取り込みを送りました。インタンク画面 (start を選び直して D数量) か旅費編集の画面 (読み込み直す) で確かめてください'
+const REIMPORT_UNCERTAIN = '送れたか分かりません。インタンク画面か旅費編集の画面で確かめてから、必要ならもう一度押してください'
+
 /** この運行を theearth から dtako (社内 MariaDB) に取り込み直す。インタンク画面の D数量
- * (`dtako_fuel` の合計) は取り込みで運行ごと入れ替わるので、theearth の給油を直した後にこれを押す。
+ * (`dtako_fuel` の合計) も旅費編集 (CakePHP) が読む `dtako_events` も取り込みで運行ごと入れ替わるので、
+ * theearth を直した後にこれを押す。
  * 新しい口は作らず、拘束×賃金の「②」と同じ `POST /restraint-api/kintai/refresh/mysql` を
  * apply で呼ぶ (reset_timecard は渡さない = 勤務時間再登録 ③ はしない)。この口は theearth の
  * 作業時間の再集計も走らせる (dtako-reimport の `runDtakoReimport`) ので確認ダイアログに書く。
- * 応答の http_status は取り込みの成否の証明にならないので、成功とは書かない。 */
-async function reimportToDtako() {
-  const s = session.value
-  const target = selectedRow.value
-  if (!s || !target || reimporting.value) return
-  if (!window.confirm('この運行を theearth から dtako に取り込み直します。theearth の作業時間の再集計も走ります。よろしいですか')) return
-  reimporting.value = true
-  expenseError.value = null
-  reimportResult.value = null
+ * 応答の http_status は取り込みの成否の証明にならないので、成功とは書かない。
+ * 失敗は投げ直す。401 は投げる前にセッションを切る。`uncertain` は文言にして投げる。 */
+async function postReimport(target: DailyReportRow) {
   try {
     await $fetch('/restraint-api/kintai/refresh/mysql', {
       method: 'POST',
       headers: authHeaders(),
       body: { unko_no: target.operationNo, ope_no: target.operationNo, start_ope: target.startDateTime, apply: true },
     })
-    if (isStaleOperationResponse(target, selectedRow.value)) return
-    reimportResult.value = '取り込みを送りました。インタンク画面で start を選び直して D数量を確かめてください'
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
       expireSession(dailyReportErrorMessage(e))
+      throw e
+    }
+    // push が送れたか分からない (relay の `uncertain: true`)。取り込みは応答より前に走りうる
+    const uncertain = (e as { data?: { uncertain?: unknown } } | null)?.data?.uncertain === true
+    throw new Error(uncertain ? REIMPORT_UNCERTAIN : dailyReportErrorMessage(e))
+  }
+}
+
+/** 経費モーダルの「dtako に取り込み直す」 */
+async function reimportToDtako() {
+  const s = session.value
+  const target = selectedRow.value
+  if (!s || !target || reimporting.value) return
+  if (!window.confirm(REIMPORT_CONFIRM)) return
+  reimporting.value = true
+  expenseError.value = null
+  reimportResult.value = null
+  try {
+    await postReimport(target)
+    if (isStaleOperationResponse(target, selectedRow.value)) return
+    reimportResult.value = REIMPORT_SENT
+  }
+  catch (e) {
+    if (!session.value) {
       expenseModalOpen.value = false
       return
     }
     if (isStaleOperationResponse(target, selectedRow.value)) return
-    // push が送れたか分からない (relay の `uncertain: true`)。取り込みは応答より前に走りうる
-    const uncertain = (e as { data?: { uncertain?: unknown } } | null)?.data?.uncertain === true
-    expenseError.value = uncertain
-      ? '送れたか分かりません。インタンク画面で確かめてから、必要ならもう一度押してください'
-      : dailyReportErrorMessage(e)
+    expenseError.value = e instanceof Error ? e.message : String(e)
   }
   finally {
     reimporting.value = false
+  }
+}
+
+// 一覧の行の「dtako に取り込み」(作業・乗務員を直した後にも押せるよう、モーダルの外にも置く)
+const rowReimportingNo = ref<string | null>(null)
+const rowReimportResult = ref<string | null>(null)
+const rowReimportError = ref<string | null>(null)
+
+async function reimportRow(row: DailyReportRow) {
+  if (!session.value || rowReimportingNo.value) return
+  if (!window.confirm(REIMPORT_CONFIRM)) return
+  rowReimportingNo.value = row.operationNo
+  rowReimportResult.value = null
+  rowReimportError.value = null
+  try {
+    await postReimport(row)
+    rowReimportResult.value = `${row.operationNo}: ${REIMPORT_SENT}`
+  }
+  catch (e) {
+    if (session.value) rowReimportError.value = `${row.operationNo}: ${e instanceof Error ? e.message : String(e)}`
+  }
+  finally {
+    rowReimportingNo.value = null
   }
 }
 
@@ -1432,11 +1479,25 @@ async function saveReviseDriver() {
   }
 }
 
+/** `?unko_no=` で開いたときだけ、ログイン済みになった時点で 1 回検索する */
+function searchTargetOnce() {
+  if (!targetOpeNo.value || targetSearched || !session.value) return
+  targetSearched = true
+  loadList()
+}
+watch(session, searchTargetOnce)
+
+/** 名指しの運行が一覧に出たか (検索が終わって 1 行も当たらなければ知らせる) */
+const targetMissing = computed(() =>
+  targetOpeNo.value !== null && targetSearched && !listLoading.value && !listError.value
+  && !rows.value.some(r => isTargetRow(r.operationNo, targetOpeNo.value)))
+
 onMounted(() => {
   if (!applySearchQuery()) restoreSearchForm()
   restoreSession()
-  // 初期検索はしない (ログイン直後にすぐ検索条件を触れるように)
+  // 初期検索はしない (ログイン直後にすぐ検索条件を触れるように)。`?unko_no=` のときだけ例外
   if (!session.value) showLoginPanel.value = true
+  searchTargetOnce()
 })
 </script>
 
@@ -1507,6 +1568,16 @@ onMounted(() => {
           <div v-if="rowZipError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
             {{ rowZipError }}
           </div>
+          <div v-if="targetOpeNo" class="mt-3 text-sm text-amber-800 bg-amber-50 dark:bg-amber-950 dark:text-amber-200 rounded-lg p-3">
+            運行No {{ targetOpeNo }} を名指しで開きました (黄色の行)。直したら行の「dtako に取り込み」を押し、旅費編集の画面を読み込み直してください。
+            <span v-if="targetMissing" class="block font-medium">この期間の一覧にこの運行がありません。読取日の範囲を広げて検索し直してください。</span>
+          </div>
+          <div v-if="rowReimportResult" class="mt-3 text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
+            {{ rowReimportResult }}
+          </div>
+          <div v-if="rowReimportError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
+            {{ rowReimportError }}
+          </div>
           <div v-if="zipError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
             {{ zipError }}
           </div>
@@ -1567,7 +1638,10 @@ onMounted(() => {
                   v-for="row in filteredRows"
                   :key="row.operationNo"
                   class="border-b border-gray-100 dark:border-gray-900"
-                  :class="{ 'text-red-600 dark:text-red-400': row.exclusionFlag }"
+                  :class="{
+                    'text-red-600 dark:text-red-400': row.exclusionFlag,
+                    '[&>td]:bg-amber-100 dark:[&>td]:bg-amber-900': isTargetRow(row.operationNo, targetOpeNo),
+                  }"
                 >
                   <td class="py-2 pr-4">
                     {{ row.operationDate ?? '-' }}
@@ -1622,6 +1696,16 @@ onMounted(() => {
                       label="csv"
                       :loading="rowZipLoadingNo === row.operationNo"
                       @click="downloadRowZip(row)"
+                    />
+                    <UButton
+                      size="xs"
+                      variant="outline"
+                      icon="i-lucide-database"
+                      label="dtako に取り込み"
+                      title="この運行を theearth から dtako (社内) に取り込み直す (インタンクの D数量・旅費編集の運行データが入れ替わる)"
+                      :loading="rowReimportingNo === row.operationNo"
+                      :disabled="rowReimportingNo !== null"
+                      @click="reimportRow(row)"
                     />
                     <UButton
                       v-if="row.exclusionFlag"
