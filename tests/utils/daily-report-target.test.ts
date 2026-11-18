@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseTargetOpeNo, isTargetRow } from '~/utils/daily-report-target'
+import { parseTargetOpeNo, isTargetRow, pickTargetRow } from '~/utils/daily-report-target'
 
 describe('parseTargetOpeNo', () => {
   it('23 桁は先頭 22 桁にする', () => {
@@ -27,5 +27,22 @@ describe('isTargetRow', () => {
   })
   it('target が null なら false', () => {
     expect(isTargetRow('2611130702520000003521', null)).toBe(false)
+  })
+})
+
+describe('pickTargetRow', () => {
+  const a = { operationNo: '2611130702520000003521' }
+  const b = { operationNo: '2611130702520000003522' }
+  it('1 件だけ当たればその行', () => {
+    expect(pickTargetRow([a, b], '2611130702520000003521')).toBe(a)
+  })
+  it('0 件なら null', () => {
+    expect(pickTargetRow([b], '2611130702520000003521')).toBeNull()
+  })
+  it('2 件以上なら null', () => {
+    expect(pickTargetRow([a, { ...a }], '2611130702520000003521')).toBeNull()
+  })
+  it('target が null なら null', () => {
+    expect(pickTargetRow([a], null)).toBeNull()
   })
 })

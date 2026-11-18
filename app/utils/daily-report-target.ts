@@ -17,3 +17,9 @@ export function parseTargetOpeNo(v: unknown): string | null {
 export function isTargetRow(operationNo: string, target: string | null): boolean {
   return target !== null && operationNo.slice(0, 22) === target
 }
+
+/** 名指しの運行に当たる行がちょうど 1 件ならその行、0 件・2 件以上なら null (自動でモーダルを開く相手) */
+export function pickTargetRow<T extends { operationNo: string }>(rows: readonly T[], target: string | null): T | null {
+  const hits = rows.filter(r => isTargetRow(r.operationNo, target))
+  return hits.length === 1 ? hits[0]! : null
+}
