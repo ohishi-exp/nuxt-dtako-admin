@@ -11,6 +11,7 @@ import {
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
   isDiffHighlighted, dailyReportEditQuery, dvrMapQuery, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  createRowsCache,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
 import { canRecheck, describeManualError } from '~/utils/fuel-manual'
@@ -19,6 +20,15 @@ import type { FuelStart, FuelIntankRow, FuelCar } from '~/types'
 
 /** start を選ばないとき (最新 100 行) の選択肢の値。reka の Select は空文字の値を持てない */
 const LATEST = '__latest__'
+/**
+ * 画面を開いたら先に読んでおく start の数と、同時に読む本数。start の突き合わせは 1 件 6〜9 秒かかるので
+ * (2026-11-18 に本番で実測)、よく選ぶ新しい start は選ぶ前に読み終えておく
+ */
+const PREFETCH_STARTS = 5
+const PREFETCH_CONCURRENCY = 2
+
+/** 表 (最新 100 行と start ごと) を覚えておく。選び直しても読み直さない。書き込みと「再読み込み」で捨てる */
+const rowsCache = createRowsCache(key => getFuelIntank(key === LATEST ? undefined : key))
 
 const starts = ref<FuelStart[]>([])
 const selected = ref<string>(LATEST)
@@ -74,23 +84,30 @@ function carName(r: FuelIntankRow): string {
   return r.car?.name ?? carNameByCard.value[r.fuel_card_id] ?? ''
 }
 
-async function loadRows() {
+/** 選んでいる表を出す。`force` でなければ覚えた表を使う。読み終える前に選び直されたら、古い結果は捨てる */
+async function loadRows(force = false) {
+  const key = selected.value
   loading.value = true
   listError.value = null
   try {
-    rows.value = (await getFuelIntank(isMatching.value ? selected.value : undefined)).rows
+    const res = await rowsCache.get(key, force)
+    if (selected.value !== key) return
+    rows.value = res.rows
   }
   catch (e) {
+    if (selected.value !== key) return
     rows.value = []
-    listError.value = describeListFailure(e, 'start を選び直してください')
+    listError.value = describeListFailure(e, 'start を選び直すか「再読み込み」を押してください')
   }
   finally {
-    loading.value = false
+    if (selected.value === key) loading.value = false
   }
 }
 
 async function loadStarts() {
   starts.value = (await getFuelStarts()).rows
+  // 裏で読むだけ (失敗は覚えず、選んだときに読み直す)
+  void rowsCache.prefetch(starts.value.slice(0, PREFETCH_STARTS).map(s => s.datetime), PREFETCH_CONCURRENCY)
 }
 
 async function loadCardsAndCars() {
@@ -115,6 +132,28 @@ watch(selected, () => {
   editingKey.value = null
   loadRows()
 })
+
+/** 書き込みの後: 覚えた表は古いので捨て、いま出している表を読み直す */
+async function reloadRowsAfterWrite() {
+  rowsCache.clear()
+  await loadRows(true)
+}
+
+/**
+ * 「再読み込み」: 選んでいる start のまま、表と start・車両・カードの一覧を読み直す
+ * (USB アップローダーが取り込んだ新しい start・未登録カードもここで出る)
+ */
+const refreshing = ref(false)
+async function refresh() {
+  refreshing.value = true
+  rowsCache.clear()
+  try {
+    await Promise.all([loadMasters(), loadRows(true)])
+  }
+  finally {
+    refreshing.value = false
+  }
+}
 
 // --- アップロード (upload.vue のドラッグ&ドロップの形) ---
 
@@ -152,12 +191,13 @@ async function handleUpload(file: File) {
     const res = await uploadFuelCsv(await file.arrayBuffer())
     uploadMessage.value = uploadResultText(res)
     uploadedSha.value = sha256FromKey(res.key)
+    rowsCache.clear()
     await loadMasters()
     if (res.latest_start && selected.value !== res.latest_start.datetime) {
       selected.value = res.latest_start.datetime // watch が表を読み直す
     }
     else {
-      await loadRows()
+      await loadRows(true)
     }
   }
   catch (e) {
@@ -197,7 +237,7 @@ async function registerCard(id: number) {
     await createFuelCard(id, carId)
     choosingId.value = null
     await loadCardsAndCars()
-    await loadRows()
+    await reloadRowsAfterWrite()
   }
   catch (e) {
     registerError.value = `card ${id}: ${describeCaughtError(e, 'もう一度「登録」を押してください')}`
@@ -221,7 +261,7 @@ async function saveEdit(r: FuelIntankRow) {
   try {
     await updateFuelIntankDtakoRow(r.datetime, r.fuel_card_id, editValue.value === '' ? null : editValue.value)
     editingKey.value = null
-    await loadRows()
+    await reloadRowsAfterWrite()
   }
   catch (e) {
     rowError.value = describeCaughtError(e, 'もう一度「保存」を押してください')
@@ -239,7 +279,7 @@ async function confirmDelete() {
   try {
     await deleteFuelIntank(r.datetime, r.fuel_card_id)
     deleteTarget.value = null
-    await loadRows()
+    await reloadRowsAfterWrite()
   }
   catch (e) {
     deleteTarget.value = null
@@ -263,7 +303,7 @@ async function recheck(r: FuelIntankRow) {
     // 上流の recheck は manual を外すので、手入力の行は以後 削除も手入力での上書きもできなくなる (409 not_manual)
     const unmarked = r.manual && !res.row.manual ? ' — 手入力の印を外したので、この行は削除も手入力での上書きもできなくなりました' : ''
     recheckMessage.value = `${what}: ${result}${unmarked}`
-    await loadRows()
+    await reloadRowsAfterWrite()
   }
   catch (e) {
     rowError.value = (e instanceof Error ? describeManualError(e.message) : null)
@@ -288,7 +328,13 @@ onMounted(() => {
   <div class="fuel-intank space-y-4">
     <div class="flex flex-wrap items-center gap-3 fuel-no-print">
       <h2 class="text-xl font-bold mr-auto">インタンク燃料確認</h2>
-      <USelect v-model="selected" :items="startItems" class="w-64" />
+      <!-- ★ USelect にしない — 閉じていても start (約 1000 件) の選択肢を全部描画し、開くのに 2.9 秒かかった
+           (2026-11-18 に本番で実測)。USelectMenu の virtualize で見えている分だけ描く -->
+      <USelectMenu
+        v-model="selected" :items="startItems" value-key="value" virtualize
+        :search-input="{ placeholder: 'D番号・日付 (yyMMdd) で検索' }" class="w-64"
+      />
+      <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="refreshing" :disabled="refreshing" @click="refresh" />
       <UButton to="/fuel/manual" icon="i-lucide-pencil" variant="outline" label="手入力" />
       <UButton to="/fuel/cards" icon="i-lucide-credit-card" variant="outline" label="カード" />
       <UButton to="/fuel/credentials" icon="i-lucide-key-round" variant="outline" label="アップローダーの資格情報" />

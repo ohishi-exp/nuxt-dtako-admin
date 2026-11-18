@@ -193,3 +193,45 @@ export function describeCsvError(message: string): string | null {
   const why = typeof b.reason === 'string' ? b.reason : '理由不明'
   return `CSV の ${where}が読めません: ${why}`
 }
+
+/** 表を覚えておく入れ物 ([`createRowsCache`])。 */
+export interface RowsCache<T> {
+  /** `key` の表。覚えていればそれを返し、`force` なら読み直す。読み込み中なら同じ読み込みを待つ */
+  get: (key: string, force?: boolean) => Promise<T>
+  /** `keys` を `concurrency` 本ずつ先に読んでおく。失敗は覚えず、投げもしない */
+  prefetch: (keys: readonly string[], concurrency: number) => Promise<void>
+  /** 覚えた表をすべて捨てる (書き込みや再読み込みの後) */
+  clear: () => void
+}
+
+/**
+ * start ごとの給油の表を覚えておく。start の突き合わせは上流で 1 件 6〜9 秒かかる (2026-11-18 に本番で
+ * 実測: 17 行で 9.1 秒・11 行で 6.4 秒) ので、選び直すたびに読み直さず、新しい start は先に読んでおく。
+ * 失敗した読み込みは覚えない (次に選んだときに読み直す)。
+ */
+export function createRowsCache<T>(load: (key: string) => Promise<T>): RowsCache<T> {
+  const entries = new Map<string, Promise<T>>()
+
+  function get(key: string, force = false): Promise<T> {
+    const hit = entries.get(key)
+    if (hit && !force) return hit
+    const p = load(key)
+    entries.set(key, p)
+    p.catch(() => {
+      if (entries.get(key) === p) entries.delete(key)
+    })
+    return p
+  }
+
+  async function prefetch(keys: readonly string[], concurrency: number): Promise<void> {
+    const queue = [...keys]
+    const worker = async () => {
+      for (let key = queue.shift(); key !== undefined; key = queue.shift()) {
+        await get(key).catch(() => undefined)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker))
+  }
+
+  return { get, prefetch, clear: () => entries.clear() }
+}

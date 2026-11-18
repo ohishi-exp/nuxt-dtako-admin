@@ -15,6 +15,7 @@ import {
   uploadResultText,
   sha256FromKey,
   describeCsvError,
+  createRowsCache,
 } from '~/utils/fuel-intank'
 
 function row(over: Partial<FuelIntankRow> = {}): FuelIntankRow {
@@ -266,5 +267,89 @@ describe('describeCsvError', () => {
     expect(describeCsvError('API エラー (400): {壊れた')).toBeNull()
     expect(describeCsvError('API エラー (400): {"error":csv}')).toBeNull()
     expect(describeCsvError('Failed to fetch')).toBeNull()
+  })
+})
+
+describe('createRowsCache', () => {
+  function counting() {
+    const calls: string[] = []
+    const load = (key: string) => {
+      calls.push(key)
+      return key.startsWith('bad') ? Promise.reject(new Error(key)) : Promise.resolve(`rows:${key}:${calls.length}`)
+    }
+    return { calls, cache: createRowsCache(load) }
+  }
+
+  it('覚えた表は読み直さず、force なら読み直す', async () => {
+    const { calls, cache } = counting()
+    expect(await cache.get('a')).toBe('rows:a:1')
+    expect(await cache.get('a')).toBe('rows:a:1')
+    expect(await cache.get('a', true)).toBe('rows:a:2')
+    expect(await cache.get('a')).toBe('rows:a:2')
+    expect(calls).toEqual(['a', 'a'])
+  })
+
+  it('読み込み中に同じ key を頼むと同じ読み込みを待つ', async () => {
+    const { calls, cache } = counting()
+    const [x, y] = await Promise.all([cache.get('a'), cache.get('a')])
+    expect(x).toBe(y)
+    expect(calls).toEqual(['a'])
+  })
+
+  it('失敗は覚えない (次は読み直す)', async () => {
+    const { calls, cache } = counting()
+    await expect(cache.get('bad')).rejects.toThrow('bad')
+    await expect(cache.get('bad')).rejects.toThrow('bad')
+    expect(calls).toEqual(['bad', 'bad'])
+  })
+
+  it('失敗した古い読み込みが、force で読み直した新しい表を消さない', async () => {
+    let reject!: (e: Error) => void
+    let n = 0
+    const cache = createRowsCache((key: string) => {
+      n += 1
+      return n === 1 ? new Promise<string>((_, r) => { reject = r }) : Promise.resolve(`${key}:${n}`)
+    })
+    const first = cache.get('a')
+    expect(await cache.get('a', true)).toBe('a:2')
+    reject(new Error('late'))
+    await expect(first).rejects.toThrow('late')
+    expect(await cache.get('a')).toBe('a:2')
+    expect(n).toBe(2)
+  })
+
+  it('clear で覚えた表を捨てる', async () => {
+    const { calls, cache } = counting()
+    await cache.get('a')
+    cache.clear()
+    await cache.get('a')
+    expect(calls).toEqual(['a', 'a'])
+  })
+
+  it('prefetch は並列数を守って全部読み、失敗を投げない', async () => {
+    let running = 0
+    let peak = 0
+    const calls: string[] = []
+    const cache = createRowsCache(async (key: string) => {
+      calls.push(key)
+      running += 1
+      peak = Math.max(peak, running)
+      await new Promise(r => setTimeout(r, 1))
+      running -= 1
+      if (key === 'bad') throw new Error(key)
+      return key
+    })
+    await cache.prefetch(['a', 'bad', 'b', 'c'], 2)
+    expect(calls.sort()).toEqual(['a', 'b', 'bad', 'c'])
+    expect(peak).toBe(2)
+    // 読んだものは覚えている
+    expect(await cache.get('c')).toBe('c')
+    expect(calls).toHaveLength(4)
+  })
+
+  it('prefetch の並列数は最低 1', async () => {
+    const { calls, cache } = counting()
+    await cache.prefetch(['a', 'b'], 0)
+    expect(calls).toEqual(['a', 'b'])
   })
 })
