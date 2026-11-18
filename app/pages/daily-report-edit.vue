@@ -1483,7 +1483,11 @@ async function saveReviseDriver() {
 function searchTargetOnce() {
   if (!targetOpeNo.value || targetSearched || !session.value) return
   targetSearched = true
-  loadList()
+  // 当たった行が 1 件だけなら「作業を編集」を開く (旅費の計算に効くのは作業 = イベントなので)
+  loadList().then(() => {
+    const row = pickTargetRow(rows.value, targetOpeNo.value)
+    if (row && session.value) openWorkModal(row)
+  })
 }
 watch(session, searchTargetOnce)
 
@@ -1569,7 +1573,7 @@ onMounted(() => {
             {{ rowZipError }}
           </div>
           <div v-if="targetOpeNo" class="mt-3 text-sm text-amber-800 bg-amber-50 dark:bg-amber-950 dark:text-amber-200 rounded-lg p-3">
-            運行No {{ targetOpeNo }} を名指しで開きました (黄色の行)。直したら行の「dtako に取り込み」を押し、旅費編集の画面を読み込み直してください。
+            運行No {{ targetOpeNo }} を名指しで開きました (黄色の行。1 件だけ当たれば「作業を編集」を自動で開きます)。直したら行の「dtako に取り込み」を押し、旅費編集の画面を読み込み直してください。
             <span v-if="targetMissing" class="block font-medium">この期間の一覧にこの運行がありません。読取日の範囲を広げて検索し直してください。</span>
           </div>
           <div v-if="rowReimportResult" class="mt-3 text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
