@@ -11,6 +11,7 @@ import {
   dailyReportEditQuery,
   normalizeVehicleCd,
   dvrMapQuery,
+  vehicleStateMarkerIndex,
   totalQuantity,
   uploadResultText,
   sha256FromKey,
@@ -351,5 +352,26 @@ describe('createRowsCache', () => {
     const { calls, cache } = counting()
     await cache.prefetch(['a', 'b'], 0)
     expect(calls).toEqual(['a', 'b'])
+  })
+})
+
+describe('vehicleStateMarkerIndex', () => {
+  const gps = { latitude: 33.1, longitude: 129.9 }
+  const noGps = { latitude: null, longitude: null }
+  const states = [
+    { vehicleCd: '0000001111', ...noGps },
+    { vehicleCd: '0000002158', ...gps },
+    { vehicleCd: null, ...gps },
+    { vehicleCd: '3333', ...gps },
+  ]
+  it('GPS のある行だけ数えた index を返す (先頭ゼロは無視)', () => {
+    expect(vehicleStateMarkerIndex(states, '2158')).toBe(0)
+    expect(vehicleStateMarkerIndex(states, '00003333')).toBe(2)
+  })
+  it('GPS が無い車・居ない車・読めない vehicle は null', () => {
+    expect(vehicleStateMarkerIndex(states, '1111')).toBeNull()
+    expect(vehicleStateMarkerIndex(states, '9999')).toBeNull()
+    expect(vehicleStateMarkerIndex(states, '')).toBeNull()
+    expect(vehicleStateMarkerIndex([{ vehicleCd: '1', latitude: 1, longitude: null }], '1')).toBeNull()
   })
 })
