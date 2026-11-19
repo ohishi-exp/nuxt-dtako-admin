@@ -8,7 +8,7 @@
  * relay 側で DDMM → 十進度に変換済み。
  */
 import type { DvrMapMarker } from '~/components/DvrMap.vue'
-import { normalizeVehicleCd } from '~/utils/fuel-intank'
+import { normalizeVehicleCd, vehicleStateMarkerIndex } from '~/utils/fuel-intank'
 
 
 interface VehicleStatePoint {
@@ -108,6 +108,7 @@ async function loadStates() {
     states.value = res.vehicles
     statesLoaded.value = true
     selectedStateIndex.value = null
+    selectStateFromRouteQuery()
   }
   catch (e) {
     if (dvrErrorStatus(e) === 401) {
@@ -176,6 +177,26 @@ let routeQueryHandled = false
 
 /** `vehicle` と `at` がそろっていれば、その車輌のその日の動態履歴を読み、`at` に最も近い点を選ぶ。
  * masters の code とは `normalizeVehicleCd` どうしで比べる (先頭ゼロの差を吸収)。 */
+/** `?vehicle=<車輌CD>` だけ (`at` 無し) なら現在地タブでその車を選ぶ (タイムカードの「現在地」。
+ * Refs nginx#814 と同じ口)。全事業所で引かないと他事業所の車が居ないので、保存済みの事業所は復元しない。 */
+const stateVehicleQuery = (() => {
+  const vehicle = typeof route.query.vehicle === 'string' ? route.query.vehicle : ''
+  return route.query.at == null && /^\d{1,8}$/.test(vehicle) ? vehicle : null
+})()
+let stateQueryHandled = false
+const stateQueryNotice = ref<string | null>(null)
+
+function selectStateFromRouteQuery() {
+  if (stateQueryHandled || !stateVehicleQuery) return
+  stateQueryHandled = true
+  const idx = vehicleStateMarkerIndex(states.value, stateVehicleQuery)
+  if (idx == null) {
+    stateQueryNotice.value = `車両 ${stateVehicleQuery} の現在地 (GPS) が見つかりません`
+    return
+  }
+  selectedStateIndex.value = idx
+}
+
 async function openFromRouteQuery() {
   const vehicle = typeof route.query.vehicle === 'string' ? route.query.vehicle : ''
   const at = typeof route.query.at === 'string' ? route.query.at : ''
@@ -397,10 +418,10 @@ watch(session, (s) => {
 
 onMounted(() => {
   restoreSession()
-  // 前回選択した事業所を復元 (無ければ全事業所のまま)。
+  // 前回選択した事業所を復元 (無ければ全事業所のまま)。URL で車輌を指定されたときは全事業所で引く。
   try {
     const saved = localStorage.getItem(BRANCH_STORAGE_KEY)
-    if (saved) branchCode.value = saved
+    if (saved && !stateVehicleQuery) branchCode.value = saved
   }
   catch {
     // 復元不可でも既定 (全事業所) で継続
@@ -467,6 +488,9 @@ onMounted(() => {
 
             <div v-if="statesError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3 mb-3">
               {{ statesError }}
+            </div>
+            <div v-if="stateQueryNotice" class="text-sm text-amber-700 bg-amber-50 dark:text-amber-300 dark:bg-amber-950 rounded-lg p-3 mb-3">
+              {{ stateQueryNotice }}
             </div>
 
             <DvrMap :markers="stateMarkers" :selected-index="selectedStateIndex" />

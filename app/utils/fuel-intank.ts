@@ -147,6 +147,22 @@ export function normalizeVehicleCd(v: string | null | undefined): string | null 
 }
 
 /**
+ * `/dvr-map` の現在地一覧から、`vehicle` (車輌CD) の車で GPS が取れているものを探し、
+ * 地図マーカー上の index (= GPS のある行だけ数えた順番) を返す。車輌CD の先頭ゼロの差は
+ * `normalizeVehicleCd` で吸収する。見つからない・GPS が無い・`vehicle` が読めないときは null。
+ */
+export function vehicleStateMarkerIndex(
+  states: ReadonlyArray<{ vehicleCd: string | null, latitude: number | null, longitude: number | null }>,
+  vehicle: string,
+): number | null {
+  const want = normalizeVehicleCd(vehicle)
+  if (!want) return null
+  const withGps = states.filter(v => v.latitude != null && v.longitude != null)
+  const idx = withGps.findIndex(v => normalizeVehicleCd(v.vehicleCd) === want)
+  return idx >= 0 ? idx : null
+}
+
+/**
  * 「位置を見る」で開く `/dvr-map` の query。`vehicle` は車輌CD、`at` は給油日時 (`YYYY-MM-DDTHH:mm`)。
  * 車輌CD が無い・読めない行は null (ボタンを出さない)。`at` の形は dvr-map 側が検査する。
  */
