@@ -47,7 +47,8 @@
  */
 
 import { resolveSecretBinding } from "./cron";
-import { DTAKO_AUTOLOAD_PATH } from "./dtako-reimport";
+import { DTAKO_AUTOLOAD_PENDING_PATH } from "./dtako-reimport";
+import { describeUnknownError } from "./scrape-queue";
 import { parseGcpShiftDays, type GcpNonWorking, type GcpShiftDay } from "./gcp-day-summaries";
 
 /** service binding の最小形 (`cloudflare:workers` の型に依存しないための構造的型)。 */
@@ -392,12 +393,14 @@ export interface KintaiAutoloadEnv extends KintaiReaderEnv {
 }
 
 export interface KintaiAutoloader {
-  /** `path` は `/api/dtako/autoload?...`。 */
+  /** `path` は [`kintaiAutoloader`] に渡した口 (`/api/dtako/autoload?...` か `/api/dtako/autoload-pending`)。 */
   autoload(path: string, init: RequestInit): Promise<Response>;
 }
 
 /**
- * `run_dtako_reimport` の ② 取り込み (`POST /api/dtako/autoload`) の送り先 (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * `run_dtako_reimport` の ② 取り込み (`POST /api/dtako/autoload`) と、zip を付けない取り込み
+ * (`POST /api/dtako/autoload-pending`、インタンク画面のボタン) の送り先 (Refs ohishi-exp/rust-ichibanboshi#322)。
+ * `allowedPath` の口にだけ token を付けて送る (1 deps に 1 口)。
  *
  * 社内 CakePHP への取り込みなので `KINTAI_COMP_ID` の 1 社だけ。その会社で `KINTAI_WRITE_TOKEN` が読めれば
  * 勤怠 Worker へ。binding が無い・別の会社・テナントが引けない・token が読めないときは `null` (呼び手は 503)。
@@ -408,13 +411,47 @@ export async function kintaiAutoloader(
   compId: string,
   accounts: unknown,
   onSecretError: (err: unknown) => void,
+  allowedPath: string,
 ): Promise<KintaiAutoloader | null> {
   const kintai = kintaiWorkerFor(env.KINTAI, compId, kintaiWorkerScope(env, accounts));
   if (!kintai) return null;
   const writeToken = await readKintaiWriteToken(env, compId, onSecretError);
-  if (writeToken) return { autoload: kintaiWriteDeps(kintai, writeToken, DTAKO_AUTOLOAD_PATH).gcp };
+  if (writeToken) return { autoload: kintaiWriteDeps(kintai, writeToken, allowedPath).gcp };
   onSecretError(new Error("KINTAI_WRITE_TOKEN が読めません"));
   return null;
+}
+
+/** [`relayAutoloadPending`] の結果 (relay がそのまま status と JSON で返す)。 */
+export interface AutoloadPendingResult {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+/**
+ * インタンク画面の「取り込み口の CSV を取り込む」: 勤怠 Worker の `POST /api/dtako/autoload-pending` へ送り、
+ * 応答 (CakePHP の `status`・`body_excerpt`・`location`) を素通しする。**成否は判定しない** (307 でも取り込みは走る)。
+ *
+ * - 送信が投げた・勤怠 Worker が 502 (CakePHP へ送った後の失敗・待ちの打ち切り) → `uncertain: true`。
+ *   取り込みは応答より前に走るので、押し直す前に画面で確かめてもらう
+ * - それ以外の非 2xx (403 / 503 / 未 deploy の 404) は送っていないので `uncertain: false`
+ */
+export async function relayAutoloadPending(loader: KintaiAutoloader): Promise<AutoloadPendingResult> {
+  let res: Response;
+  try {
+    res = await loader.autoload(DTAKO_AUTOLOAD_PENDING_PATH, { method: "POST" });
+  } catch (err) {
+    return { status: 502, body: { error: `勤怠 Worker に送れたか分かりません: ${describeUnknownError(err)}`, uncertain: true } };
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    const error = `勤怠 Worker が ${res.status} を返しました: ${text.slice(0, 300)}`;
+    return { status: 502, body: { error, uncertain: res.status === 502 } };
+  }
+  try {
+    return { status: 200, body: JSON.parse(text) as Record<string, unknown> };
+  } catch {
+    return { status: 502, body: { error: `勤怠 Worker の応答が JSON ではありません: ${text.slice(0, 300)}`, uncertain: true } };
+  }
 }
 
 /** 勤怠 Worker の休息の開始の補正の口 (Refs ohishi-exp/rust-ichibanboshi#322)。 */

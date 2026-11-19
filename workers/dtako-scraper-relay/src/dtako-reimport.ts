@@ -116,6 +116,9 @@ export function buildAutoloadPath(unkoNo: string, resetTimecard: boolean): strin
 /** ② の口。オンプレ版と勤怠 Worker の両方にある (Refs ohishi-exp/rust-ichibanboshi#322)。 */
 export const DTAKO_AUTOLOAD_PATH = "/api/dtako/autoload";
 
+/** zip を付けない ② の口 (勤怠 Worker が CakePHP の取り込み口を zip 無しで叩き、そこに残っている CSV を取り込ませる)。 */
+export const DTAKO_AUTOLOAD_PENDING_PATH = "/api/dtako/autoload-pending";
+
 export interface DtakoReimportDeps {
   /** ① zip 取得の直前に走らせる「作業時間再集計」(theearth F-DES1013、Refs
    * #633-19)。**無条件で呼ぶ** (フラグは作らない — 「取り直す」= 最新にする、

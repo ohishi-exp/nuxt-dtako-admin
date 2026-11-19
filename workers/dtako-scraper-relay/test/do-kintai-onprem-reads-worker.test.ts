@@ -601,3 +601,30 @@ describe("memo のキーは月・取り込み後の無効化はその月を落�
     expect(daily).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("autoload-pending (インタンク画面の「取り込み口の CSV を取り込む」) は勤怠 Worker の書き込みの口だけ", () => {
+  const pending = (kintai: Call[]) =>
+    kintai.map((c) => [new URL(c.url).pathname, c.method, c.headers["x-kintai-write-token"] ?? null, c.headers["x-kintai-tenant-id"] ?? null]);
+
+  it("本番の設定: 勤怠 Worker の /api/dtako/autoload-pending へ token と自社のテナントを付けて 1 回だけ送り、応答を素通しする", async () => {
+    const { call, onprem, kintai, authWorker } = makeDO();
+    const res = await call("POST", "/restraint-api/kintai/autoload-pending");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({});
+    expect(pending(kintai)).toEqual([["/api/dtako/autoload-pending", "POST", "write-token", TENANT]]);
+    expect(kintaiReads(onprem)).toEqual([]);
+    expect(authWorker).toEqual([]);
+  });
+
+  it.each([
+    ["binding が無い", { kintaiBinding: false }],
+    ["書き込み token が無い", { writeToken: false }],
+  ] as const)("%s なら 503。どこにも送らない", async (_l, opts) => {
+    const { call, onprem, kintai } = makeDO(opts);
+    const res = await call("POST", "/restraint-api/kintai/autoload-pending");
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "勤怠 Worker (KINTAI) の書き込み (KINTAI_WRITE_TOKEN) が使えません" });
+    expect(kintai).toEqual([]);
+    expect(onprem).toEqual([]);
+  });
+});

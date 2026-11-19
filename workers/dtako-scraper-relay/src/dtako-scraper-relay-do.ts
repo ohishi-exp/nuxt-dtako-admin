@@ -94,6 +94,8 @@ import { decideRelogin, isEntryReusable, type LoginSessionEntry } from "./theear
 import {
   DtakoReimportError,
   DtakoReimportPushUncertainError,
+  DTAKO_AUTOLOAD_PATH,
+  DTAKO_AUTOLOAD_PENDING_PATH,
   isUnkoNoAcceptable,
   runDtakoReimport as runDtakoReimportPure,
   type DtakoReimportDeps,
@@ -167,6 +169,7 @@ import {
   type KyuyoAuthorizer,
   KINTAI_WORKER_BASE,
   kintaiAutoloader,
+  relayAutoloadPending,
   kintaiReader,
   kintaiWorkerScope,
   kintaiRelayFailStatus,
@@ -822,6 +825,8 @@ const KINTAI_SINGLE_COMP_PATHS = new Set([
   "/restraint-api/kintai/kosoku-daily",
   "/restraint-api/kintai/warm",
   "/restraint-api/kintai/refresh/mysql",
+  // インタンク画面の「取り込み口の CSV を取り込む」(社内 CakePHP の autoload を zip 無しで)
+  "/restraint-api/kintai/autoload-pending",
   "/restraint-api/kintai/day-events-lookup",
   "/restraint-api/kintai/day-operations",
   "/restraint-api/kintai/onprem-month-operations",
@@ -2997,7 +3002,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ error: KINTAI_SINGLE_COMP_FORBIDDEN }, { status: 403 });
     }
     // ② の送り先 (勤怠 Worker、`kintaiAutoloader`)
-    const autoloader = await this.kintaiAutoloaderFor(parsed.compId, "dtako_reimport");
+    const autoloader = await this.kintaiAutoloaderFor(parsed.compId, "dtako_reimport", DTAKO_AUTOLOAD_PATH);
     if (!autoloader) {
       return Response.json({ error: KINTAI_AUTOLOAD_NOT_CONFIGURED }, { status: 503 });
     }
@@ -5081,6 +5086,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (url.pathname === "/restraint-api/kintai/refresh/mysql" && request.method === "POST") {
       return this.handleKintaiRefreshMysql(record!, request);
+    }
+    // インタンク画面の「取り込み口の CSV を取り込む」。会社の判定は上の KINTAI_SINGLE_COMP_PATHS
+    if (url.pathname === "/restraint-api/kintai/autoload-pending" && request.method === "POST") {
+      return this.handleKintaiAutoloadPending(record!);
     }
     // ②(取り込み)の後、オンプレから実物の23桁 unko_no を引く (viewer 認可、
     // 読むだけ・②を実行しない。Refs #625)
@@ -7776,9 +7785,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** `compId` の ② 取り込みの送り先 (`kintai-relay.ts` の `kintaiAutoloader`)。log の作法は `kintaiWriteTokenFor` と同じ。 */
-  private async kintaiAutoloaderFor(compId: string, tag: string): Promise<KintaiAutoloader | null> {
-    return kintaiAutoloader(this.env, compId, await this.dtakoAccountsParsed(), (err) =>
-      console.error(JSON.stringify({ [tag]: "secret-error", error: describeUnknownError(err) })),
+  private async kintaiAutoloaderFor(compId: string, tag: string, path: string): Promise<KintaiAutoloader | null> {
+    return kintaiAutoloader(
+      this.env,
+      compId,
+      await this.dtakoAccountsParsed(),
+      (err) => console.error(JSON.stringify({ [tag]: "secret-error", error: describeUnknownError(err) })),
+      path,
     );
   }
 
@@ -8271,7 +8284,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!account) {
       return dvrJsonError(500, `comp_id=${record.compId} が DTAKO_ACCOUNTS に見つかりません`);
     }
-    const autoloader = await this.kintaiAutoloaderFor(record.compId, "kintai_refresh_mysql");
+    const autoloader = await this.kintaiAutoloaderFor(record.compId, "kintai_refresh_mysql", DTAKO_AUTOLOAD_PATH);
     if (!autoloader) {
       return dvrJsonError(503, KINTAI_AUTOLOAD_NOT_CONFIGURED);
     }
@@ -8289,6 +8302,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ ...resultBody, guarantee, guarantee_error: guaranteeError }, { status: res.status });
     }
     return res;
+  }
+
+  /**
+   * POST /restraint-api/kintai/autoload-pending — 社内 CakePHP の取り込み口 (`/dtako-events/autoload`) を
+   * zip 無しで叩き、そこに残っている CSV を取り込ませる (インタンク画面のボタン)。本文は読まない。
+   * **運行 1 件を名指ししない一括の口** (オンプレ側が許容している動き、kintai-ops §4.7)。押せるのは
+   * `KINTAI_COMP_ID` の会社の閲覧者 (KINTAI_SINGLE_COMP_PATHS)。送り先と応答の写し方は `relayAutoloadPending`。
+   * theearth を使わないので scrape の列には並べない。
+   */
+  private async handleKintaiAutoloadPending(record: TheearthSessionRecord): Promise<Response> {
+    const autoloader = await this.kintaiAutoloaderFor(record.compId, "kintai_autoload_pending", DTAKO_AUTOLOAD_PENDING_PATH);
+    if (!autoloader) return dvrJsonError(503, KINTAI_AUTOLOAD_NOT_CONFIGURED);
+    const { status, body } = await relayAutoloadPending(autoloader);
+    if (status !== 200) console.error(JSON.stringify({ kintai_autoload_pending: "failed", status, ...body }));
+    return Response.json(body, { status });
   }
 
   /**

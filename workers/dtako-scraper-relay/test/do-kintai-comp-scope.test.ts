@@ -61,6 +61,7 @@ const SINGLE_COMP_ROUTES: Array<[method: "GET" | "POST", path: string]> = [
   ["GET", "/restraint-api/kintai/kosoku-daily"],
   ["POST", "/restraint-api/kintai/warm"],
   ["POST", "/restraint-api/kintai/refresh/mysql"],
+  ["POST", "/restraint-api/kintai/autoload-pending"],
   ["GET", "/restraint-api/kintai/day-events-lookup"],
   ["GET", "/restraint-api/kintai/day-operations"],
   ["GET", "/restraint-api/kintai/onprem-month-operations"],

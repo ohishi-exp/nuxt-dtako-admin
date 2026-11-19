@@ -23,6 +23,7 @@ import {
   tenantForCompId,
   buildDeps,
   kintaiAutoloader,
+  relayAutoloadPending,
   kintaiRestStartWriter,
   putKintaiRestStartOverrides,
   REST_START_OVERRIDES_PATH,
@@ -1405,6 +1406,7 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
       "1001",
       KINTAI_ACCOUNTS,
       onSecretError,
+      "/api/dtako/autoload",
     );
     await loader!.autoload(PATH, INIT);
     expect(kintai.fetch).toHaveBeenCalledWith(`https://ichibanboshi-kintai${PATH}`, {
@@ -1436,6 +1438,7 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
       compId,
       KINTAI_ACCOUNTS,
       onSecretError,
+      "/api/dtako/autoload",
     );
     expect(loader).toBeNull();
     expect(seen).toEqual([]);
@@ -1458,6 +1461,7 @@ describe("kintaiAutoloader — ② 取り込みの送り先 (Refs ohishi-exp/rus
       "1001",
       KINTAI_ACCOUNTS,
       onSecretError,
+      "/api/dtako/autoload",
     );
     expect(loader).toBeNull();
     expect(seen).toEqual([]);
@@ -2082,5 +2086,41 @@ describe("kintaiRestStartWriter / putKintaiRestStartOverrides — 休息の開�
     expect(await kintaiRestStartWriter({ KINTAI: kintai, KINTAI_COMP_ID: "1001" }, "1001", KINTAI_ACCOUNTS, onSecretError)).toBeNull();
     expect(onSecretError).toHaveBeenCalledWith(new Error("KINTAI_WRITE_TOKEN が読めません"));
     expect(kintai.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("relayAutoloadPending — zip を付けない取り込みの応答の写し方", () => {
+  const loader = (impl: () => Promise<Response>) => {
+    const autoload = vi.fn(async (_path: string, _init: RequestInit) => impl());
+    return { autoload };
+  };
+
+  it("勤怠 Worker の口へ POST し、2xx の JSON (CakePHP の status・body_excerpt・location) を素通しする。307 も成功と断定せずそのまま", async () => {
+    const body = { status: 307, body_excerpt: "", location: "/" };
+    const l = loader(async () => json(body));
+    expect(await relayAutoloadPending(l)).toEqual({ status: 200, body });
+    expect(l.autoload).toHaveBeenCalledWith("/api/dtako/autoload-pending", { method: "POST" });
+  });
+
+  it.each([
+    [502, "nginx への接続に失敗: timeout", true],
+    [503, "勤怠 Worker の設定が無い", false],
+    [403, "forbidden", false],
+    [404, "Not Found", false],
+  ])("勤怠 Worker が %i なら 502 で返す。502 (送った後の失敗) だけ uncertain", async (status, text, uncertain) => {
+    const res = await relayAutoloadPending(loader(async () => new Response(text, { status })));
+    expect(res).toEqual({ status: 502, body: { error: `勤怠 Worker が ${status} を返しました: ${text}`, uncertain } });
+  });
+
+  it("送信が投げたら uncertain (取り込みは応答より前に走りうる)", async () => {
+    const res = await relayAutoloadPending(loader(async () => Promise.reject(new Error("network lost"))));
+    expect(res.status).toBe(502);
+    expect(res.body.uncertain).toBe(true);
+    expect(res.body.error).toContain("network lost");
+  });
+
+  it("2xx でも JSON でなければ 502 + uncertain (届いた後なので)", async () => {
+    const res = await relayAutoloadPending(loader(async () => new Response("<html>", { status: 200 })));
+    expect(res).toEqual({ status: 502, body: { error: "勤怠 Worker の応答が JSON ではありません: <html>", uncertain: true } });
   });
 });
