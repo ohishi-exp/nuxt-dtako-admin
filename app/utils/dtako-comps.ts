@@ -65,10 +65,14 @@ export function parseCompMap(raw: unknown): CompMapEntry[] {
   return out
 }
 
+/** 社内 dtako (オンプレの MariaDB・CakePHP) を持つ会社。relay の `KINTAI_COMP_ID` と同じ値で、
+ * 社内側へ届く口 (`KINTAI_SINGLE_COMP_PATHS`) はこの会社でしか開かない (違えば relay が 403)。 */
+export const ONPREM_DTAKO_COMP_ID = '27324455'
+
 /** サーバー (D1) から会社対応表が取れない時のフォールバック。scraper ページの
  * 会社セレクタもこれを使う (スクレイプ対象は給与DBと無関係のため対応表は不要)。 */
 export const DTAKO_COMPS: DtakoComp[] = [
-  { compId: '27324455', label: '大石運輸倉庫' },
+  { compId: ONPREM_DTAKO_COMP_ID, label: '大石運輸倉庫' },
   { compId: '75700192', label: '北海大運' },
 ]
 

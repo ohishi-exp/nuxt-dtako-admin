@@ -7,6 +7,7 @@
 import {
   getFuelStarts, getFuelIntank, getFuelUnregisteredCards, getFuelCars, getFuelCards,
   createFuelCard, updateFuelIntankDtakoRow, deleteFuelIntank, uploadFuelCsv, downloadFuelUpload, recheckFuelIntank,
+  currentAccessToken,
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
@@ -16,6 +17,8 @@ import {
 import { carOptions } from '~/utils/fuel-cards'
 import { canRecheck, describeManualError } from '~/utils/fuel-manual'
 import { describeCaughtError, describeListFailure } from '~/utils/api-error'
+import { ONPREM_DTAKO_COMP_ID } from '~/utils/dtako-comps'
+import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import type { FuelStart, FuelIntankRow, FuelCar } from '~/types'
 
 /** start を選ばないとき (最新 100 行) の選択肢の値。reka の Select は空文字の値を持てない */
@@ -220,6 +223,51 @@ async function downloadUploaded() {
   }
 }
 
+// --- 社内 dtako の取り込み口に残っている CSV を取り込む (旧 CakePHP の /dtako-events/autoload を zip 無しで) ---
+
+const AUTOLOAD_CONFIRM = '社内 dtako の取り込み口に残っている CSV を取り込みます (旧画面の dtako-events/autoload と同じ)。よろしいですか？'
+const AUTOLOAD_UNCERTAIN = '送れたか分かりません。取り込まれていることがあるので、表 (D数量) を確かめてから必要ならもう一度押してください'
+const autoloading = ref(false)
+const autoloadMessage = ref<string | null>(null)
+const autoloadError = ref<string | null>(null)
+
+/**
+ * relay の `POST /restraint-api/kintai/autoload-pending` → 勤怠 Worker → 社内 CakePHP。社内側に届くのは
+ * 勤怠 Worker だけなので、ブラウザから社内のホストは叩かない。この画面は theearth ログインを持たないので
+ * 閲覧者のヘッダ (ログインの JWT + 会社) で呼ぶ。会社は社内 dtako の会社に固定 (他の会社は relay が 403)。
+ * 応答の status は取り込みの成否の証明にならない (307 でも取り込みは走る) ので、成功とは書かない。
+ */
+async function runAutoload() {
+  if (autoloading.value || !window.confirm(AUTOLOAD_CONFIRM)) return
+  autoloadMessage.value = null
+  autoloadError.value = null
+  const token = currentAccessToken()
+  if (!token) {
+    autoloadError.value = 'ログインの情報がありません。ページを読み込み直してからもう一度押してください'
+    return
+  }
+  autoloading.value = true
+  try {
+    const res = await $fetch<{ status?: unknown }>('/restraint-api/kintai/autoload-pending', {
+      method: 'POST',
+      headers: {
+        'X-Theearth-Comp-Id': ONPREM_DTAKO_COMP_ID,
+        'X-Theearth-User-B64': b64urlUtf8('viewer'),
+        'Authorization': `Bearer ${token}`,
+      },
+    })
+    autoloadMessage.value = `取り込み口を実行しました (社内の応答 ${String(res?.status ?? '不明')})。取り込めたかは表の D数量で確かめてください`
+    await reloadRowsAfterWrite()
+  }
+  catch (e) {
+    const uncertain = (e as { data?: { uncertain?: unknown } } | null)?.data?.uncertain === true
+    autoloadError.value = uncertain ? AUTOLOAD_UNCERTAIN : describeCaughtError(e, 'もう一度押してください')
+  }
+  finally {
+    autoloading.value = false
+  }
+}
+
 // --- 未登録カードの登録 ---
 
 function startChoose(id: number) {
@@ -335,6 +383,7 @@ onMounted(() => {
         :search-input="{ placeholder: 'D番号・日付 (yyMMdd) で検索' }" class="w-64"
       />
       <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="refreshing" :disabled="refreshing" @click="refresh" />
+      <UButton icon="i-lucide-database-zap" variant="outline" label="dtako 取り込み (autoload)" :loading="autoloading" :disabled="autoloading" @click="runAutoload" />
       <UButton to="/fuel/manual" icon="i-lucide-pencil" variant="outline" label="手入力" />
       <UButton to="/fuel/cards" icon="i-lucide-credit-card" variant="outline" label="カード" />
       <UButton to="/fuel/credentials" icon="i-lucide-key-round" variant="outline" label="アップローダーの資格情報" />
@@ -368,6 +417,8 @@ onMounted(() => {
       </template>
     </UAlert>
     <UAlert v-if="uploadError" class="fuel-no-print" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="アップロードに失敗しました" :description="uploadError" />
+    <UAlert v-if="autoloadMessage" class="fuel-no-print" color="info" variant="subtle" icon="i-lucide-info" :title="autoloadMessage" />
+    <UAlert v-if="autoloadError" class="fuel-no-print" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="dtako の取り込み口を実行できませんでした" :description="autoloadError" />
     <UAlert v-if="masterError" class="fuel-no-print" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="start・車両・カードの一覧を読めませんでした" :description="masterError" />
 
     <!-- 未登録カード -->
