@@ -383,9 +383,16 @@ function printPage() {
   window.print()
 }
 
-onMounted(() => {
-  loadMasters()
-  loadRows()
+/**
+ * 開いたときは最新 start を出す。start の一覧を読んでから選ぶ (選べば watch が表を読む)。start が無い・読めない
+ * ときは最新 100 行。読み終える前に利用者が選び直していたら、その選択を上書きしない
+ */
+onMounted(async () => {
+  await loadMasters()
+  if (selected.value !== LATEST) return
+  const latest = starts.value[0]?.datetime
+  if (latest) selected.value = latest
+  else await loadRows()
 })
 </script>
 
