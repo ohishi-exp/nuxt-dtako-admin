@@ -76,6 +76,18 @@ const startItems = computed(() => [
   { label: '(最新 100 行)', value: LATEST },
   ...starts.value.map(s => ({ label: startLabel(s), value: s.datetime })),
 ])
+/**
+ * 「最新 start」「一個前」のボタン。`starts` は新しい順。「一個前」は選んでいる start の 1 つ古い start
+ * (最新 100 行を見ているときは最新 start を起点にする = 2 番目に新しい start)。一番古い start では押せない
+ */
+const latestStart = computed(() => starts.value[0]?.datetime ?? null)
+const previousStart = computed(() => {
+  const i = isMatching.value ? starts.value.findIndex(s => s.datetime === selected.value) : 0
+  return i >= 0 ? starts.value[i + 1]?.datetime ?? null : null
+})
+function selectStart(datetime: string | null) {
+  if (datetime) selected.value = datetime // watch が表を読み直す
+}
 const carItems = computed(() => carOptions(cars.value))
 const total = computed(() => totalQuantity(rows.value))
 
@@ -381,6 +393,14 @@ onMounted(() => {
       <USelectMenu
         v-model="selected" :items="startItems" value-key="value" virtualize
         :search-input="{ placeholder: 'D番号・日付 (yyMMdd) で検索' }" class="w-64"
+      />
+      <UButton
+        icon="i-lucide-arrow-up-to-line" variant="outline" label="最新 start"
+        :disabled="!latestStart || selected === latestStart" @click="selectStart(latestStart)"
+      />
+      <UButton
+        icon="i-lucide-chevron-down" variant="outline" label="一個前"
+        :disabled="!previousStart" @click="selectStart(previousStart)"
       />
       <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="refreshing" :disabled="refreshing" @click="refresh" />
       <UButton icon="i-lucide-database-zap" variant="outline" label="dtako 取り込み (autoload)" :loading="autoloading" :disabled="autoloading" @click="runAutoload" />
