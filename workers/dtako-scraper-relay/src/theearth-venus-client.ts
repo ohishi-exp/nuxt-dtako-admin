@@ -632,6 +632,8 @@ export interface VehicleStatePoint {
   direction: number | null;
   /** 現在作業名 (現在地一覧のみ、履歴では null)。 */
   currentWorkName: string | null;
+  /** 住所 (`AddressDispP` と、違えば `AddressDispC` を空白でつなぐ。現在地一覧のみ)。 */
+  address: string | null;
 }
 
 const VS_SPEED_CANDIDATES = ["Speed"] as const;
@@ -652,7 +654,14 @@ function mapVehicleStateRow(raw: Record<string, unknown>): VehicleStatePoint {
     revo: pickNumberField(raw, VS_REVO_CANDIDATES),
     direction: pickNumberField(raw, VS_DIRECTION_CANDIDATES),
     currentWorkName: pickStringField(raw, ["CurrentWorkName"]),
+    address: joinAddress(pickStringField(raw, ["AddressDispP"]), pickStringField(raw, ["AddressDispC"])),
   };
+}
+
+/** 現在地の住所 2 列をつなぐ。空・同じ値は 1 つにし、どちらも無ければ null。 */
+function joinAddress(p: string | null, c: string | null): string | null {
+  const parts = [p, c].map(v => v?.trim() ?? "").filter((v, i, a) => v !== "" && a.indexOf(v) === i);
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 function assertVehicleStateArray(d: unknown, methodName: string): Array<Record<string, unknown>> {

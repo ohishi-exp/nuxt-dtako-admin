@@ -24,6 +24,8 @@ interface VehicleStatePoint {
   revo: number | null
   direction: number | null
   currentWorkName: string | null
+  /** 住所 (relay が AddressDispP / AddressDispC をつないだもの)。 */
+  address: string | null
 }
 
 /** 動態履歴 1 点 (VehicleDisp テーブル由来、速度・回転数・住所・状態付き)。 */
@@ -139,11 +141,12 @@ const stateMarkers = computed<DvrMapMarker[]>(() =>
     .map(v => ({
       lat: v.latitude!,
       lng: v.longitude!,
-      // 元サイト (web金星号) と同じ 車番 / 乗務員 / 日時 の 3 行ラベル + 進行方向矢印。
+      // 元サイト (web金星号) と同じ 車番 / 乗務員 / 日時 の 3 行ラベルに住所を足す + 進行方向矢印。
       lines: [
         v.vehicleName ?? v.vehicleCd ?? '',
         v.driverName ?? '',
         v.dataDatetime ?? '',
+        v.address ?? '',
       ].filter(Boolean),
       // 停車中 (Speed=0) は GPSDirection=0 (方向不定) で全車が北を向くため矢印を出さず、
       // DvrMap 側で丸マーカーにする。走行中のみ方向を渡す。

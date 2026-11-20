@@ -11,7 +11,7 @@ import {
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
-  isDiffHighlighted, dailyReportEditQuery, dvrMapQuery, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  isDiffHighlighted, dailyReportEditQuery, dvrMapQuery, nearestTrackPoint, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
   createRowsCache,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
@@ -20,6 +20,7 @@ import { describeCaughtError, describeListFailure } from '~/utils/api-error'
 import { ONPREM_DTAKO_COMP_ID } from '~/utils/dtako-comps'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import type { FuelStart, FuelIntankRow, FuelCar } from '~/types'
+import type { DvrMapMarker } from '~/components/DvrMap.vue'
 
 /** start を選ばないとき (最新 100 行) の選択肢の値。reka の Select は空文字の値を持てない */
 const LATEST = '__latest__'
@@ -383,6 +384,86 @@ function printPage() {
   window.print()
 }
 
+// --- 給油した時刻の位置 (theearth の動態履歴、/dvr-map と同じ /dvr-api/log-track) ---
+
+/** 動態履歴 1 点のうちモーダルで使う列 (型の正本は dvr-map.vue の VehicleLogPoint)。 */
+interface LocationTrackPoint {
+  dataDatetime: string | null
+  latitude: number | null
+  longitude: number | null
+  speed: number | null
+  state: string | null
+  address: string | null
+}
+
+const { session: dvrSession, authHeaders: dvrAuthHeaders, restoreSession: restoreDvrSession, expireSession: expireDvrSession } = useDvrSession()
+const locationTarget = ref<FuelIntankRow | null>(null)
+const locationLoading = ref(false)
+const locationError = ref<string | null>(null)
+const locationPoints = ref<LocationTrackPoint[]>([])
+const locationHit = ref<{ index: number, offsetMinutes: number } | null>(null)
+const locationPoint = computed(() => locationHit.value ? locationPoints.value[locationHit.value.index] ?? null : null)
+const locationTrack = computed(() =>
+  locationPoints.value
+    .filter(p => p.latitude != null && p.longitude != null)
+    .map(p => ({ lat: p.latitude!, lng: p.longitude! })),
+)
+const locationMarkers = computed<DvrMapMarker[]>(() => {
+  const p = locationPoint.value
+  return p ? [{ lat: p.latitude!, lng: p.longitude!, lines: [p.dataDatetime ?? '', p.address ?? ''].filter(Boolean) }] : []
+})
+const LOCATION_LOGIN_NEEDED = 'theearth に未ログインです。位置情報・動態履歴の画面でログインしてから「もう一度」を押してください'
+
+function openLocation(r: FuelIntankRow) {
+  locationTarget.value = r
+  void loadLocation()
+}
+
+/** 給油日の動態履歴を読み、給油日時に一番近い点を選ぶ。theearth のログインは /dvr-map と共有 (localStorage)。 */
+async function loadLocation() {
+  const r = locationTarget.value
+  const q = r ? dvrMapQuery(r) : null
+  if (!q) return
+  locationError.value = null
+  locationPoints.value = []
+  locationHit.value = null
+  restoreDvrSession()
+  if (!dvrSession.value) {
+    locationError.value = LOCATION_LOGIN_NEEDED
+    return
+  }
+  locationLoading.value = true
+  try {
+    const day = q.at.slice(0, 10).replaceAll('-', '/')
+    const res = await $fetch<{ points: LocationTrackPoint[] }>('/dvr-api/log-track', {
+      headers: dvrAuthHeaders(),
+      query: { vehicle: q.vehicle, start: day, end: day },
+    })
+    if (locationTarget.value !== r) return
+    locationPoints.value = res.points
+    locationHit.value = nearestTrackPoint(res.points, q.at)
+    if (!locationHit.value) locationError.value = 'この日の動態履歴に GPS の点がありません'
+  }
+  catch (e) {
+    if (locationTarget.value !== r) return
+    if (dvrErrorStatus(e) === 401) {
+      expireDvrSession(dvrErrorMessage(e))
+      locationError.value = LOCATION_LOGIN_NEEDED
+      return
+    }
+    locationError.value = dvrErrorMessage(e)
+  }
+  finally {
+    locationLoading.value = false
+  }
+}
+
+/** 点の時刻と給油日時のずれの 1 文。 */
+function locationOffsetText(m: number): string {
+  if (m === 0) return '給油と同じ時刻の点'
+  return `給油の ${Math.abs(m)} 分${m < 0 ? '前' : '後'}の点`
+}
+
 /**
  * 開いたときは最新 start を出す。start の一覧を読んでから選ぶ (選べば watch が表を読む)。start が無い・読めない
  * ときは最新 100 行。読み終える前に利用者が選び直していたら、その選択を上書きしない
@@ -547,8 +628,7 @@ onMounted(async () => {
                 />
                 <UButton
                   v-if="isMatching && dvrMapQuery(r)" size="xs" variant="outline" label="位置を見る" class="ml-1"
-                  icon="i-lucide-map-pin" target="_blank"
-                  :to="{ path: '/dvr-map', query: dvrMapQuery(r)! }"
+                  icon="i-lucide-map-pin" @click="openLocation(r)"
                 />
                 <UButton v-if="canRecheck(r)" size="xs" variant="outline" label="再照合" class="ml-1" :loading="rechecking === rowKey(r)" :disabled="rechecking !== null" @click="recheck(r)" />
                 <UButton v-if="r.manual" size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = r" />
@@ -566,6 +646,39 @@ onMounted(async () => {
         </table>
       </div>
     </div>
+
+    <UModal
+      :open="locationTarget !== null" :ui="{ content: 'sm:max-w-3xl' }"
+      @update:open="(v: boolean) => { if (!v) locationTarget = null }"
+    >
+      <template #content>
+        <div class="p-6 space-y-3">
+          <h3 class="text-lg font-bold">給油した時刻の位置</h3>
+          <p v-if="locationTarget" class="text-sm text-gray-600 dark:text-gray-400">
+            {{ formatShortDatetime(locationTarget.datetime) }} / {{ locationTarget.car?.name ?? '' }}
+          </p>
+          <p v-if="locationLoading" class="text-sm text-gray-500">動態履歴を読んでいます…</p>
+          <p v-else-if="locationError" class="text-sm text-red-600">{{ locationError }}</p>
+          <template v-else-if="locationPoint && locationHit">
+            <p class="text-base font-medium">{{ locationPoint.address || '(住所なし)' }}</p>
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              {{ locationPoint.dataDatetime }} ({{ locationOffsetText(locationHit.offsetMinutes) }})
+              <template v-if="locationPoint.state"> / {{ locationPoint.state }}</template>
+              <template v-if="locationPoint.speed != null"> / {{ locationPoint.speed }} km/h</template>
+            </p>
+            <DvrMap :markers="locationMarkers" :track="locationTrack" :current="{ lat: locationPoint.latitude!, lng: locationPoint.longitude! }" />
+          </template>
+          <div class="flex justify-end gap-2">
+            <UButton
+              v-if="locationTarget && dvrMapQuery(locationTarget)" variant="outline" icon="i-lucide-external-link"
+              label="動態履歴で開く" target="_blank" :to="{ path: '/dvr-map', query: dvrMapQuery(locationTarget)! }"
+            />
+            <UButton v-if="locationError" variant="outline" label="もう一度" :loading="locationLoading" @click="loadLocation" />
+            <UButton label="閉じる" @click="locationTarget = null" />
+          </div>
+        </div>
+      </template>
+    </UModal>
 
     <UModal :open="deleteTarget !== null" @update:open="(v: boolean) => { if (!v) deleteTarget = null }">
       <template #content>
