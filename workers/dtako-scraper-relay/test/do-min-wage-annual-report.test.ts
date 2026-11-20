@@ -47,7 +47,7 @@ afterEach(() => {
 function makeDO(opts: Setup = {}) {
   const d1: string[] = [];
   const kintaiCalls: string[] = [];
-  const kyuyoCalls: Array<{ url: string; auth: string | null }> = [];
+  const kyuyoCalls: Array<{ url: string; auth: string | null; mode: string | null }> = [];
   const authorizeCalls: string[] = [];
   const db = {
     prepare: (sql: string) => ({
@@ -79,7 +79,7 @@ function makeDO(opts: Setup = {}) {
     },
     ICHIBAN_KYUYO: {
       fetch: vi.fn(async (req: Request) => {
-        kyuyoCalls.push({ url: req.url, auth: req.headers.get("authorization") });
+        kyuyoCalls.push({ url: req.url, auth: req.headers.get("authorization"), mode: req.headers.get("x-kyuyo-auth") });
         if (opts.kyuyoUpstreamStatus) return new Response("forbidden", { status: opts.kyuyoUpstreamStatus });
         const bonus = req.url.includes("/kyuyo/bonus");
         return Response.json({
@@ -149,7 +149,8 @@ describe("GET /restraint-api/min-wage-annual-report の門", () => {
     expect(kintaiCalls[0]).toContain("from=2025-01&to=2025-12");
     // 賞与 1 社 + 月例 12 か月
     expect(kyuyoCalls).toHaveLength(13);
-    expect(kyuyoCalls[0]).toEqual({ url: "https://ichibanboshi-kyuyo/kyuyo/bonus?company=0100&year=2025", auth: "Bearer viewer-jwt" });
+    // 画面の経路は X-Kyuyo-Auth を付けない (給与大臣はブラウザ JWT の検証器 authorize を使う)
+    expect(kyuyoCalls[0]).toEqual({ url: "https://ichibanboshi-kyuyo/kyuyo/bonus?company=0100&year=2025", auth: "Bearer viewer-jwt", mode: null });
     expect(kyuyoCalls.every((c) => c.auth === "Bearer viewer-jwt")).toBe(true);
   });
 

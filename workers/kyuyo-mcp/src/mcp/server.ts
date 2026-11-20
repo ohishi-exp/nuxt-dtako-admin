@@ -28,11 +28,11 @@ import type { z } from "zod";
 import type { Env } from "../env";
 import type { BindingJwtClaims } from "../middleware/binding-jwt";
 import { redactDriverNames } from "../redact";
-import type { ToolEntry } from "./registry";
+import { McpContentResult, type McpContent, type ToolCaller, type ToolEntry } from "./registry";
 import { ALL_TOOLS } from "./tools";
 import { isToolAllowed, parseScopes } from "./scope";
 
-type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+type ToolResult = { content: McpContent[]; isError?: boolean };
 
 function ok(value: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(redactDriverNames(value), null, 2) }] };
@@ -58,6 +58,7 @@ function registerToolEntry(
   tool: ToolEntry<z.ZodTypeAny>,
   scopes: Set<string>,
   scopeLabel: string,
+  caller: ToolCaller,
 ): void {
   server.registerTool(
     tool.name,
@@ -71,7 +72,9 @@ function registerToolEntry(
         return fail(`invalid arguments: ${parsed.error.message}`);
       }
       try {
-        return ok(await tool.execute(env, parsed.data));
+        const value = await tool.execute(env, parsed.data, caller);
+        // PDF 等の content はそのまま返す (氏名を含めないのは tool 側。registry.ts の McpContentResult)
+        return value instanceof McpContentResult ? { content: value.content } : ok(value);
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
       }
@@ -88,8 +91,10 @@ const handler = createWorkerMcpV2<Env>({
     const scopes = new Set(ctx.authInfo?.scopes ?? []);
     const scopeLabel = ctx.authInfo?.scopes.join(" ") ?? "";
     const reg = server as unknown as RegisterableServer;
+    // createMcpHandler の factory は request ごとに走るので、ここの authInfo はこの request の呼び手のもの
+    const caller: ToolCaller = { bindingJwt: ctx.authInfo?.token ?? "" };
     for (const tool of ALL_TOOLS) {
-      registerToolEntry(reg, env, tool, scopes, scopeLabel);
+      registerToolEntry(reg, env, tool, scopes, scopeLabel, caller);
     }
   },
 });
