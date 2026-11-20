@@ -44,7 +44,7 @@ async function statusOf(p: Promise<unknown>): Promise<number | undefined> {
 
 describe('allowlist (上流を呼ぶ前)', () => {
   const cases: Array<['GET' | 'POST', string]> = [
-    ['GET', 'unknown'], ['GET', '../probe'], ['GET', '%2e%2e/probe'], ['GET', 'sync'], ['GET', 'payroll/'], ['POST', 'payroll'], ['POST', 'sync/x'],
+    ['GET', 'unknown'], ['GET', '../probe'], ['GET', '%2e%2e/probe'], ['GET', 'sync'], ['GET', 'payroll/'], ['POST', 'payroll'], ['POST', 'sync/x'], ['POST', 'schema'],
   ]
   for (const [m, p] of cases) {
     it(`${m} ${p} は 404 で上流を 1 本も呼ばない`, async () => {
@@ -64,6 +64,15 @@ describe('worker', () => {
     expect(req.method).toBe('GET')
     expect(req.headers.get('authorization')).toBe(AUTH)
     expect([...req.headers.keys()].filter(k => k.startsWith('cf-access'))).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('GET schema (賞与テーブル探索の読み取り口、Refs ohishi-exp/rust-ichibanboshi#414) は binding へ query ごと送る', async () => {
+    await fetchKyuyo(withBinding(), 'GET', 'schema', '?company=0100&year=2026', AUTH)
+    const req = bindingFetch.mock.calls[0]![0] as Request
+    expect(req.url).toBe('https://ichibanboshi-kyuyo/kyuyo/schema?company=0100&year=2026')
+    expect(req.method).toBe('GET')
+    expect(req.headers.get('authorization')).toBe(AUTH)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
