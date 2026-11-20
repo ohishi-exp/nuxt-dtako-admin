@@ -172,6 +172,30 @@ export function dvrMapQuery(row: FuelIntankRow): { vehicle: string, at: string }
   return { vehicle, at: row.datetime.slice(0, 16).replace(' ', 'T') }
 }
 
+/**
+ * 動態履歴 (`/dvr-api/log-track` の 1 日分) から、給油日時 `at` (`YYYY-MM-DDTHH:mm`) に一番近い
+ * GPS のある点を選ぶ。点の時刻は `MM/DD HH:mm` (年が無い) なので `at` の年で読む (1 日分しか引かないので
+ * 年はまたがない)。`offsetMinutes` は点の時刻 − 給油日時 (負なら給油より前の点)。
+ * `at` が読めない・GPS と時刻がそろった点が無いときは null。
+ */
+export function nearestTrackPoint(
+  points: ReadonlyArray<{ dataDatetime: string | null, latitude: number | null, longitude: number | null }>,
+  at: string,
+): { index: number, offsetMinutes: number } | null {
+  const a = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(at)
+  if (!a) return null
+  const year = Number(a[1])
+  const want = Date.UTC(year, Number(a[2]) - 1, Number(a[3]), Number(a[4]), Number(a[5]))
+  let best: { index: number, offsetMinutes: number } | null = null
+  points.forEach((p, index) => {
+    const t = /^(\d{2})\/(\d{2}) (\d{2}):(\d{2})$/.exec(p.dataDatetime ?? '')
+    if (!t || p.latitude == null || p.longitude == null) return
+    const offsetMinutes = (Date.UTC(year, Number(t[1]) - 1, Number(t[2]), Number(t[3]), Number(t[4])) - want) / 60000
+    if (!best || Math.abs(offsetMinutes) < Math.abs(best.offsetMinutes)) best = { index, offsetMinutes }
+  })
+  return best
+}
+
 /** 数量の合計 (表の最下行。CakePHP の `$sum += $fuelIntank->Qt`)。小数 2 桁に丸める。 */
 export function totalQuantity(rows: FuelIntankRow[]): number {
   return round2(rows.reduce((s, r) => s + (r.qt ?? 0), 0))

@@ -861,11 +861,28 @@ describe("getVehicleStates", () => {
       revo: 670,
       direction: 135,
       currentWorkName: "走行",
+      address: null,
     });
     expect(vehicles[0]!.latitude).toBeCloseTo(32 + 53.5438 / 60, 5);
     expect(vehicles[0]!.longitude).toBeCloseTo(129 + 58.8335 / 60, 5);
     // GPS 未捕捉 (0,0) は null
     expect(vehicles[1]).toMatchObject({ vehicleCd: "72", latitude: null, longitude: null });
+  });
+
+  it("joins AddressDispP / AddressDispC into address (blank and duplicate parts dropped)", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: [
+      vehicleStateRaw({ AddressDispP: "静岡県浜松市中央区", AddressDispC: "国道1号" }),
+      vehicleStateRaw({ AddressDispP: "静岡県浜松市中央区", AddressDispC: "静岡県浜松市中央区" }),
+      vehicleStateRaw({ AddressDispP: " ", AddressDispC: "国道1号" }),
+      vehicleStateRaw({ AddressDispP: "", AddressDispC: "" }),
+    ] })]);
+    const vehicles = await getVehicleStates(createCookieJar(), "00000001", fetchImpl);
+    expect(vehicles.map(v => v.address)).toEqual([
+      "静岡県浜松市中央区 国道1号",
+      "静岡県浜松市中央区",
+      "国道1号",
+      null,
+    ]);
   });
 
   it("rejects a non-numeric branch code without fetching", async () => {
