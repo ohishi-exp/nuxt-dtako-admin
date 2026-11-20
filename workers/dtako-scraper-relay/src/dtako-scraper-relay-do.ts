@@ -300,14 +300,9 @@ import {
 } from "./min-wage-import";
 import { branchByDriverCdAt, buildBranchGroups, resolveBranchPrefecture } from "./branch-prefecture";
 import {
-  AnnualReportError,
-  buildAnnualReport,
-  fetchKyuyoJson,
-  jstDate,
-  parseAnnualReportQuery,
-  renderAnnualReportHtml,
-  reportFilename,
+  respondAnnualReport,
 } from "./min-wage-annual-report";
+import { renderPdf } from "./pdf-render";
 import {
   buildCompMapResponse,
   buildEmployeeMasterResponse,
@@ -758,23 +753,6 @@ interface WorkEditPageRecord {
 
 function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
-}
-
-/**
- * HTML → PDF (A4 横、背景色つき)。Browser Rendering の `[browser]` binding を使う
- * (前例は ippoan/auth-worker の `verify-shot.ts`。あちらは screenshot)。puppeteer は
- * PDF を作るときだけ読み込む (DO の他の口と node の vitest に重さを持ち込まない)。
- */
-async function renderPdf(binding: Fetcher, html: string): Promise<Uint8Array> {
-  const { default: puppeteer } = await import("@cloudflare/puppeteer");
-  const browser = await puppeteer.launch(binding);
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "load" });
-    return await page.pdf({ format: "A4", landscape: true, printBackground: true });
-  } finally {
-    await browser.close();
-  }
 }
 
 /**
@@ -10324,53 +10302,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (ctx instanceof Response) return ctx;
     const gate = await this.kyuyoAccessGate(request);
     if (gate) return gate;
-    const query = parseAnnualReportQuery(url.searchParams);
-    if ("error" in query) return dvrJsonError(400, query.error);
-    const db = this.env.DTAKO_DB;
-    if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
-    if (query.format === "pdf" && !this.env.BROWSER) {
-      return dvrJsonError(503, "PDF の作成 (Browser Rendering の BROWSER) が使えません");
-    }
-    const authorization = request.headers.get("authorization");
-    const compId = record.compId;
-    try {
-      const report = await buildAnnualReport(
-        {
-          employees: async () =>
-            ((
-              await db
-                .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
-                .bind(compId)
-                .all<EmployeeD1Row>()
-            ).results ?? []).map((r) => ({ company: r.company, payrollCd: r.payroll_cd, name: r.name, driverCd: r.driver_cd })),
-          payrollCompanies: async () =>
-            ((
-              await db
-                .prepare(`SELECT payroll_company FROM comp_payroll_map WHERE comp_id = ? ORDER BY sort_order, payroll_company`)
-                .bind(compId)
-                .all<{ payroll_company: string }>()
-            ).results ?? []).map((r) => r.payroll_company),
-          wageRange: (from, to) =>
-            relayWageRangeGet(ctx.deps, compId, new URLSearchParams({ ...query.rangeParams, from, to })),
-          kyuyo: (path, q) => fetchKyuyoJson(this.env.ICHIBAN_KYUYO, authorization, path, q),
-        },
-        query,
-      );
-      if (query.format === "json") return Response.json(report);
-      const pdf = await renderPdf(this.env.BROWSER!, renderAnnualReportHtml(report, jstDate(Date.now())));
-      return new Response(pdf, {
-        headers: {
-          "content-type": "application/pdf",
-          "content-disposition": `attachment; filename="${reportFilename(report)}"`,
-          "cache-control": "no-store",
-        },
-      });
-    } catch (err) {
-      const message = describeUnknownError(err);
-      console.error(JSON.stringify({ min_wage_annual_report: "error", comp_id: compId, error: message }));
-      const status = err instanceof AnnualReportError ? err.status : 502;
-      return dvrJsonError(status, `最低賃金 年間レポートを作れませんでした: ${err instanceof AnnualReportError ? err.message : message}`);
-    }
+    const browser = this.env.BROWSER;
+    return respondAnnualReport({
+      compId: record.compId,
+      params: url.searchParams,
+      db: this.env.DTAKO_DB,
+      deps: ctx.deps,
+      kyuyo: this.env.ICHIBAN_KYUYO,
+      authorization: request.headers.get("authorization"),
+      authMode: "browser",
+      pdf: browser ? (html) => renderPdf(browser, html) : null,
+      withoutNames: false,
+      now: Date.now(),
+    });
   }
 
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから

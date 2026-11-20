@@ -32,6 +32,8 @@
  * 変えるときは両方に反映すること (`normalizeNameKey` と同じ扱い)。
  */
 import { normalizeNameKey } from "./employee-master";
+import { relayWageRangeGet, type KintaiRelayDeps } from "./kintai-relay";
+import { describeUnknownError } from "./scrape-queue";
 
 /** 補填に使う支給項目の名前 (給与大臣の項目名そのもの)。 */
 export const ADJUSTMENT_ITEM_LABEL = "就労調整金";
@@ -605,26 +607,34 @@ interface FetcherLike {
   fetch(request: Request): Promise<Response>;
 }
 
+/** 給与大臣へ渡す token の種類。`browser` = ブラウザ JWT、`mcp` = kyuyo-mcp の binding_jwt。 */
+export type KyuyoAuthMode = "browser" | "mcp";
+
 /**
  * 給与大臣 Worker の `GET /kyuyo/{bonus,payroll}` を読む。**ブラウザ JWT をそのまま `Authorization` で
  * 渡す** (front の `server/utils/kyuyo-upstream.ts` と同じ。認可は給与大臣 Worker 側の JWT + allowlist)。
  * path は 2 つに固定 (`..` で同じ Worker の別の口へ届かないよう、呼び手に組み立てさせない)。
  * 401 / 403 はそのまま返し、それ以外の失敗は 502。
+ *
+ * `authMode: "mcp"` は MCP (kyuyo-mcp) の binding_jwt を渡すとき。`X-Kyuyo-Auth: mcp` を付け、
+ * 給与大臣 Worker に auth-worker の `authorizeMcp` で検証させる (ヘッダは検証器を選ぶだけで、
+ * どちらの検証器も署名を検証する。ohishi-exp/rust-ichibanboshi#421)。
  */
 export async function fetchKyuyoJson(
   binding: FetcherLike | undefined,
   authorization: string | null,
   path: "bonus" | "payroll",
   query: Record<string, string>,
+  authMode: KyuyoAuthMode = "browser",
 ): Promise<unknown> {
   if (!binding) throw new AnnualReportError(503, "給与大臣 Worker (ICHIBAN_KYUYO) が使えません");
   if (!authorization) throw new AnnualReportError(401, "給与大臣を読むための認証情報がありません");
+  const headers: Record<string, string> = { Authorization: authorization };
+  if (authMode === "mcp") headers["X-Kyuyo-Auth"] = "mcp";
   let res: Response;
   try {
     res = await binding.fetch(
-      new Request(`https://ichibanboshi-kyuyo/kyuyo/${path}?${new URLSearchParams(query)}`, {
-        headers: { Authorization: authorization },
-      }),
+      new Request(`https://ichibanboshi-kyuyo/kyuyo/${path}?${new URLSearchParams(query)}`, { headers }),
     );
   } catch (err) {
     throw new AnnualReportError(502, `給与大臣 Worker への接続に失敗しました: ${String(err)}`);
@@ -818,4 +828,100 @@ export function jstDate(nowMs: number): string {
 export function reportFilename(report: AnnualReport): string {
   const years = report.fromYear === report.toYear ? `${report.fromYear}` : `${report.fromYear}-${report.toYear}`;
   return `min-wage-annual_${report.driver ?? "all"}_${years}.pdf`;
+}
+
+// ---------------------------------------------------------------------------
+// 口の本体 (画面の `/restraint-api/min-wage-annual-report` と MCP 用の
+// `/kintai-relay/min-wage-annual-report` が共有する。門は呼び手が先に通す)
+// ---------------------------------------------------------------------------
+
+interface D1Like {
+  prepare(sql: string): { bind(...args: unknown[]): { all<T>(): Promise<{ results?: T[] }> } };
+}
+
+export interface AnnualReportRequest {
+  /** 認可済みの会社 (呼び手に名乗らせない。画面はセッション、MCP 用の口は `KINTAI_COMP_ID`)。 */
+  compId: string;
+  params: URLSearchParams;
+  /** 社員マスタ・会社対応表 (`DTAKO_DB`)。無ければ 503。 */
+  db: D1Like | undefined;
+  /** 勤怠 Worker の読み (期間集計 `wage-range`)。 */
+  deps: Pick<KintaiRelayDeps, "gcp">;
+  /** 給与大臣 Worker (`ICHIBAN_KYUYO`)。 */
+  kyuyo: FetcherLike | undefined;
+  /** 給与大臣へそのまま渡す `Authorization` (リクエスト自身のもの)。 */
+  authorization: string | null;
+  authMode: KyuyoAuthMode;
+  /** HTML → PDF。BROWSER が無い環境は `null` (PDF の要求は 503)。 */
+  pdf: ((html: string) => Promise<Uint8Array>) | null;
+  /** PDF から氏名を除く (MCP 用。応答は Claude に渡るので #374 の合意どおり氏名を出さない)。 */
+  withoutNames: boolean;
+  /** 作成日 (JST) の基準時刻。 */
+  now: number;
+}
+
+function jsonError(status: number, message: string): Response {
+  return Response.json({ error: message }, { status });
+}
+
+/** 行の氏名を空にした写し (テンプレは空の氏名を出さない)。 */
+export function withoutDriverNames(report: AnnualReport): AnnualReport {
+  return {
+    ...report,
+    years: report.years.map((y) => ({ ...y, rows: y.rows.map((r) => ({ ...r, driverName: "" })) })),
+  };
+}
+
+/**
+ * クエリの検証 → 組み立て → JSON か PDF。失敗は `{error}` (AnnualReportError はその status、他は 502)。
+ * 門 (tenant・1 社・給与 allowlist) は呼び手が先に通すこと — ここは 1 つも見ない。
+ */
+export async function respondAnnualReport(req: AnnualReportRequest): Promise<Response> {
+  const query = parseAnnualReportQuery(req.params);
+  if ("error" in query) return jsonError(400, query.error);
+  const db = req.db;
+  if (!db) return jsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
+  if (query.format === "pdf" && !req.pdf) {
+    return jsonError(503, "PDF の作成 (Browser Rendering の BROWSER) が使えません");
+  }
+  const { compId } = req;
+  try {
+    const built = await buildAnnualReport(
+      {
+        employees: async () =>
+          ((
+            await db
+              .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+              .bind(compId)
+              .all<{ company: string; payroll_cd: string; name: string; driver_cd: string | null }>()
+          ).results ?? []).map((r) => ({ company: r.company, payrollCd: r.payroll_cd, name: r.name, driverCd: r.driver_cd })),
+        payrollCompanies: async () =>
+          ((
+            await db
+              .prepare(`SELECT payroll_company FROM comp_payroll_map WHERE comp_id = ? ORDER BY sort_order, payroll_company`)
+              .bind(compId)
+              .all<{ payroll_company: string }>()
+          ).results ?? []).map((r) => r.payroll_company),
+        wageRange: (from, to) =>
+          relayWageRangeGet(req.deps, compId, new URLSearchParams({ ...query.rangeParams, from, to })),
+        kyuyo: (path, q) => fetchKyuyoJson(req.kyuyo, req.authorization, path, q, req.authMode),
+      },
+      query,
+    );
+    const report = req.withoutNames ? withoutDriverNames(built) : built;
+    if (query.format === "json") return Response.json(report);
+    const pdf = await req.pdf!(renderAnnualReportHtml(report, jstDate(req.now)));
+    return new Response(pdf, {
+      headers: {
+        "content-type": "application/pdf",
+        "content-disposition": `attachment; filename="${reportFilename(report)}"`,
+        "cache-control": "no-store",
+      },
+    });
+  } catch (err) {
+    const message = describeUnknownError(err);
+    console.error(JSON.stringify({ min_wage_annual_report: "error", comp_id: compId, error: message }));
+    const status = err instanceof AnnualReportError ? err.status : 502;
+    return jsonError(status, `最低賃金 年間レポートを作れませんでした: ${err instanceof AnnualReportError ? err.message : message}`);
+  }
 }

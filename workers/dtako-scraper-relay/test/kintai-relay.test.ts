@@ -46,6 +46,7 @@ import {
   checkKyuyoAccess,
   KYUYO_ACCESS_UNIDENTIFIED_STATUS,
   KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+  KYUYO_MCP_UNIDENTIFIED_MESSAGE,
   type KintaiReader,
   type KintaiRelayDeps,
 } from "../src/kintai-relay";
@@ -1679,7 +1680,13 @@ describe("checkKyuyoAccess — 給与 allowlist の関門 (auth-worker RPC、Ref
     body: JSON.stringify(body),
     contentType: "application/json",
   });
-  const binding = (fn: (token: string) => Promise<unknown>) => ({ authorize: fn as (t: string) => Promise<Res> });
+  // 画面の経路は `authorize` だけを呼ぶ。`authorizeMcp` は呼ばれたら落ちる (取り違えの陰性対照)
+  const binding = (fn: (token: string) => Promise<unknown>) => ({
+    authorize: fn as (t: string) => Promise<Res>,
+    authorizeMcp: async (): Promise<Res> => {
+      throw new Error("authorizeMcp は画面の経路では呼ばない");
+    },
+  });
   const reply = (r: Res) => binding(async () => r);
   const unreachable = { status: 503, message: "給与の認可 (auth-worker) に届きません" };
 
@@ -1763,6 +1770,41 @@ describe("checkKyuyoAccess — 給与 allowlist の関門 (auth-worker RPC、Ref
     expect(await checkKyuyoAccess(reply({ status: 503, body: "   ", contentType: null }), "jwt")).toEqual(unreachable);
     expect(await checkKyuyoAccess(reply(res(503, { error: true })), "jwt")).toEqual(unreachable);
     expect(await checkKyuyoAccess(reply(res(503, { error: "" })), "jwt")).toEqual(unreachable);
+  });
+});
+
+describe("checkKyuyoAccess の mcp — kyuyo-mcp の binding_jwt を authorizeMcp に聞く (#p414)", () => {
+  type Res = { status: number; body: string; contentType: string | null };
+  const res = (status: number, body: unknown = {}): Res => ({ status, body: JSON.stringify(body), contentType: "application/json" });
+  /** `authorizeMcp` だけが答える。`authorize` (ブラウザ JWT の検証器) は呼ばれたら落ちる (取り違えの陰性対照)。 */
+  const binding = (r: Res, seen: string[] = []) => ({
+    authorize: async (): Promise<Res> => {
+      throw new Error("mcp では authorize を呼ばない");
+    },
+    authorizeMcp: async (token: string): Promise<Res> => (seen.push(token), r),
+  });
+  const unidentified = { status: 401, message: KYUYO_MCP_UNIDENTIFIED_MESSAGE };
+
+  it("200 は通る。token を authorizeMcp にだけ渡す", async () => {
+    const seen: string[] = [];
+    expect(await checkKyuyoAccess(binding(res(200, { allowed: true }), seen), "mcp-jwt", "mcp")).toBeNull();
+    expect(seen).toEqual(["mcp-jwt"]);
+  });
+
+  it("★ 401 は 401 のまま (画面の経路の 503 には写さない)。token 無しは聞かずに 401", async () => {
+    expect(await checkKyuyoAccess(binding(res(401, { error: "unauthorized" })), "bad", "mcp")).toEqual(unidentified);
+    const seen: string[] = [];
+    expect(await checkKyuyoAccess(binding(res(200), seen), "", "mcp")).toEqual(unidentified);
+    expect(seen).toEqual([]);
+  });
+
+  it("403 は名簿外の文、binding が authorizeMcp を持たない (古い auth-worker) は届かない 503", async () => {
+    expect(await checkKyuyoAccess(binding(res(403, { error: "forbidden" })), "jwt", "mcp")).toEqual({
+      status: 403,
+      message: "給与の閲覧許可リストに無いアカウントです",
+    });
+    const old = { authorize: async () => res(200) } as unknown as Parameters<typeof checkKyuyoAccess>[0];
+    expect(await checkKyuyoAccess(old, "jwt", "mcp")).toEqual({ status: 503, message: "給与の認可 (auth-worker) に届きません" });
   });
 });
 

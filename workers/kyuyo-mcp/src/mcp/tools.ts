@@ -98,7 +98,7 @@ import {
   wageMasterR2Paths,
 } from "../r2/keys";
 import { getJson, listAllR2, listDelimitedPrefixes } from "../r2/read";
-import type { ToolEntry } from "./registry";
+import { McpContentResult, type ToolCaller, type ToolEntry } from "./registry";
 
 function r2Prefix(env: Env): string {
   return env.RESTRAINT_R2_PREFIX || "restraint";
@@ -1033,6 +1033,29 @@ type CallRelayOptions = {
 };
 
 /**
+ * relay を叩いて 2xx の Response を返す (binding 確認 → secret 解決 → fetch → 非 2xx は本文つきで throw)。
+ * `X-Alc-Proxy-Secret` はここで足す。JSON を読む口は {@link callRelay}、PDF (バイト列) は
+ * `get_min_wage_annual_report` がこれを直接使う。
+ */
+async function fetchRelay(
+  env: Env,
+  path: string,
+  init: { method: "GET" | "POST"; headers: Record<string, string>; body?: string },
+  maxChars: number,
+): Promise<Response> {
+  const relay = env.SCRAPER_RELAY;
+  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+  const res = await relay.fetch(`https://relay.internal${path}`, {
+    ...init,
+    headers: { ...init.headers, "X-Alc-Proxy-Secret": secret },
+  });
+  if (!res.ok) throw new Error(`relay: status ${res.status}: ${(await res.text()).slice(0, maxChars)}`);
+  return res;
+}
+
+/**
  * relay (SCRAPER_RELAY service binding) を叩く共通部分 (Refs #1052 / #1102)。
  *
  * binding 確認 → secret 解決 → fetch → 非 2xx は本文つきで throw → JSON.parse か throw、
@@ -1054,26 +1077,19 @@ async function callRelay(
   body?: unknown,
   opts?: CallRelayOptions,
 ): Promise<unknown> {
-  const relay = env.SCRAPER_RELAY;
-  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
   // ★ **既定は 200 のまま**。2000 (RELAY_ERROR_MAX_CHARS) が要るのは
   // run_driver_master_sync / run_vehicle_state_sync の 2 site だけで、**全体を広げない** —
   // 広げると残り 15 site の挙動が黙って変わる。
   const maxChars = opts?.maxChars ?? 200;
-  const res = await relay.fetch(
-    `https://relay.internal${path}`,
+  const res = await fetchRelay(
+    env,
+    path,
     opts?.method === "GET"
-      ? { method: "GET", headers: { "X-Alc-Proxy-Secret": secret } }
-      : {
-          method: "POST",
-          headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-          body: JSON.stringify(body),
-        },
+      ? { method: "GET", headers: {} }
+      : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    maxChars,
   );
   const responseBody = await res.text();
-  if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, maxChars)}`);
   try {
     return JSON.parse(responseBody) as unknown;
   } catch {
@@ -3814,6 +3830,88 @@ export const getKushiroBranchEstimateTool = {
   },
 } satisfies ToolEntry<typeof getKushiroBranchEstimateArgs>;
 
+// ── get_min_wage_annual_report ──────────────────────────────────────────────
+
+const getMinWageAnnualReportArgs = z
+  .object({
+    comp_id: z.string().regex(/^\d{8}$/).describe("会社 (comp_id、8 桁)。勤怠の既定の会社 (relay の KINTAI_COMP_ID) だけ受ける。他は 400"),
+    driver_cd: z.string().regex(/^\d{1,10}$/).describe("乗務員CD (数字)"),
+    from_year: z.number().int().min(2000).max(2100).describe("最初の年 (勤務月 1〜12 月の年)"),
+    to_year: z.number().int().min(2000).max(2100).describe("最後の年 (この年を含む。from_year から 5 年まで)"),
+  })
+  .strict();
+
+/** バイト列 → base64 (Workers の btoa は文字列しか受けないので 32KB ずつ文字列にする)。 */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+/**
+ * 最低賃金の不足と「就労調整金」による年の補填の年間レポート (PDF、1 年 1 ページ) を返す (#p414)。
+ *
+ * **組み立ては relay の 1 実装** (`GET /kintai-relay/min-wage-annual-report` → 画面の PDF と同じ
+ * `respondAnnualReport`)。ここは呼び手の binding_jwt を relay へ転送して、返った PDF を MCP の
+ * embedded resource (`application/pdf`、base64 の blob) にするだけ。保存も署名 URL も作らない。
+ *
+ * ## 認可は relay と給与大臣が binding_jwt で行う
+ *
+ * relay は共有 secret に加えて binding_jwt を auth-worker の `KyuyoAuthEntrypoint.authorizeMcp` で検証し
+ * (無効 401・給与の許可リストの外 403)、給与大臣へも同じ token を `X-Kyuyo-Auth: mcp` 付きで渡す。
+ * この worker に独自の allowlist は足さない (`src/index.ts` 冒頭の規約)。
+ *
+ * ## 氏名は relay が除く
+ *
+ * PDF は `redactDriverNames` を通らない (JSON でない)。relay の MCP 用の口が氏名を空にしてから
+ * HTML を組む (#374 の合意)。乗務員CD と金額は載る。
+ */
+export const getMinWageAnnualReportTool = {
+  name: "get_min_wage_annual_report",
+  description:
+    "最低賃金の不足と「就労調整金」(賞与 + 月例) による年の補填を、乗務員 1 名 × 年ごとにまとめた年間レポートを " +
+    "PDF (A4 横、1 年 1 ページ) の embedded resource で返す。dtako 管理画面「拘束×賃金」の期間集計の年間レポートと同じ中身" +
+    " (氏名は載せない)。読むだけ。年は勤務月 1〜12 月で、一度に 5 年まで。給与大臣の賞与を会社 × 年ぶん直列に読むので" +
+    " 1 年で数十秒かかることがある。comp_id は勤怠の既定の会社だけ。給与の閲覧許可リストに無いアカウントは 403。",
+  inputSchema: getMinWageAnnualReportArgs,
+  execute: async (env: Env, args: z.infer<typeof getMinWageAnnualReportArgs>, caller: ToolCaller) => {
+    if (args.from_year > args.to_year) throw new Error("from_year が to_year より後になっています");
+    if (!caller.bindingJwt) throw new Error("呼び手の binding_jwt がありません (relay に転送できない)");
+    const q = new URLSearchParams({
+      comp_id: args.comp_id,
+      driver: args.driver_cd,
+      from_year: String(args.from_year),
+      to_year: String(args.to_year),
+    });
+    const res = await fetchRelay(
+      env,
+      `/kintai-relay/min-wage-annual-report?${q}`,
+      { method: "GET", headers: { Authorization: `Bearer ${caller.bindingJwt}` } },
+      500,
+    );
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.startsWith("application/pdf")) {
+      throw new Error(`relay: PDF ではない応答 (content-type: ${contentType || "なし"})`);
+    }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const years = args.from_year === args.to_year ? `${args.from_year}` : `${args.from_year}-${args.to_year}`;
+    const filename = `min-wage-annual_${args.driver_cd}_${years}.pdf`;
+    return new McpContentResult([
+      { type: "text", text: `最低賃金 年間レポート (乗務員CD ${args.driver_cd}、${years} 年、${bytes.length} バイト): ${filename}` },
+      {
+        type: "resource",
+        resource: {
+          uri: `kyuyo-mcp://min-wage-annual-report/${filename}`,
+          mimeType: "application/pdf",
+          blob: bytesToBase64(bytes),
+        },
+      },
+    ]);
+  },
+} satisfies ToolEntry<typeof getMinWageAnnualReportArgs>;
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -3851,4 +3949,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getIchibanColumnsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanLeaveDaysTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKushiroBranchEstimateTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getMinWageAnnualReportTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

@@ -176,6 +176,8 @@ export interface KintaiRelayDeps {
  */
 export interface KyuyoAuthorizer {
   authorize(token: string): Promise<{ status: number; body: string; contentType: string | null }>;
+  /** kyuyo-mcp の binding_jwt 用 (ippoan/auth-worker#766)。応答の形は `authorize` と同じ。 */
+  authorizeMcp(token: string): Promise<{ status: number; body: string; contentType: string | null }>;
 }
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -1421,6 +1423,13 @@ export const KYUYO_ACCESS_UNIDENTIFIED_STATUS = 503;
 export const KYUYO_ACCESS_UNIDENTIFIED_MESSAGE =
   "給与データの閲覧可否を判定できませんでした (閲覧者を上流に識別させられていません)。権限の問題ではありません";
 
+/**
+ * MCP 用の口 (`mode: "mcp"`) で binding_jwt が無い・`authorizeMcp` が 401 を返したときの文。
+ * こちらは **401 のまま返す** — 呼び手は kyuyo-mcp (機械) で、上の「画面でログインし直せと
+ * 読まれる」事情が無く、token が無効なのはそのとおりだから。
+ */
+export const KYUYO_MCP_UNIDENTIFIED_MESSAGE = "MCP のトークン (binding_jwt) が無いか無効です";
+
 /** 上流の `{error: "..."}` から文を取り出す。JSON でなければ本文の頭を返す。 */
 function kyuyoAccessMessage(body: string, status: number): string {
   try {
@@ -1460,19 +1469,19 @@ function kyuyoAccessMessage(body: string, status: number): string {
 export async function checkKyuyoAccess(
   binding: KyuyoAuthorizer | null | undefined,
   bearer: string | null,
+  mode: "browser" | "mcp" = "browser",
 ): Promise<KyuyoAccessDenial | null> {
-  // Bearer が無いなら聞くまでもない (必ず 401 になる)。結論は聞いた場合と同じ 503。
-  if (!bearer) {
-    return {
-      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
-      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
-    };
-  }
+  const unidentified =
+    mode === "mcp"
+      ? { status: 401, message: KYUYO_MCP_UNIDENTIFIED_MESSAGE }
+      : { status: KYUYO_ACCESS_UNIDENTIFIED_STATUS, message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE };
+  // Bearer が無いなら聞くまでもない (必ず 401 になる)。結論は聞いた場合と同じ。
+  if (!bearer) return unidentified;
   const unreachable = { status: 503, message: KYUYO_ACCESS_UNREACHABLE_MESSAGE };
   if (!binding) return unreachable;
   let raw: unknown;
   try {
-    raw = await binding.authorize(bearer);
+    raw = await (mode === "mcp" ? binding.authorizeMcp(bearer) : binding.authorize(bearer));
   } catch {
     return unreachable;
   }
@@ -1481,9 +1490,7 @@ export async function checkKyuyoAccess(
   if (!res || typeof res.status !== "number") return unreachable;
   const body = typeof res.body === "string" ? res.body : "";
   if (res.status === 200) return null;
-  if (res.status === 401) {
-    return { status: KYUYO_ACCESS_UNIDENTIFIED_STATUS, message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE };
-  }
+  if (res.status === 401) return unidentified;
   if (res.status === 403) return { status: 403, message: "給与の閲覧許可リストに無いアカウントです" };
   if (kyuyoAccessMessage(body, res.status) === "kyuyo_allowlist_unset") {
     return { status: 503, message: "給与の閲覧許可リストが未設定です" };

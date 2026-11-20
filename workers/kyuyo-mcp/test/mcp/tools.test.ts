@@ -1754,6 +1754,9 @@ describe("ALL_TOOLS", () => {
     // relay 側の口は R2 の list / get しか呼ばず、put / delete を 1 行も持たない
     "list_scrape_errors",
     "get_scrape_error",
+    // 最低賃金 年間レポートの PDF を relay の組み立てで作って返すだけ (#p414)。
+    // relay 側は D1・勤怠 Worker・給与大臣を読むだけで、保存も署名 URL も作らない
+    "get_min_wage_annual_report",
   ];
   /** 書きうる tool。**scope を要求する** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b / 10)。 */
   const WRITE = {

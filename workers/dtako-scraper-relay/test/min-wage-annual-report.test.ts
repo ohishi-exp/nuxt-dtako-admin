@@ -16,6 +16,7 @@ import {
   parseKyuyoBody,
   parseRange,
   renderAnnualReportHtml,
+  withoutDriverNames,
   reportFilename,
   yearMonths,
   type AnnualReport,
@@ -385,6 +386,13 @@ describe("fetchKyuyoJson", () => {
       auth: "Bearer jwt",
     });
   });
+  it("mcp は X-Kyuyo-Auth: mcp を付ける (既定の browser は付けない)", async () => {
+    const seen: Array<string | null> = [];
+    const b = { fetch: async (r: Request) => (seen.push(r.headers.get("x-kyuyo-auth")), Response.json({})) };
+    await fetchKyuyoJson(b, "Bearer mcp-jwt", "payroll", { month: "2025-01" }, "mcp");
+    await fetchKyuyoJson(b, "Bearer jwt", "payroll", { month: "2025-01" });
+    expect(seen).toEqual(["mcp", null]);
+  });
   it("binding 無しは 503、Authorization 無しは 401 (給与大臣を呼ばない)", async () => {
     await expect(fetchKyuyoJson(undefined, "Bearer jwt", "bonus", {})).rejects.toThrow(new AnnualReportError(503, "給与大臣 Worker (ICHIBAN_KYUYO) が使えません"));
     let called = false;
@@ -493,6 +501,15 @@ describe("HTML", () => {
     expect(t).toContain("この年の期間集計にこの乗務員の行がありません");
     expect(t).toContain("この年の支給日の就労調整金はありません。");
     expect(html).toContain("<div class='card warn'><div class=l>判定</div>");
+
+    // MCP 用 (#374): 氏名だけを除く。上の html が氏名を持つことが陽性対照
+    expect(html).toContain("架空 &#60;太郎&#62;");
+    const anon = renderAnnualReportHtml(withoutDriverNames(report), "2026-11-20");
+    expect(anon).not.toContain("架空");
+    expect(anon).toContain("乗務員CD 0912 / 本社 (給与社員CD 0100:42)　|　作成 2026-11-20");
+    expect(anon.replace("乗務員CD 0912 / 本社", "")).toBe(html.replace("乗務員CD 0912 / 架空 &#60;太郎&#62; / 本社", ""));
+    // 元の report は書き換えない
+    expect(report.years[0]!.rows[0]!.driverName).toBe("架空 <太郎>");
   });
 
   it("残り不足は ng・比較は ＞、単価が 1 か月だけ・集計月 0 の行は年計を出さない", () => {

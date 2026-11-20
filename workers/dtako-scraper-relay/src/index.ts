@@ -13,15 +13,17 @@ import {
   dtakoCronAlertReason,
   sendScrapeAlertEmail,
 } from "./scrape-alert-email";
-import { resolveTheearthRouting } from "./theearth-session";
+import { extractBearerToken, resolveTheearthRouting } from "./theearth-session";
 import {
   buildDeps,
+  checkKyuyoAccess,
   judgeKintaiGate,
   judgeYTimeShiftsRequest,
   kintaiCompSet,
   kintaiRelayFailStatus,
   kintaiWorkerScope,
   type KintaiRelayDeps,
+  type KyuyoAuthorizer,
   readKintaiWriteToken,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
@@ -71,6 +73,8 @@ import {
   type AlcTenantDataForwarder,
 } from "./alc-tenant-rpc";
 import { VIEWER_COMPS_PATH, viewerCompIdsForTenant } from "./restraint-viewer-auth";
+import { respondAnnualReport } from "./min-wage-annual-report";
+import { renderPdf } from "./pdf-render";
 import {
   driverMasterOverallStatus,
   runDriverMasterForComps,
@@ -122,6 +126,14 @@ export interface RelayWorkerEnv {
    * plain 変数は fallback** (`dvr_targets` と同じ理由)。KV も変数も未設定なら
    * cron skip — **`DTAKO_ACCOUNTS` 全件に倒さない**。 */
   VEHICLE_STATE_TARGETS?: unknown;
+  /** auth-worker の `KyuyoAuthEntrypoint` (給与閲覧の認可)。MCP 用の年間レポートの口は `authorizeMcp` で聞く。 */
+  AUTH_KYUYO?: KyuyoAuthorizer;
+  /** 給与大臣 Worker (最低賃金 年間レポートの賞与・月例)。本番にだけある。 */
+  ICHIBAN_KYUYO?: { fetch(request: Request): Promise<Response> };
+  /** Browser Rendering (年間レポートの HTML → PDF)。 */
+  BROWSER?: Fetcher;
+  /** 社員マスタ・会社対応表 (年間レポートの突合キー)。 */
+  DTAKO_DB?: D1Database;
   /** 取り込み失敗のメール (Refs #1206)。日次 cron が job を積めなかったときに使う
    * (DO に入っていないので DO 側の通知は通らない)。本番にだけある。 */
   ALERT_EMAIL?: SendEmail;
@@ -227,6 +239,12 @@ export default {
       // Y時間 の Excel の入力にする勤務 (始業・終業・実働でない区間) を、勤怠から読んで束ねる
       // (Refs #1133)。読むだけ。関門は day-summaries と同じ
       return handleKintaiYTimeShifts(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/min-wage-annual-report" && request.method === "GET") {
+      // 最低賃金 年間レポートの PDF を kyuyo-mcp へ (#p414)。画面の `/restraint-api/min-wage-annual-report`
+      // と同じ組み立て (`respondAnnualReport`)。secret に加えて呼び手の binding_jwt を auth-worker に聞く
+      return handleMinWageAnnualReportMcp(request, env);
     }
 
     if (url.pathname === "/kintai-relay/operation-zip" && request.method === "POST") {
@@ -809,6 +827,51 @@ async function handleKintaiGcpRead(
   const gate = await passKintaiGcpGate(request, env, logKey, url.searchParams.get("comp_id"));
   if (!gate.ok) return kintaiGcpFail(gate.status, gate.error);
   return respondKintaiGcpRead(logKey, () => read(gate.deps, url));
+}
+
+/**
+ * `GET /kintai-relay/min-wage-annual-report?comp_id=&driver=&from_year=&to_year=` — 最低賃金 年間レポートの
+ * PDF (kyuyo-mcp の `get_min_wage_annual_report`、#p414)。組み立ては画面の口と同じ `respondAnnualReport`。
+ *
+ * ## 門 (この順。どれかで落ちたら D1・勤怠 Worker・給与大臣・BROWSER のどれも呼ばない)
+ *
+ * 1. `X-Alc-Proxy-Secret` (`passKintaiGcpGate`)。**これだけでは開けない** — 同じ secret を
+ *    etc-csv-web と front も持ち、front は `/kintai-relay/*` を外へ素通しする
+ * 2. 呼び手の binding_jwt (`Authorization: Bearer`) を auth-worker の `KyuyoAuthEntrypoint.authorizeMcp`
+ *    (`AUTH_KYUYO`) で検証する。無い・無効は 401、給与の許可リストの外は 403 (`checkKyuyoAccess` の mcp)
+ * 3. `comp_id` は `KINTAI_COMP_ID` の 1 社だけ (違えば 400)。画面の口の `KINTAI_SINGLE_COMP_PATHS` と同じ範囲
+ *
+ * 給与大臣へは同じ binding_jwt を `Authorization` のまま渡し、`X-Kyuyo-Auth: mcp` を付ける。
+ * **PDF だけ・氏名なし** — `format` は pdf に固定し (JSON は画面のカード用)、応答は Claude に渡るので
+ * #374 の合意どおり氏名を除く (`withoutNames`)。
+ */
+async function handleMinWageAnnualReportMcp(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const logKey = "min_wage_annual_report_mcp";
+  const gate = await passKintaiGcpGate(request, env, logKey);
+  if (!gate.ok) return kintaiGcpFail(gate.status, gate.error, gate.reason);
+  const denial = await checkKyuyoAccess(env.AUTH_KYUYO, extractBearerToken(request.headers), "mcp");
+  if (denial) return kintaiGcpFail(denial.status, denial.message);
+  const url = new URL(request.url);
+  const compId = (env.KINTAI_COMP_ID ?? "").trim();
+  if (url.searchParams.get("comp_id") !== compId) {
+    return kintaiGcpFail(400, "comp_id は勤怠の対象会社 (KINTAI_COMP_ID) だけを指定できます");
+  }
+  const params = new URLSearchParams(url.searchParams);
+  params.delete("comp_id");
+  params.set("format", "pdf");
+  const browser = env.BROWSER;
+  return respondAnnualReport({
+    compId,
+    params,
+    db: env.DTAKO_DB,
+    deps: gate.deps,
+    kyuyo: env.ICHIBAN_KYUYO,
+    authorization: request.headers.get("authorization"),
+    authMode: "mcp",
+    pdf: browser ? (html) => renderPdf(browser, html) : null,
+    withoutNames: true,
+    now: Date.now(),
+  });
 }
 
 /** 定数時間比較 (auth-worker の alc-internal-proxy.ts と同実装)。 */
