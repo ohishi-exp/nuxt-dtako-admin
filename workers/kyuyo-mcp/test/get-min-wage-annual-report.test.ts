@@ -31,7 +31,7 @@ describe("get_min_wage_annual_report (#p414)", () => {
       resource: {
         uri: "kyuyo-mcp://min-wage-annual-report/min-wage-annual_912_2024-2025.pdf",
         mimeType: "application/pdf",
-        blob: Buffer.from(PDF).toString("base64"),
+        blob: btoa("%PDF-1.7 fake"), // PDF の中身は ASCII なので文字列のまま base64 にできる
       },
     });
   });
@@ -79,8 +79,12 @@ describe("get_min_wage_annual_report (#p414)", () => {
     expect(parse({ ...ARGS, format: "json" })).toBe(false);
   });
 
-  it("bytesToBase64 は 32KB を超えても Buffer と一致する", () => {
+  it("bytesToBase64 は 32KB を超えても atob で元のバイト列に戻る", () => {
     const big = new Uint8Array(70_000).map((_, i) => i % 251);
-    expect(bytesToBase64(big)).toBe(Buffer.from(big).toString("base64"));
+    const decoded = atob(bytesToBase64(big));
+    expect(Uint8Array.from(decoded, (c) => c.charCodeAt(0))).toEqual(big);
+    // 32KB の切れ目で余計な padding が入らない (1 本の base64 になっている)
+    expect(bytesToBase64(big)).toHaveLength(Math.ceil(70_000 / 3) * 4);
+    expect(bytesToBase64(big).slice(0, -2)).not.toContain("=");
   });
 });
