@@ -88,6 +88,7 @@ export default defineConfig({
         'src/litigation-output.ts',
         'src/net780-spd.ts',
         'src/rest-start-sync.ts',
+        'src/min-wage-annual-report.ts',
       ],
       thresholds: {
         lines: 100,

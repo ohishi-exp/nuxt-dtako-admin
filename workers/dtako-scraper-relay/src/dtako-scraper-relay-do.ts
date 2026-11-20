@@ -300,6 +300,15 @@ import {
 } from "./min-wage-import";
 import { branchByDriverCdAt, buildBranchGroups, resolveBranchPrefecture } from "./branch-prefecture";
 import {
+  AnnualReportError,
+  buildAnnualReport,
+  fetchKyuyoJson,
+  jstDate,
+  parseAnnualReportQuery,
+  renderAnnualReportHtml,
+  reportFilename,
+} from "./min-wage-annual-report";
+import {
   buildCompMapResponse,
   buildEmployeeMasterResponse,
   buildEmployeeMasterWriteStatements,
@@ -752,6 +761,23 @@ function dvrJsonError(status: number, message: string): Response {
 }
 
 /**
+ * HTML → PDF (A4 横、背景色つき)。Browser Rendering の `[browser]` binding を使う
+ * (前例は ippoan/auth-worker の `verify-shot.ts`。あちらは screenshot)。puppeteer は
+ * PDF を作るときだけ読み込む (DO の他の口と node の vitest に重さを持ち込まない)。
+ */
+async function renderPdf(binding: Fetcher, html: string): Promise<Uint8Array> {
+  const { default: puppeteer } = await import("@cloudflare/puppeteer");
+  const browser = await puppeteer.launch(binding);
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    return await page.pdf({ format: "A4", landscape: true, printBackground: true });
+  } finally {
+    await browser.close();
+  }
+}
+
+/**
  * 機械経路の `/cron/restraint-*` (body `{comp_id, month}`) を、viewer 経路の handler へ渡す
  * 形に組み直す。theearth セッションを持たない synthetic record (`token: "cron"`) と、month を
  * query string に載せた URL を返す。渡す先の handler は `record.compId` だけを読むこと
@@ -818,6 +844,8 @@ const KINTAI_SINGLE_COMP_PATHS = new Set([
   "/restraint-api/kintai/refresh/timecard",
   "/restraint-api/wage-snapshot",
   "/restraint-api/wage-range",
+  // 期間集計 (wage-range) を読んで年の補填を組む
+  "/restraint-api/min-wage-annual-report",
   // 打刻・デジタコ (旧オンプレ版の口)
   "/restraint-api/kintai/fetch",
   "/restraint-api/kintai/pdf-json",
@@ -976,6 +1004,14 @@ export interface RelayEnv {
   AUTH_WORKER_RPC?: AlcTenantDataForwarder;
   /** auth-worker の RPC entrypoint (`KyuyoAuthEntrypoint`)。給与閲覧の認可確認 (`checkKyuyoAccess`) の聞き先。 */
   AUTH_KYUYO?: KyuyoAuthorizer;
+  /**
+   * 給与大臣 Worker (`ichibanboshi-kyuyo`) への service binding。最低賃金 年間レポートが賞与・月例の
+   * 「就労調整金」を読む (`GET /kyuyo/{bonus,payroll}` だけ。`fetchKyuyoJson`)。front の
+   * `ICHIBAN_KYUYO` と同じ相手で、ブラウザ JWT をそのまま `Authorization` で渡す。
+   */
+  ICHIBAN_KYUYO?: { fetch(request: Request): Promise<Response> };
+  /** Browser Rendering (`[browser]`)。最低賃金 年間レポートの HTML → PDF だけに使う。 */
+  BROWSER?: Fetcher;
   /**
    * Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS
    * 127.0.0.1:8081) に到達する Fetcher。VPC Service `dtako-scraper-relay`
@@ -5137,6 +5173,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (url.pathname === "/restraint-api/wage-range" && request.method === "GET") {
       return this.handleWageRange(record!, url, request);
+    }
+    if (url.pathname === "/restraint-api/min-wage-annual-report" && request.method === "GET") {
+      return this.handleMinWageAnnualReport(record!, url, request);
     }
     return dvrJsonError(404, "Not Found");
   }
@@ -10261,6 +10300,76 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const message = describeUnknownError(err);
       console.error(JSON.stringify({ wage_range: "error", comp_id: record.compId, error: message }));
       return dvrJsonError(502, `期間集計の取得に失敗しました: ${message}`);
+    }
+  }
+
+  /**
+   * GET /restraint-api/min-wage-annual-report?from_year=&to_year=&driver=&format=json|pdf —
+   * 最低賃金の不足と「就労調整金」による年の補填 (`min-wage-annual-report.ts`)。
+   *
+   * - `format=json` (既定): 期間集計タブの「年の補填」カード (driver 省略 = 会社の全員)
+   * - `format=pdf` (driver 必須): 1 乗務員 × 複数年の年間レポート (1 年 1 ページ、A4 横)
+   *
+   * **門は `wage-range` と同じ** — tenant (入口の viewer 認可) → `KINTAI_SINGLE_COMP_PATHS` (1 社) →
+   * 給与 allowlist (`kyuyoAccessGate`)。`paid` と給与大臣の支給額を返すので allowlist を外せない。
+   * comp は引数で取らない (セッションの `record.compId`)。給与大臣へはリクエスト自身の
+   * `Authorization` をそのまま渡す (`record.token` はブラウザ JWT でない)。
+   */
+  private async handleMinWageAnnualReport(
+    record: TheearthSessionRecord,
+    url: URL,
+    request: Request,
+  ): Promise<Response> {
+    const ctx = await this.buildKintaiRelayContext(record.compId, "min_wage_annual_report");
+    if (ctx instanceof Response) return ctx;
+    const gate = await this.kyuyoAccessGate(request);
+    if (gate) return gate;
+    const query = parseAnnualReportQuery(url.searchParams);
+    if ("error" in query) return dvrJsonError(400, query.error);
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
+    if (query.format === "pdf" && !this.env.BROWSER) {
+      return dvrJsonError(503, "PDF の作成 (Browser Rendering の BROWSER) が使えません");
+    }
+    const authorization = request.headers.get("authorization");
+    const compId = record.compId;
+    try {
+      const report = await buildAnnualReport(
+        {
+          employees: async () =>
+            ((
+              await db
+                .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+                .bind(compId)
+                .all<EmployeeD1Row>()
+            ).results ?? []).map((r) => ({ company: r.company, payrollCd: r.payroll_cd, name: r.name, driverCd: r.driver_cd })),
+          payrollCompanies: async () =>
+            ((
+              await db
+                .prepare(`SELECT payroll_company FROM comp_payroll_map WHERE comp_id = ? ORDER BY sort_order, payroll_company`)
+                .bind(compId)
+                .all<{ payroll_company: string }>()
+            ).results ?? []).map((r) => r.payroll_company),
+          wageRange: (from, to) =>
+            relayWageRangeGet(ctx.deps, compId, new URLSearchParams({ ...query.rangeParams, from, to })),
+          kyuyo: (path, q) => fetchKyuyoJson(this.env.ICHIBAN_KYUYO, authorization, path, q),
+        },
+        query,
+      );
+      if (query.format === "json") return Response.json(report);
+      const pdf = await renderPdf(this.env.BROWSER!, renderAnnualReportHtml(report, jstDate(Date.now())));
+      return new Response(pdf, {
+        headers: {
+          "content-type": "application/pdf",
+          "content-disposition": `attachment; filename="${reportFilename(report)}"`,
+          "cache-control": "no-store",
+        },
+      });
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(JSON.stringify({ min_wage_annual_report: "error", comp_id: compId, error: message }));
+      const status = err instanceof AnnualReportError ? err.status : 502;
+      return dvrJsonError(status, `最低賃金 年間レポートを作れませんでした: ${err instanceof AnnualReportError ? err.message : message}`);
     }
   }
 

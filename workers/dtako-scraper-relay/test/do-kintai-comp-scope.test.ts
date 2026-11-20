@@ -70,6 +70,7 @@ const SINGLE_COMP_ROUTES: Array<[method: "GET" | "POST", path: string]> = [
   // 勤怠 Worker にしか送らない (Refs ohishi-exp/rust-ichibanboshi#322)
   ["POST", "/restraint-api/wage-snapshot"],
   ["GET", "/restraint-api/wage-range"],
+  ["GET", "/restraint-api/min-wage-annual-report"],
 ];
 
 /** Supabase / alc だけを読み書きする口 (`KINTAI_COMPS_PATHS`)。クエリはハンドラの検証を通る値。 */

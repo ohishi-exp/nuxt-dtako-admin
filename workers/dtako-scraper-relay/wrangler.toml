@@ -58,6 +58,17 @@ binding = "AUTH_KYUYO"
 service = "auth-worker"
 entrypoint = "KyuyoAuthEntrypoint"
 
+# 給与大臣 Worker (front の ICHIBAN_KYUYO と同じ相手)。最低賃金 年間レポートが賞与・月例の
+# 「就労調整金」を読む (GET /kyuyo/{bonus,payroll} だけ)。ブラウザ JWT をそのまま渡し、認可は相手側。
+# **top-level (本番) にだけ置く** — 使うのは KINTAI と同じ口で、KINTAI は本番にしか無い (下の注記)。
+[[services]]
+binding = "ICHIBAN_KYUYO"
+service = "ichibanboshi-kyuyo"
+
+# Browser Rendering — 最低賃金 年間レポートの HTML → PDF だけに使う (named env は継承しないので個別に宣言)。
+[browser]
+binding = "BROWSER"
+
 # 勤怠 Worker (Refs ohishi-exp/rust-ichibanboshi#322)。勤怠の読み書きと拘束サマリの写しの PUT は
 # ここだけへ送る (`X-Kintai-Write-Token` は下の secret)。
 # **top-level (本番) にだけ置く** — staging・preview は本番 KV を共有し、Worker の D1 も
@@ -299,6 +310,11 @@ binding = "AUTH_KYUYO"
 service = "auth-worker-staging"
 entrypoint = "KyuyoAuthEntrypoint"
 
+# Browser Rendering (top-level のコメント参照)。給与大臣 (ICHIBAN_KYUYO) は置かない — この env には
+# 勤怠 Worker (KINTAI) が無く、年間レポートの口は KINTAI の手前で 503 になるため。
+[env.staging.browser]
+binding = "BROWSER"
+
 [[env.staging.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
@@ -423,6 +439,11 @@ entrypoint = "InternalEntrypoint"
 binding = "AUTH_KYUYO"
 service = "auth-worker-staging"
 entrypoint = "KyuyoAuthEntrypoint"
+
+# Browser Rendering (top-level のコメント参照)。給与大臣 (ICHIBAN_KYUYO) は置かない — この env には
+# 勤怠 Worker (KINTAI) が無く、年間レポートの口は KINTAI の手前で 503 になるため。
+[env.preview.browser]
+binding = "BROWSER"
 
 [[env.preview.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"
