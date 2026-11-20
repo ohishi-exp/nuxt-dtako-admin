@@ -67,6 +67,7 @@ import type {
   OvertimeHoursComparison,
   ParsedSalaryCsv,
   SalaryComparison,
+  SalaryCsvRow,
   SalaryItemAmount,
   SalaryItemCategory,
   SalaryItemConfig,
@@ -176,6 +177,17 @@ import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/w
 import { describeApiError } from '~/utils/api-error'
 import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_RANGE, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import type { MonthKosokuMark, WageRangeResponse } from '~/utils/wage-range-view'
+import {
+  adjustmentWorkMonths,
+  bonusToSalaryRows,
+  buildAdjustmentRows,
+  describeBonusFreshness,
+  hasShortfallOrAdjustment,
+  sumAdjustments,
+  type AdjustmentRow,
+  type AdjustmentSourceRow,
+  type AdjustmentStatus,
+} from '~/utils/min-wage-adjustment'
 import { pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
 import { getViewerComps } from '~/utils/api'
 import { describeMinWageImport, importMinWageFromMhlw as importMinWageFromMhlwApi, type MinWageFixInput, type MinWageImportResponse } from '~/utils/min-wage-fix'
@@ -4688,23 +4700,28 @@ const rangeEmptyNoteText = computed(() => (
  * 給与の同期時刻は月ごとに違うのでここでは渡せず、`payroll` 由来の stale 判定は
  * この画面では出ない (単月の保存時に記録済みの値がサーバ側に残る)。
  */
+/** `wage-range` を読む。期間集計の表と「年の補填」カードが同じ鮮度判定で読むよう 1 か所にまとめる。 */
+async function fetchWageRange(compId: string, from: string, to: string): Promise<WageRangeResponse> {
+  const query: Record<string, string> = {
+    // relay が認可済みの comp で上書きするが、意図を明示するために送る
+    comp: compId,
+    from,
+    to,
+    source: rangeSource.value,
+    wage_logic_version: WAGE_LOGIC_VERSION,
+  }
+  if (salaryConfigLoaded.value) query.salary_item_sha = contentHash(salaryItemConfig.value)
+  const body = await $fetch('/restraint-api/wage-range', { headers: authHeaders(), query })
+  return parseWageRange(body)
+}
+
 async function loadWageRange() {
   const compId = session.value?.compId
   if (!compId || !rangeMonths.value.length) return
   rangeLoading.value = true
   rangeError.value = ''
   try {
-    const query: Record<string, string> = {
-      // relay が認可済みの comp で上書きするが、意図を明示するために送る
-      comp: compId,
-      from: rangeMonths.value[0]!,
-      to: rangeMonths.value[rangeMonths.value.length - 1]!,
-      source: rangeSource.value,
-      wage_logic_version: WAGE_LOGIC_VERSION,
-    }
-    if (salaryConfigLoaded.value) query.salary_item_sha = contentHash(salaryItemConfig.value)
-    const body = await $fetch('/restraint-api/wage-range', { headers: authHeaders(), query })
-    rangeData.value = parseWageRange(body)
+    rangeData.value = await fetchWageRange(compId, rangeMonths.value[0]!, rangeMonths.value[rangeMonths.value.length - 1]!)
   }
   catch (e: unknown) {
     // upstream の本文まで出す — 既定の message は status しか持たず、
@@ -4726,6 +4743,135 @@ watch([activeTab, rangeFrom, rangeTo, rangeSource, session], ([tab]) => {
 watch(salaryConfigLoaded, () => {
   if (activeTab.value === 'range' && rangeData.value) void loadWageRange()
 })
+
+// ---- 年の補填 (就労調整金、Refs #1263) ----
+// 最低賃金に満たない月の分を、賞与 (年によっては月例) の「就労調整金」でまとめて補う運用がある。
+// 年 (勤務月 1〜12 月) の不足合計と、支給日がその年の就労調整金の合計を並べる。
+// **ボタンを押したときだけ読む** — 賞与は今は毎回給与大臣を開く (1 社 10〜20 秒)。保存が
+// 入ったら (`synced-months` の `bonus`) 保存済みの年だけ自動読みに切り替えられるよう、
+// 読み込みは `loadMinWageAdjustment` 1 本にしてある。**sync は撃たない** (読むだけ)。
+
+const adjYear = ref(selectedYear.value)
+watch(selectedYear, (y) => {
+  if (!adjLoading.value) adjYear.value = y
+})
+const adjLoading = ref(false)
+const adjProgress = ref('')
+const adjError = ref('')
+const adjOnlyRelevant = ref(true)
+const adjResult = ref<{
+  year: number
+  compId: string
+  rows: AdjustmentRow[]
+  /** 不足を数えた材料 (期間集計) の月の状態。 */
+  months: WageRangeResponse['months']
+  freshness: string
+  warnings: string[]
+} | null>(null)
+let adjEpoch = 0
+
+async function loadMinWageAdjustment() {
+  const compId = session.value?.compId
+  if (!compId) return
+  const year = adjYear.value
+  const companies = sessionPayrollCompanies.value.map(c => c.payrollCompany)
+  const epoch = ++adjEpoch
+  adjLoading.value = true
+  adjError.value = ''
+  adjProgress.value = ''
+  try {
+    // 0. 給与社員CD → 乗務員CD の対応表 (社員マスタ)。期間集計タブはこれを読まないので
+    //    ここで読む。読めないまま足すと、給与社員CD のまま別人扱いになって「残り不足」を
+    //    過大に出す (dev で実測) ので、判定ごと止める
+    if (!employeeMasterLoaded.value) await loadEmployeeMaster()
+    if (!employeeMasterLoaded.value) {
+      throw new Error('社員マスタを読み込めませんでした — 給与社員CD を乗務員CD に対応付けられないため判定しません')
+    }
+    // 1. 不足の材料 = その年 1〜12 月の保存済みスナップショット
+    adjProgress.value = `${year} 年の期間集計を読んでいます…`
+    const range = await fetchWageRange(compId, `${year}-01`, `${year}-12`)
+
+    const sources: Array<{ kind: 'bonus' | 'payroll', rows: SalaryCsvRow[] }> = []
+    const freshness: Array<{ company: string, source?: 'cache' | 'live', syncedAt: string | null }> = []
+    const warnings: string[] = []
+    // 2. 賞与 (支給日の年 = year)。給与大臣は同時 1 本なので直列
+    for (const [i, company] of companies.entries()) {
+      adjProgress.value = `賞与 ${i + 1}/${companies.length} ${company} / ${year} 年を読んでいます (1 社 10〜20 秒)…`
+      const body = await $fetch('/api/kyuyo/bonus', { query: { company, year } })
+      const stored = toStoredPayroll(body)
+      if (!stored) throw new Error(`${company} / ${year} 年の賞与の応答形式が想定外でした`)
+      sources.push({ kind: 'bonus', rows: bonusToSalaryRows(stored.rows as AdjustmentSourceRow[], company) })
+      freshness.push({ company, ...(stored.source ? { source: stored.source } : {}), syncedAt: stored.syncedAt ?? null })
+      warnings.push(...stored.warnings.map(w => `賞与 ${company}: ${w}`))
+    }
+    // 3. 月例 (支給日の年 = year → 勤務月 year-1/12〜year/11)。画面に載っている月は使い回す
+    const workMonths = adjustmentWorkMonths(year)
+    let done = 0
+    for (const workMonth of workMonths) {
+      const payMonth = nextYm(workMonth)
+      for (const company of companies) {
+        done += 1
+        const loaded = dbImports.value.find(i => i.company === company && i.month === payMonth)
+        if (loaded) {
+          sources.push({ kind: 'payroll', rows: loaded.parsed.rows })
+          continue
+        }
+        adjProgress.value = `月例 ${done}/${workMonths.length * companies.length} ${company} / ${fmtYm(payMonth)} 支給分を読んでいます…`
+        const body = await $fetch('/api/kyuyo/payroll', { query: { company, month: workMonth } })
+        const stored = toStoredPayroll(body)
+        if (!stored) throw new Error(`${company} / ${fmtYm(payMonth)} 支給分の応答形式が想定外でした`)
+        sources.push({ kind: 'payroll', rows: payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], company).rows })
+      }
+    }
+    if (epoch !== adjEpoch) return
+    adjResult.value = {
+      year,
+      compId,
+      rows: buildAdjustmentRows(range.rows, sumAdjustments(sources, salaryCdMap.value, year), year),
+      months: range.months,
+      freshness: describeBonusFreshness(freshness),
+      warnings,
+    }
+  }
+  catch (e: unknown) {
+    if (epoch !== adjEpoch) return
+    // 補填の一部だけで判定すると「残り不足」を過大に出すので、途中で失敗したら表ごと出さない
+    adjResult.value = null
+    adjError.value = describeApiError(e)
+  }
+  finally {
+    if (epoch === adjEpoch) {
+      adjLoading.value = false
+      adjProgress.value = ''
+    }
+  }
+}
+
+/** 閲覧中の会社・年と合っている結果だけを出す (別の会社の数字を残さない)。 */
+const adjShown = computed(() => {
+  const r = adjResult.value
+  return r && r.compId === session.value?.compId ? r : null
+})
+const adjVisibleRows = computed(() => {
+  const rows = adjShown.value?.rows ?? []
+  return adjOnlyRelevant.value ? rows.filter(hasShortfallOrAdjustment) : rows
+})
+const adjSections = computed(() =>
+  groupMinWageRows(adjVisibleRows.value, r => r.driverCd, r => r.attrs))
+/** 不足の材料が揃っていない月 (未保存・要再計算・月ごと除外)。 */
+const adjMissingMonths = computed(() =>
+  (adjShown.value?.months ?? []).filter(m => !m.saved || m.excluded || m.stale).map(m => m.ym))
+const adjCounts = computed(() => {
+  const c: Record<AdjustmentStatus, number> = { 'no-shortfall': 0, 'covered': 0, 'short': 0, 'unmatched': 0 }
+  for (const r of adjShown.value?.rows ?? []) c[r.judgement.status]++
+  return c
+})
+const ADJ_STATUS_CLASS: Record<AdjustmentStatus, string> = {
+  'no-shortfall': 'text-gray-500',
+  'covered': 'text-green-700 dark:text-green-400',
+  'short': 'text-red-600 font-medium',
+  'unmatched': 'text-amber-600 dark:text-amber-400',
+}
 
 function downloadRangeCsv() {
   // 画面に出ている行をそのまま落とす (絞り込み中はその結果だけ)。
@@ -6962,6 +7108,125 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 </div>
               </template>
             </UModal>
+          </UCard>
+
+          <!-- 年の補填 (就労調整金、Refs #1263)。月ごとの不足を賞与 (年によっては月例) の
+               就労調整金でまとめて補う運用を、年単位で突き合わせる -->
+          <UCard class="mt-4">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">年の補填 (就労調整金)</span>
+                <USelect
+                  v-model="adjYear"
+                  size="xs"
+                  class="w-28"
+                  :items="yearOptions.map(y => ({ label: `${y}年`, value: y }))"
+                  :disabled="adjLoading"
+                  aria-label="補填を見る年"
+                />
+                <UButton
+                  size="xs"
+                  icon="i-lucide-download"
+                  :label="`就労調整金を読み込む (${adjYear} 年)`"
+                  :loading="adjLoading"
+                  :disabled="!sessionPayrollCompanies.length"
+                  @click="loadMinWageAdjustment"
+                />
+                <UCheckbox v-model="adjOnlyRelevant" label="不足または補填がある人だけ" />
+              </div>
+            </template>
+
+            <p class="text-xs text-gray-500 mb-2">
+              不足合計 = その年の勤務月 1〜12 月のうち「給与 − 計算」がマイナスだった月の不足額の合計 (上の期間集計と同じ保存済みの値。プラスの月で相殺しない)。
+              補填合計 = 支給日がその年の「就労調整金」(賞与 + 月例。月例は勤務月 前年12月〜11月)。
+              賞与は給与大臣を開くので 1 社 10〜20 秒かかります。
+            </p>
+            <p v-if="!sessionPayrollCompanies.length" class="text-xs text-amber-600 dark:text-amber-400 mb-2">
+              この会社に対応する給与大臣の会社が登録されていないため読み込めません (社員マスタタブの会社対応表)。
+            </p>
+            <p v-if="adjProgress" class="text-xs text-gray-500 mb-2">{{ adjProgress }}</p>
+            <p v-if="adjError" class="text-xs text-red-600 dark:text-red-400 mb-2 select-all break-all">
+              ⚠ 就労調整金を読み込めませんでした: {{ adjError }}
+            </p>
+
+            <template v-if="adjShown">
+              <p class="text-sm mb-1">
+                {{ adjShown.year }} 年:
+                <span class="text-red-600 font-medium">残り不足 {{ adjCounts.short }} 名</span>
+                <span class="mx-1 text-gray-400">/</span>
+                <span class="text-green-700 dark:text-green-400">補填済み {{ adjCounts.covered }} 名</span>
+                <span class="mx-1 text-gray-400">/</span>
+                <span class="text-gray-500">不足なし {{ adjCounts['no-shortfall'] }} 名</span>
+                <template v-if="adjCounts.unmatched">
+                  <span class="mx-1 text-gray-400">/</span>
+                  <span class="text-amber-600 dark:text-amber-400">期間集計に行が無い {{ adjCounts.unmatched }} 名</span>
+                </template>
+              </p>
+              <!-- 欠けたまま「補填済み」と言い切らない (親判断 2026-11-20)。月が欠けていることを
+                   hover なしで読める位置に出し、埋め方 (上の一括取得) を添える -->
+              <p v-if="adjMissingMonths.length" class="text-xs text-amber-600 dark:text-amber-400 mb-1">
+                {{ adjMissingMonths.length }} ヶ月 ({{ adjMissingMonths.map(fmtYm).join('・') }}) は保存済みの集計が無い・要再計算・除外のため、不足合計に入っていません。
+                判定は確定ではありません — 上の期間集計を {{ adjShown.year }} 年 1〜12 月にして「未保存・要再計算の月を取得」で埋めてから読み直してください。
+              </p>
+              <p v-if="adjShown.freshness" class="text-xs text-gray-500 mb-1">賞与: {{ adjShown.freshness }}</p>
+              <p v-if="adjShown.warnings.length" class="text-xs text-amber-600 dark:text-amber-400 mb-1">
+                警告 {{ adjShown.warnings.length }} 件: {{ adjShown.warnings.slice(0, 3).join(' / ') }}
+              </p>
+              <p v-if="!adjVisibleRows.length" class="text-sm text-gray-500">該当する乗務員はいません。</p>
+
+              <div v-else class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b border-gray-300 dark:border-gray-600 text-xs text-gray-500">
+                      <th class="px-2 py-1 text-left">乗務員CD</th>
+                      <th class="px-2 py-1 text-left">氏名</th>
+                      <th class="px-2 py-1 text-right">集計月</th>
+                      <th class="px-2 py-1 text-right">不足合計</th>
+                      <th class="px-2 py-1 text-right">不足の月</th>
+                      <th class="px-2 py-1 text-right border-l-2 border-gray-300 dark:border-gray-600">賞与</th>
+                      <th class="px-2 py-1 text-right">月例</th>
+                      <th class="px-2 py-1 text-right">補填合計</th>
+                      <th class="px-2 py-1 text-left border-l-2 border-gray-300 dark:border-gray-600">判定</th>
+                    </tr>
+                  </thead>
+                  <tbody v-for="section in adjSections" :key="`${section.company ?? 'unknown'}|${section.jobGroup}`">
+                    <tr class="bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700">
+                      <td colspan="9" class="px-2 py-1.5 text-xs font-semibold">
+                        {{ section.company ? payrollCompanyLabelOf(compMap, section.company) : '会社不明 (期間集計に行が無い・社員マスタに乗務員CDの登録なし)' }}
+                        <span class="mx-1 text-gray-400">/</span>
+                        {{ MIN_WAGE_JOB_GROUP_LABEL[section.jobGroup] }}
+                        <span class="ml-1 font-normal text-gray-500">{{ section.rows.length }} 名</span>
+                      </td>
+                    </tr>
+                    <tr v-for="row in section.rows" :key="row.driverCd" class="border-b border-gray-100 dark:border-gray-800">
+                      <td class="px-2 py-1.5">{{ row.driverCd }}</td>
+                      <td class="px-2 py-1.5">
+                        <div>{{ row.driverName }}</div>
+                        <div v-if="row.attrs?.branchName" class="text-xs text-gray-500">{{ row.attrs.branchName }}</div>
+                      </td>
+                      <td class="px-2 py-1.5 text-right whitespace-nowrap">
+                        <span v-if="row.shortfall" :class="row.shortfall.countedMonths < 12 ? 'text-amber-600 dark:text-amber-400' : ''">
+                          {{ row.shortfall.countedMonths }} / 12
+                        </span>
+                        <span v-else class="text-xs text-gray-400" title="期間集計にこの年の行が無いため不足を数えられません">—</span>
+                      </td>
+                      <td class="px-2 py-1.5 text-right" :class="(row.shortfall?.shortfall ?? 0) > 0 ? 'text-red-600' : 'text-gray-500'">
+                        {{ row.shortfall ? fmtYen(row.shortfall.shortfall) : '—' }}
+                      </td>
+                      <td class="px-2 py-1.5 text-right text-xs text-gray-500">
+                        {{ row.shortfall?.shortfallMonths.map(m => `${Number(m.slice(5))}月`).join(' ') }}
+                      </td>
+                      <td class="px-2 py-1.5 text-right border-l-2 border-gray-300 dark:border-gray-600">{{ fmtYen(row.bonus) }}</td>
+                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.payroll) }}</td>
+                      <td class="px-2 py-1.5 text-right font-medium">{{ fmtYen(row.adjustment) }}</td>
+                      <td class="px-2 py-1.5 border-l-2 border-gray-300 dark:border-gray-600" :class="ADJ_STATUS_CLASS[row.judgement.status]">
+                        {{ row.judgement.label }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </template>
           </UCard>
         </template>
 

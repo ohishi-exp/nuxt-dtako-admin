@@ -306,6 +306,12 @@ branches = true
 path = "app/utils/wage-range-view.ts"
 branches = true
 
+# 年の最低賃金の不足と「就労調整金」による補填の突き合わせ (Refs #1263)。期間集計の月の差
+# (`monthDiff`) の負の部分を足し、賞与・月例の支給日の年で補填を拾って判定する純関数。
+[[files]]
+path = "app/utils/min-wage-adjustment.ts"
+branches = true
+
 # `$fetch` / 生 `fetch` のエラーから人が読める 1 文を作るファイル (Refs #890 / #900 / #996)。
 # 元は `wage-range-view.ts` にあった `describeApiError` を、賃金以外 (粗利タブ等) から
 # 呼べるように切り出した。本文の拾い方を `??` から「文字列である最初の 1 つ」に直して
