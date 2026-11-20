@@ -7,7 +7,7 @@
  * **判断しているのは rust-ichibanboshi の `kyuyo::introspect::authorize()` だけ**
  * (`ohishi-exp/rust-ichibanboshi#82`、`src/kyuyo/introspect.rs`)。auth-worker の
  * introspect で browser JWT を検証し、応答の `email` を allowlist と突き合わせる。
- * `/api/kyuyo/{access,companies,databases,payroll,employees,schema,sync,synced-months}` の 8 本すべてが
+ * `/api/kyuyo/{access,companies,databases,payroll,bonus,employees,schema,sync,synced-months}` の 9 本すべてが
  * ハンドラ冒頭で同じ関数を通る。この repo の `server/api/kyuyo/[...path].{get,post}.ts` は
  * **status も本文もそのまま passthrough する thin proxy** で、JWT を検証しない。
  *

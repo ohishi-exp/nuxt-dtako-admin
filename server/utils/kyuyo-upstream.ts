@@ -17,7 +17,7 @@ interface KyuyoUpstreamEnv {
   ICHIBAN_KYUYO?: FetcherLike
 }
 
-const GET_PATHS: readonly string[] = ['access', 'synced-months', 'databases', 'companies', 'employees', 'payroll', 'schema']
+const GET_PATHS: readonly string[] = ['access', 'synced-months', 'databases', 'companies', 'employees', 'payroll', 'schema', 'bonus']
 const POST_PATHS: readonly string[] = ['sync']
 
 function fetchWorker(env: KyuyoUpstreamEnv, method: 'GET' | 'POST', path: string, search: string, authorization: string, body?: string): Promise<Response> {
