@@ -412,7 +412,7 @@ const locationMarkers = computed<DvrMapMarker[]>(() => {
   const p = locationPoint.value
   return p ? [{ lat: p.latitude!, lng: p.longitude!, lines: [p.dataDatetime ?? '', p.address ?? ''].filter(Boolean) }] : []
 })
-const LOCATION_LOGIN_NEEDED = 'theearth に未ログインです。「位置情報・動態履歴」の画面でログインしてから「もう一度」を押してください'
+const LOCATION_LOGIN_NEEDED = 'theearth に未ログインです。位置情報・動態履歴の画面でログインしてから「もう一度」を押してください'
 
 function openLocation(r: FuelIntankRow) {
   locationTarget.value = r
