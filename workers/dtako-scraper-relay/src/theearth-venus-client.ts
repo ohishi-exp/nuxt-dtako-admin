@@ -824,7 +824,7 @@ export async function getVehicleLogTrack(
 
   const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl);
   if (!getRes.ok) {
-    throw new TheearthClientError(`動態履歴ページの取得が HTTP ${getRes.status} を返しました`);
+    await throwGetError("動態履歴ページ", getRes);
   }
   const html1 = await getRes.text();
   if (isLoginRedirect(html1)) {
@@ -1039,4 +1039,52 @@ export async function openDvrFileStream(
     throw new TheearthClientError("DVR ファイル取得のレスポンスに body がありません");
   }
   return validateVdfMagicStream(res.body);
+}
+
+// --- aspx GET のエラー (report-client と動態履歴で共有) ---
+
+/** ASP.NET の「キーを Null にすることはできません。パラメーター名:key」500。
+ * theearth のセッション無効化 (別セッションの同時ログイン等) は VenusBridge 以外の
+ * aspx GET ではこの 500 として現れる (実機 2026-07-29: 再ログインで解消を確認)。
+ * SKILL.md「セッション無効化は HTTP 500 でも現れる」節と同じ方針で
+ * VenusSessionExpiredError → 401 にマップし、再ログイン導線へ繋ぐ
+ * (502 に潰すと利用者が回復手段に辿りつけない)。 */
+function isNullKeySessionError(status: number, rawBody: string): boolean {
+  return status === 500 && rawBody.includes("キーを Null にすることはできません");
+}
+
+/** GET が非 2xx を返した時に、ASP.NET エラーページの要約を log + メッセージに
+ * 載せて throw する (postback 版の postButton と同じ調査手法、Refs #199)。
+ * F-GOS0030 / F-DES1011 が再ログイン後も HTTP 500 を返し続ける事象 (staging
+ * 2026-07-10) の真因を Tail Worker log から追えるようにする。 */
+export async function throwGetError(pageLabel: string, res: { status: number; text: () => Promise<string> }): Promise<never> {
+  let detail = "";
+  try {
+    const rawBody = await res.text();
+    if (isNullKeySessionError(res.status, rawBody)) {
+      throw new VenusSessionExpiredError(
+        `${pageLabel}が「キーを Null にすることはできません」の HTTP 500 を返しました — ` +
+          "theearth セッションが別ログイン等で無効化されています。再ログインしてください",
+      );
+    }
+    detail = extractErrorSnippet(rawBody);
+    const dump = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
+    console.error(`theearth GET failed: HTTP ${res.status} page=${pageLabel} body=${dump}`);
+  } catch (err) {
+    if (err instanceof VenusSessionExpiredError) throw err;
+    // body が読めなくても HTTP status だけで throw する
+  }
+  throw new TheearthClientError(
+    `${pageLabel}の取得が HTTP ${res.status} を返しました${detail ? ` — ${detail}` : ""}`,
+  );
+}
+
+/** upstream (theearth) のエラー応答本文から診断用の 1 行要約を取り出す。ASP.NET の
+ * エラーページは `<title>` に概要 (例 "Runtime Error") を持つのでそれを優先し、無ければ
+ * 本文のタグを剥がして先頭を使う。長すぎる本文をそのまま log/UI に流さないよう 200 字で
+ * 切る。値 (viewstate 等) を含み得るため機微だが、内部管理ツールの調査用途に限定する。 */
+export function extractErrorSnippet(body: string): string {
+  const title = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  const text = (title ?? body).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
 }
