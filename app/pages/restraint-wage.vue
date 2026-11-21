@@ -33,6 +33,7 @@ import type {
 } from '~/utils/restraint-wage-view'
 import {
   EMPTY_WAGE_REPORT_NOTICE,
+  RESTRAINT_SOURCE_OPTIONS,
   emptyWageReportCause,
   fastBadgeState,
   fmtShiftOverlap,
@@ -794,10 +795,6 @@ async function fetchWageReport(ym: string): Promise<WageReportResponse> {
 // 最低賃金チェックのタブを開くと GCP を取りに行く** — 発火条件は下の
 // `watch([activeTab, minWageRestraintSource, month])` に付けたコメントが正。
 const minWageRestraintSource = ref<RestraintSourceKey>('gcp')
-const RESTRAINT_SOURCE_OPTIONS = [
-  { label: '現行 (デジタコ拘束表 + オンプレ打刻)', value: 'current' },
-  { label: 'GCP (day_summaries)', value: 'gcp' },
-] as const
 const RESTRAINT_SOURCE_NOTE: Record<RestraintSourceKey, string> = {
   current: 'theearth の拘束時間管理表 (運行ベース) と オンプレ kosoku-daily (打刻ベース) の合流。この画面が従来ずっと出していた値',
   gcp: 'GCP kintai.day_summaries の拘束時間だけを差し替えて再計算。休暇・休日区分・運転/荷役は現行ソースのまま',

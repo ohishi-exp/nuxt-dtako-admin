@@ -27,7 +27,8 @@ const { api, saved, events } = vi.hoisted(() => ({
   events: [] as string[],
 }))
 
-vi.mock('~/utils/download-blob', () => ({
+vi.mock('~/utils/download-blob', async importOriginal => ({
+  ...await importOriginal<typeof import('~/utils/download-blob')>(),
   downloadBlob: (blob: Blob, name: string) => {
     saved.push({ blob, name })
     events.push('download')
@@ -123,6 +124,8 @@ let postHandler: ((body: { caseId: string, results: unknown }) => unknown) | nul
 let exportHandler: (body: { from: string }) => Response | Promise<Response>
 let putHandler: ((name: string) => Response | Promise<Response> | null | Promise<null>) | null
 let fileGetHandler: ((name: string) => Response | null) | null
+/** 最低賃金 年間レポート PDF の口。既定は 503 (PDF を作れない環境) — 既存のテストのファイル数を変えない */
+let annualHandler: (q: URLSearchParams) => Response
 const realFetch = globalThis.fetch
 
 const listResponse = (caseId: string) => ({
@@ -187,6 +190,10 @@ function stubFetch() {
       const body = JSON.parse(String(init!.body))
       calls.push({ via: 'fetch', method, url, body })
       return exportHandler(body)
+    }
+    if (url.startsWith('/restraint-api/min-wage-annual-report?')) {
+      calls.push({ via: 'fetch', method, url, headers })
+      return annualHandler(new URL(url, 'http://x').searchParams)
     }
     if (url.startsWith('/restraint-api/litigation-outputs/file?')) {
       const q = new URL(url, 'http://x').searchParams
@@ -264,6 +271,7 @@ beforeEach(() => {
   postHandler = null
   putHandler = null
   fileGetHandler = null
+  annualHandler = () => Response.json({ error: 'PDF の作成 (Browser Rendering の BROWSER) が使えません' }, { status: 503 })
   exportHandler = body => new Response(`xlsx:${body.from}`, { status: 200, headers: { 'x-y-time-rows': '5' } })
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', COMP)
@@ -297,7 +305,7 @@ describe('「ZIP を作る」: ダウンロードのあとに版として保存�
     expect(progress().text()).toContain('保存 0 / 3')
     // 保存の途中でも、ダウンロードの成功はもう出ている。ボタンは保存が終わるまで押せない
     expect(alertColors(w)).toEqual(['success'])
-    expect(w.findComponent({ name: 'UAlert' }).text()).toContain('をダウンロードしました (Excel 2 / 2 冊 + 変更記録.csv)')
+    expect(w.findComponent({ name: 'UAlert' }).text()).toContain('をダウンロードしました (Excel 2 / 2 冊 + 年間レポート PDF 0 / 1 本 + 変更記録.csv)')
     expect(buttonByText(w, 'ZIP を作る').attributes('disabled')).toBeDefined()
 
     gates[A_BOOK_1]!.resolve()
@@ -927,6 +935,77 @@ describe('行の元 (勤怠の勤務の記録 / 運行、Refs #1133 c1133-46)', 
       'excluded: 行を作れなかった勤務 1 件 (まだ畳み直していない 1 件) — 始業の日付: 2024-03-04 (まだ畳み直していない)',
       'refold: 勤怠の畳み直しが要ります (まだ畳み直していない勤務 1 件)',
     ])
+    w.unmount()
+  })
+})
+
+describe('「ZIP を作る」: 最低賃金 年間レポート PDF を乗務員ごとに入れ、版にも保存する (Refs #414)', () => {
+  const PDF_NAME = 'min-wage-annual_1001_2024-2025.pdf'
+  const pdfOk = () => new Response('pdf:1001', {
+    status: 200,
+    headers: { 'content-type': 'application/pdf', 'content-disposition': `attachment; filename="${PDF_NAME}"` },
+  })
+  const annualQueries = () => urlsOf('GET', '/restraint-api/min-wage-annual-report?')
+    .map(u => Object.fromEntries(new URL(u, 'http://x').searchParams))
+
+  it('★ 案件の期間を含む年で 1 本取り (既定は GCP)、relay の名前で ZIP と版に入れる', async () => {
+    annualHandler = pdfOk
+    const w = await mountPage()
+    await openCase(w, CASE_A.name)
+    expect(w.find('[data-testid="litigation-zip-summary"]').text()).toContain('最低賃金 年間レポート (乗務員 1001, 2024〜2025)')
+    await buttonByText(w, 'ZIP を作る').trigger('click')
+    await settle()
+    expect(annualQueries()).toEqual([
+      { driver: '1001', from_year: '2024', to_year: '2025', format: 'pdf', source: 'gcp', wage_logic_version: expect.any(String) },
+    ])
+    expect(calls.find(c => c.url.startsWith('/restraint-api/min-wage-annual-report?'))!.headers!['X-Theearth-Comp-Id']).toBe(COMP)
+    const zip = await JSZip.loadAsync(await saved[0]!.blob.arrayBuffer())
+    expect(Object.keys(zip.files).sort()).toEqual([A_BOOK_1, A_BOOK_2, PDF_NAME, CSV_LABEL].sort())
+    expect(await zip.file(PDF_NAME)!.async('string')).toBe('pdf:1001')
+    // Excel → PDF → 変更記録 の順に版へ上げる
+    expect(putNames()).toEqual([A_BOOK_1, A_BOOK_2, PDF_NAME, 'changes.csv'])
+    expect(w.findComponent({ name: 'UAlert' }).text()).toContain('年間レポート PDF 1 / 1 本')
+    expect(w.find(`[data-zip-file="${PDF_NAME}"]`).text()).toContain('入る')
+    // 保存した版の ZIP にも入る
+    await versionRows(w)[0]!.findAll('button')[0]!.trigger('click')
+    await settle()
+    const versionZip = await JSZip.loadAsync(await saved[1]!.blob.arrayBuffer())
+    expect(await versionZip.file(PDF_NAME)!.async('string')).toBe('pdf:1001')
+    w.unmount()
+  })
+
+  it('★ 拘束時間ソースの切り替えが query の source に載る', async () => {
+    annualHandler = pdfOk
+    const w = await mountPage()
+    await openCase(w, CASE_A.name)
+    await buttonByText(w, '現行 (デジタコ拘束表 + オンプレ打刻)').trigger('click')
+    await buttonByText(w, 'ZIP を作る').trigger('click')
+    await settle()
+    expect(annualQueries().map(q => q.source)).toEqual(['current'])
+    w.unmount()
+  })
+
+  it('★ PDF が取れなくても全体は止めず、ZIP に入れずに理由を出す', async () => {
+    const w = await mountPage()
+    await openCase(w, CASE_A.name)
+    await buttonByText(w, 'ZIP を作る').trigger('click')
+    await settle()
+    const zip = await JSZip.loadAsync(await saved[0]!.blob.arrayBuffer())
+    expect(Object.keys(zip.files).sort()).toEqual([A_BOOK_1, A_BOOK_2, CSV_LABEL].sort())
+    const line = w.find('[data-zip-file="最低賃金 年間レポート (乗務員 1001, 2024〜2025)"]').text()
+    expect(line).toContain('入らない')
+    expect(line).toContain('Browser Rendering')
+    w.unmount()
+  })
+
+  it('★ content-disposition の名前が無い応答は入れない (名前を画面で組まない)', async () => {
+    annualHandler = () => new Response('pdf', { status: 200 })
+    const w = await mountPage()
+    await openCase(w, CASE_A.name)
+    await buttonByText(w, 'ZIP を作る').trigger('click')
+    await settle()
+    expect(putNames()).toEqual([A_BOOK_1, A_BOOK_2, 'changes.csv'])
+    expect(w.find('[data-zip-file="最低賃金 年間レポート (乗務員 1001, 2024〜2025)"]').text()).toContain('content-disposition')
     w.unmount()
   })
 })

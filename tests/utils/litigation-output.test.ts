@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildLitigationHoursBooks,
   buildLitigationZipSummary,
+  litigationAnnualReportYears,
   buildLitigationOutputChunks,
   countLitigationResults,
   litigationEmptyMessage,
@@ -404,6 +405,7 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
   ]
   const base = {
     changesCsv: { filename: '変更記録.csv', finished: false, rows: 0 },
+    annualReports: [],
   }
   const res = (over: Record<string, unknown>) => ({
     driverCd: '9101', from: '', to: '', status: 'ok', rows: 250, missingDates: [], missingCount: 0, warnings: [], warningsCount: 0, message: '', ...over,
@@ -430,6 +432,33 @@ describe('buildLitigationZipSummary (ZIP の中身の概要)', () => {
     expect(s[1]!.detail).toBe('2023-12〜2024-11 (乗務員 9101) — テンプレに書けなかった日 2 日 / 警告 3 件')
     expect(s[2]).toMatchObject({ state: 'excluded', detail: '2024-12〜2025-11 (乗務員 9101) — 入らない: この期間に運行が 0 件' })
     expect(s[3]!.detail).toBe('変更 5 件')
+  })
+})
+
+describe('最低賃金 年間レポート PDF (乗務員ごとに 1 本、Refs #414)', () => {
+  it('対象年は案件の期間を含む年 (逆順の月も並べ直す)', () => {
+    expect(litigationAnnualReportYears('2023-12', '2025-11')).toEqual({ fromYear: 2023, toYear: 2025 })
+    expect(litigationAnnualReportYears('2025-11', '2023-12')).toEqual({ fromYear: 2023, toYear: 2025 })
+    expect(litigationAnnualReportYears('2024-01', '2024-12')).toEqual({ fromYear: 2024, toYear: 2024 })
+  })
+
+  it('★ Excel の後・変更記録の前に並べ、未実行は「まだ」・作れたら relay の名前・失敗は理由', () => {
+    const s = buildLitigationZipSummary({
+      chunks: [],
+      results: [],
+      changesCsv: { filename: '変更記録.csv', finished: true, rows: 0 },
+      annualReports: [
+        { driverCd: '9998', fromYear: 2024, toYear: 2024, result: null },
+        { driverCd: '9999', fromYear: 2023, toYear: 2025, result: { ok: true, filename: 'min-wage-annual_9999_2023-2025.pdf' } },
+        { driverCd: '9997', fromYear: 2023, toYear: 2025, result: { ok: false, message: '502 上流が応答しない' } },
+      ],
+    })
+    expect(s).toEqual([
+      { filename: '最低賃金 年間レポート (乗務員 9998, 2024)', state: 'pending', detail: '「ZIP を作る」で PDF を作る' },
+      { filename: 'min-wage-annual_9999_2023-2025.pdf', state: 'included', detail: '最低賃金 年間レポート (乗務員 9999, 2023〜2025)' },
+      { filename: '最低賃金 年間レポート (乗務員 9997, 2023〜2025)', state: 'excluded', detail: '入らない: 502 上流が応答しない' },
+      { filename: '変更記録.csv', state: 'included', detail: '変更 0 件' },
+    ])
   })
 })
 

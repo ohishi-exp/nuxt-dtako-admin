@@ -13,7 +13,7 @@
  * 消費者は `y-time-export.vue` と `daily-report-edit.vue` (計 6 か所)。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { downloadBlob, downloadBlobResponse } from '~/utils/download-blob'
+import { contentDispositionFilename, downloadBlob, downloadBlobResponse } from '~/utils/download-blob'
 
 /** 実際に `<a download>` に載った名前と、開放された Object URL を記録する。 */
 let downloaded: string[]
@@ -76,5 +76,17 @@ describe('downloadBlob', () => {
     downloadBlob(new Blob([new Uint8Array([1])]), '訴訟準備_案件_2026-09-25.zip')
     expect(downloaded).toEqual(['訴訟準備_案件_2026-09-25.zip'])
     expect(revoked).toEqual(created)
+  })
+})
+
+describe('contentDispositionFilename', () => {
+  it('filename="…" を取り出す', () => {
+    expect(contentDispositionFilename('attachment; filename="min-wage-annual_9999_2024-2025.pdf"'))
+      .toBe('min-wage-annual_9999_2024-2025.pdf')
+  })
+
+  it('ヘッダが無い・filename= を持たないときは null (呼び出し側が扱いを決める)', () => {
+    expect(contentDispositionFilename(null)).toBeNull()
+    expect(contentDispositionFilename('attachment')).toBeNull()
   })
 })
