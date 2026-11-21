@@ -282,6 +282,12 @@ export function timecardKosokuNotice(
 /** 最低賃金チェックで選べる拘束時間ソース (**既定は `gcp`**。`current` が従来の挙動)。 */
 export type RestraintSourceKey = 'current' | 'gcp'
 
+/** 拘束時間ソースの選択肢 (最低賃金チェック・年間レポート・訴訟準備の ZIP で共有)。 */
+export const RESTRAINT_SOURCE_OPTIONS = [
+  { label: '現行 (デジタコ拘束表 + オンプレ打刻)', value: 'current' },
+  { label: 'GCP (day_summaries)', value: 'gcp' },
+] as const
+
 /** `prefecture` は最低賃金の一括設定で入った場合の根拠県 (手入力には付かない、Refs #409)。 */
 export interface WageRateEntry { effectiveFrom: string, hourlyRate: number, prefecture?: string }
 export interface WageMasterDriver { name?: string, rates: WageRateEntry[], retiredAt?: string }

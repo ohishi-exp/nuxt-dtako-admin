@@ -27,18 +27,20 @@ import JSZip from 'jszip'
 import type { Driver } from '~/types'
 import { getDrivers, getYTimeRows, getOperations, getDtakoOperationChanges, currentAccessToken, getViewerComps } from '~/utils/api'
 import { caughtErrorStatus, describeCaughtError, describeResponseFailure, ResponseFailure } from '~/utils/api-error'
-import { downloadBlob } from '~/utils/download-blob'
+import { contentDispositionFilename, downloadBlob } from '~/utils/download-blob'
 import {
   buildLitigationHoursBooks,
   buildLitigationOutputChunks,
   buildLitigationZipSummary,
   countLitigationResults,
+  litigationAnnualReportYears,
   litigationResultFromFailure,
   litigationOutputSourceLines,
   litigationResultFromHeaders,
   litigationZipFilename,
   LITIGATION_HOURS_WITHIN_STATUTORY_NOTE,
   LITIGATION_TEMPLATE_KEY,
+  type LitigationAnnualReportEntry,
   type LitigationOutputChunk,
   type LitigationOutputResult,
   type LitigationOutputStatus,
@@ -103,7 +105,8 @@ import {
   splitDateRangeByMaxDays,
   type LitigationChangeRow,
 } from '~/utils/litigation-changes'
-import { fmtRatePerHour, monthRange, nextYm, type WageReportResponse } from '~/utils/restraint-wage-view'
+import { fmtRatePerHour, monthRange, nextYm, RESTRAINT_SOURCE_OPTIONS, type RestraintSourceKey, type WageReportResponse } from '~/utils/restraint-wage-view'
+import { WAGE_LOGIC_VERSION } from '~/utils/wage-snapshot-client'
 import {
   buildLitigationSalaryRows,
   LITIGATION_SALARY_STATE_LABELS,
@@ -454,6 +457,18 @@ const outputZipError = ref('')
 /** 「ZIP を作る」を押した時点の変更記録の状態 (= ZIP に入れた CSV の要点)。実行前は null */
 const outputRunChanges = ref<LitigationOutputChanges | null>(null)
 
+// 最低賃金 年間レポート PDF (乗務員ごとに 1 本、対象年 = 案件の期間を含む年)。組み立ては relay
+// (`GET /restraint-api/min-wage-annual-report`)、画面の拘束時間ソースの切り替えと同じ選択肢
+const outputAnnualSource = ref<RestraintSourceKey>('gcp')
+const outputAnnualTargets = computed(() => {
+  const c = openCase.value
+  if (!c) return []
+  const years = litigationAnnualReportYears(c.fromMonth, c.toMonth)
+  return c.driverCds.map(driverCd => ({ driverCd, ...years }))
+})
+/** このページで「ZIP を作る」を実行した結果 (添字は `outputAnnualTargets`)。版には保存しない (版の表示中は出さない) */
+const outputAnnualResults = ref<LitigationAnnualReportEntry['result'][]>([])
+
 // 版 (relay への保存)。手元への ZIP は「ダウンロード」、relay への版は「保存」と呼び分ける
 /** 版の保存の進捗 (ファイルを 1 つずつ上げる) */
 const outputSaveProgress = ref<{ done: number, total: number } | null>(null)
@@ -494,6 +509,7 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
   outputZipMessage.value = ''
   outputZipError.value = ''
   outputRunChanges.value = null
+  outputAnnualResults.value = []
   outputSaveProgress.value = null
   outputSaveMessage.value = ''
   outputSaveWarning.value = null
@@ -530,6 +546,10 @@ const zipSummary = computed(() => {
       filename: LITIGATION_CHANGES_CSV_FILENAME,
       ...(restoredOutput.value?.changes ?? outputRunChanges.value ?? { finished: changesFinished.value, rows: changesRows.value.length }),
     },
+    // 版の結果には年間レポートを残していないので、版の表示中は並べない (ファイルは版に在る)
+    annualReports: restoredOutput.value
+      ? []
+      : outputAnnualTargets.value.map((t, i) => ({ ...t, result: outputAnnualResults.value[i] ?? null })),
   })
 })
 
@@ -590,6 +610,34 @@ async function runOutputChunk(chunk: LitigationOutputChunk): Promise<{ result: L
   }
 }
 
+/** 年間レポート PDF を 1 本取る。失敗は理由に畳んで返す (途中の失敗で全体を止めない)。 */
+async function runAnnualReport(
+  t: { driverCd: string, fromYear: number, toYear: number },
+  comp: string,
+  source: RestraintSourceKey,
+): Promise<{ result: NonNullable<LitigationAnnualReportEntry['result']>, bytes?: ArrayBuffer }> {
+  try {
+    const query = new URLSearchParams({
+      driver: t.driverCd,
+      from_year: String(t.fromYear),
+      to_year: String(t.toYear),
+      format: 'pdf',
+      source,
+      wage_logic_version: WAGE_LOGIC_VERSION,
+    })
+    // ofetch の blob はエラーの本文を隠すので、生の fetch で理由を読む
+    const res = await fetch(`/restraint-api/min-wage-annual-report?${query}`, { headers: authHeaders(comp) })
+    if (!res.ok) return { result: { ok: false, message: await describeResponseFailure(res, OUTPUT_RETRY) } }
+    // 名前は relay が付ける (乗務員CD と年だけ。氏名は入れない)
+    const filename = contentDispositionFilename(res.headers.get('content-disposition'))
+    if (!filename) return { result: { ok: false, message: '応答にファイル名 (content-disposition) がありません' } }
+    return { result: { ok: true, filename }, bytes: await res.arrayBuffer() }
+  }
+  catch (e) {
+    return { result: { ok: false, message: describeCaughtError(e, OUTPUT_RETRY) } }
+  }
+}
+
 /** 「ZIP を作る」1 回ぶんが、押した時点で握るもの。案件を切り替えても、握った案件へ最後まで保存する */
 interface OutputRun { caseId: string, comp: string, live: () => boolean }
 
@@ -602,6 +650,8 @@ async function buildOutputZip() {
   // 変更記録は押した時点で握る (実行の最後に読むと、途中で案件を切り替えたときに別の案件の表になる)
   const changes: LitigationOutputChanges = { finished: changesFinished.value, rows: changesRows.value.length }
   const changesCsv = new TextEncoder().encode(changesCsvText()).buffer as ArrayBuffer
+  const annualTargets = outputAnnualTargets.value
+  const annualSource = outputAnnualSource.value
   outputRunning.value = true
   outputFinished.value = false
   outputZipMessage.value = ''
@@ -614,6 +664,7 @@ async function buildOutputZip() {
   restoredOutput.value = null
   outputRestoreNotice.value = ''
   outputResults.value = chunks.map(() => null)
+  outputAnnualResults.value = annualTargets.map(() => null)
   const results: (LitigationOutputResult | null)[] = chunks.map(() => null)
   const files: OutputFile[] = []
   let downloaded = false
@@ -627,6 +678,13 @@ async function buildOutputZip() {
       if (bytes) files.push({ name: chunk.filename, label: chunk.filename, bytes })
     }
     const excelCount = files.length
+    // 最低賃金 年間レポート PDF (乗務員ごとに 1 本、直列)
+    for (const [i, t] of annualTargets.entries()) {
+      const { result, bytes } = await runAnnualReport(t, run.comp, annualSource)
+      if (run.live()) outputAnnualResults.value[i] = result
+      if (bytes && result.ok) files.push({ name: result.filename, label: result.filename, bytes })
+    }
+    const pdfCount = files.length - excelCount
     // 変更記録 (変更記録タブで「検知を実行」していなければ、その旨を備考に書いた空表になる)
     files.push({ name: LITIGATION_OUTPUT_CHANGES_STORAGE_NAME, label: LITIGATION_CHANGES_CSV_FILENAME, bytes: changesCsv })
     const blob = await zipOutputFiles(files)
@@ -636,10 +694,11 @@ async function buildOutputZip() {
     if (run.live()) {
       if (excelCount === 0) {
         // Excel が無くても CSV は成果物なのでダウンロードはする。ただし成功の見た目にしない
-        outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${LITIGATION_CHANGES_CSV_FILENAME} だけを入れてダウンロードしました`
+        const pdfPart = pdfCount > 0 ? `年間レポート PDF ${pdfCount} 本と ` : ''
+        outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${pdfPart}${LITIGATION_CHANGES_CSV_FILENAME} だけを入れてダウンロードしました`
       }
       else {
-        outputZipMessage.value = `${zipName} をダウンロードしました (Excel ${excelCount} / ${chunks.length} 冊 + ${LITIGATION_CHANGES_CSV_FILENAME})`
+        outputZipMessage.value = `${zipName} をダウンロードしました (Excel ${excelCount} / ${chunks.length} 冊 + 年間レポート PDF ${pdfCount} / ${annualTargets.length} 本 + ${LITIGATION_CHANGES_CSV_FILENAME})`
       }
     }
   }
@@ -1933,6 +1992,7 @@ function fmtDateTime(iso: string): string {
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
             Excel の行は勤怠の勤務の記録から作ります (勤怠の記録が無い会社は運行から)。どちらで作ったかは冊ごとに下の表に出ます。
+            乗務員ごとに最低賃金 年間レポート PDF (案件の期間を含む年、下で選んだ拘束時間ソース) も 1 本ずつ入れます。
             ZIP には {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — タブで検知を実行していない場合は、その旨を書いた空の表になります。
             下の「月ごとの時間」は、給与比較と同じ wage report の月ごとの時間 (暦月) です。ZIP を作る前から出ます。
             <span data-testid="litigation-output-within-statutory-note">{{ LITIGATION_HOURS_WITHIN_STATUTORY_NOTE }}</span>
@@ -1947,6 +2007,19 @@ function fmtDateTime(iso: string): string {
               :disabled="outputRunning || outputChunks.length === 0"
               @click="buildOutputZip"
             />
+            <span class="text-sm" data-testid="litigation-output-annual-source">
+              年間レポートの拘束時間ソース:
+              <UButton
+                v-for="opt in RESTRAINT_SOURCE_OPTIONS"
+                :key="opt.value"
+                size="xs"
+                class="ml-1"
+                :variant="outputAnnualSource === opt.value ? 'solid' : 'outline'"
+                :label="opt.label"
+                :disabled="outputRunning"
+                @click="outputAnnualSource = opt.value"
+              />
+            </span>
             <span v-if="outputRunning || outputFinished || restoredOutput" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-output-progress">
               {{ outputDoneCount }} / {{ outputChunks.length }} 冊
               <template v-if="outputFinished || restoredOutput">

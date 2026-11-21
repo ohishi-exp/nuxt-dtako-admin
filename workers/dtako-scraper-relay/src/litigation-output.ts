@@ -213,6 +213,7 @@ const OUTPUT_FILE_NAME_RE = /^[A-Za-z0-9._-]{1,120}$/;
 const OUTPUT_CONTENT_TYPES: Readonly<Record<string, string>> = {
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   csv: "text/csv",
+  pdf: "application/pdf",
 };
 const VERSION_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
@@ -247,7 +248,7 @@ function outputFileExtension(name: string): string {
   return name.slice(name.lastIndexOf(".") + 1).toLowerCase();
 }
 
-/** 保存用のファイル名 (R2 のキーの末尾・ダウンロード時の名前)。ASCII のみ、拡張子は xlsx / csv。 */
+/** 保存用のファイル名 (R2 のキーの末尾・ダウンロード時の名前)。ASCII のみ、拡張子は xlsx / csv / pdf。 */
 export function normalizeLitigationOutputFileName(raw: unknown): string {
   if (
     typeof raw !== "string" ||
@@ -256,7 +257,7 @@ export function normalizeLitigationOutputFileName(raw: unknown): string {
     !raw.includes(".") ||
     !(outputFileExtension(raw) in OUTPUT_CONTENT_TYPES)
   ) {
-    throw new LitigationCaseError("name は英数字・.・_・- の 1〜120 文字で、拡張子は .xlsx / .csv が必要です");
+    throw new LitigationCaseError("name は英数字・.・_・- の 1〜120 文字で、拡張子は .xlsx / .csv / .pdf が必要です");
   }
   return raw;
 }
@@ -270,7 +271,7 @@ export function normalizeLitigationOutputLabel(raw: unknown, fallbackName: strin
   return raw;
 }
 
-/** 検証済みの保存用の名前の content-type (拡張子で 2 種)。 */
+/** 検証済みの保存用の名前の content-type (拡張子で 3 種)。 */
 export function litigationOutputContentType(name: string): string {
   return OUTPUT_CONTENT_TYPES[outputFileExtension(name)]!;
 }

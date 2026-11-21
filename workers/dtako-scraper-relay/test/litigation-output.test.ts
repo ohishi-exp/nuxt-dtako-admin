@@ -322,8 +322,8 @@ describe("version_id の採番", () => {
 });
 
 describe("保存用のファイル名と表示名", () => {
-  it("ASCII の名前 + .xlsx / .csv は通る (拡張子の大文字も可)", () => {
-    for (const name of ["y-time_1001_2025-01.xlsx", "changes.csv", "A.XLSX", `${"x".repeat(115)}.xlsx`]) {
+  it("ASCII の名前 + .xlsx / .csv / .pdf は通る (拡張子の大文字も可)", () => {
+    for (const name of ["y-time_1001_2025-01.xlsx", "changes.csv", "min-wage-annual_9999_2024-2025.pdf", "A.XLSX", `${"x".repeat(115)}.xlsx`]) {
       expect(normalizeLitigationOutputFileName(name)).toBe(name);
     }
   });
@@ -335,10 +335,11 @@ describe("保存用のファイル名と表示名", () => {
     }
   });
 
-  it("content-type は拡張子で 2 種", () => {
+  it("content-type は拡張子で 3 種", () => {
     expect(litigationOutputContentType("a.xlsx")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     expect(litigationOutputContentType("A.XLSX")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     expect(litigationOutputContentType("a.csv")).toBe("text/csv");
+    expect(litigationOutputContentType("a.pdf")).toBe("application/pdf");
   });
 
   it("表示名は日本語可。省略・空は保存用の名前", () => {

@@ -7,9 +7,13 @@
  */
 export async function downloadBlobResponse(res: Response, fallbackFilename: string): Promise<void> {
   const blob = await res.blob()
-  const cd = res.headers.get('content-disposition') ?? ''
-  const m = cd.match(/filename="([^"]+)"/)
-  downloadBlob(blob, m ? m[1]! : fallbackFilename)
+  downloadBlob(blob, contentDispositionFilename(res.headers.get('content-disposition')) ?? fallbackFilename)
+}
+
+/** `content-disposition` の `filename="…"` を取り出す。ヘッダが無い・filename が無いときは null。 */
+export function contentDispositionFilename(header: string | null): string | null {
+  const m = (header ?? '').match(/filename="([^"]+)"/)
+  return m ? m[1]! : null
 }
 
 /**

@@ -415,9 +415,25 @@ export interface LitigationZipSummaryInput {
     finished: boolean
     rows: number
   }
+  /** 最低賃金 年間レポート (乗務員ごとに 1 本)。`result` は未実行が null、作れたら relay が返した名前 */
+  annualReports: readonly LitigationAnnualReportEntry[]
 }
 
-/** ZIP に入るファイルの一覧と、それぞれの中身の要点。並びは ZIP に入れる順 (Excel → 変更記録.csv)。 */
+export interface LitigationAnnualReportEntry {
+  driverCd: string
+  fromYear: number
+  toYear: number
+  result: null | { ok: true, filename: string } | { ok: false, message: string }
+}
+
+/** 案件の期間 (開始月〜終了月) を含む年。逆順の月は並べ直す。 */
+export function litigationAnnualReportYears(fromMonth: string, toMonth: string): { fromYear: number, toYear: number } {
+  const a = Number(fromMonth.slice(0, 4))
+  const b = Number(toMonth.slice(0, 4))
+  return { fromYear: Math.min(a, b), toYear: Math.max(a, b) }
+}
+
+/** ZIP に入るファイルの一覧と、それぞれの中身の要点。並びは ZIP に入れる順 (Excel → 年間レポート PDF → 変更記録.csv)。 */
 export function buildLitigationZipSummary(input: LitigationZipSummaryInput): LitigationZipSummaryItem[] {
   const excel = input.chunks.map((c, i): LitigationZipSummaryItem => {
     const r = input.results[i]
@@ -429,13 +445,20 @@ export function buildLitigationZipSummary(input: LitigationZipSummaryInput): Lit
     const warnings = r.warningsCount > 0 ? ` / 警告 ${r.warningsCount} 件` : ''
     return { filename: c.filename, state: 'included', detail: `${period} —${rows}${missing}${warnings}`.replace('— /', '—') }
   })
+  const annual = input.annualReports.map((a): LitigationZipSummaryItem => {
+    const years = a.fromYear === a.toYear ? `${a.fromYear}` : `${a.fromYear}〜${a.toYear}`
+    const what = `最低賃金 年間レポート (乗務員 ${a.driverCd}, ${years})`
+    if (!a.result) return { filename: what, state: 'pending', detail: '「ZIP を作る」で PDF を作る' }
+    if (!a.result.ok) return { filename: what, state: 'excluded', detail: `入らない: ${a.result.message}` }
+    return { filename: a.result.filename, state: 'included', detail: what }
+  })
   const ch = input.changesCsv
   const changes: LitigationZipSummaryItem = {
     filename: ch.filename,
     state: 'included',
     detail: ch.finished ? `変更 ${ch.rows} 件` : '変更記録タブで「検知を実行」していない — 空の表 (その旨を備考に書く)',
   }
-  return [...excel, changes]
+  return [...excel, ...annual, changes]
 }
 
 // ---- 月ごとの時間 (wage report。出力タブの表と紙面) ----
