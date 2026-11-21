@@ -11,7 +11,6 @@ import {
   dailyReportEditQuery,
   normalizeVehicleCd,
   dvrMapQuery,
-  nearestTrackPoint,
   vehicleStateMarkerIndex,
   totalQuantity,
   uploadResultText,
@@ -229,31 +228,6 @@ describe('dvrMapQuery', () => {
     expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: 'x1' } }))).toBeNull()
   })
 })
-
-describe('nearestTrackPoint', () => {
-  const pt = (dataDatetime: string | null, gps = true) => ({
-    dataDatetime, latitude: gps ? 35 : null, longitude: gps ? 139 : null,
-  })
-  it('給油日時に一番近い GPS のある点と、そのずれ (分、点 − 給油)', () => {
-    const points = [pt('12/20 07:50'), pt('12/20 08:06'), pt('12/20 08:30')]
-    expect(nearestTrackPoint(points, '2023-12-20T08:10')).toEqual({ index: 1, offsetMinutes: -4 })
-    expect(nearestTrackPoint(points, '2023-12-20T08:25')).toEqual({ index: 2, offsetMinutes: 5 })
-  })
-  it('GPS が無い点・時刻が無い/読めない点は飛ばす', () => {
-    const points = [pt('12/20 08:10', false), pt(null), pt('8:10'), pt('12/20 09:10')]
-    expect(nearestTrackPoint(points, '2023-12-20T08:10')).toEqual({ index: 3, offsetMinutes: 60 })
-  })
-  it('等距離なら先の点', () => {
-    expect(nearestTrackPoint([pt('12/20 08:00'), pt('12/20 08:20')], '2023-12-20T08:10'))
-      .toEqual({ index: 0, offsetMinutes: -10 })
-  })
-  it('使える点が無い・at が読めなければ null', () => {
-    expect(nearestTrackPoint([], '2023-12-20T08:10')).toBeNull()
-    expect(nearestTrackPoint([pt('12/20 08:10', false)], '2023-12-20T08:10')).toBeNull()
-    expect(nearestTrackPoint([pt('12/20 08:10')], '2023-12-20 08:10')).toBeNull()
-  })
-})
-
 describe('totalQuantity', () => {
   it('数量の合計 (null は 0)、小数 2 桁に丸める', () => {
     expect(totalQuantity([row({ qt: 0.1 }), row({ qt: 0.2 }), row({ qt: null })])).toBe(0.3)
