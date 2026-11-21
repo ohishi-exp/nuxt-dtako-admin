@@ -628,7 +628,12 @@ onMounted(async () => {
                 />
                 <UButton
                   v-if="isMatching && dvrMapQuery(r)" size="xs" variant="outline" label="位置を見る" class="ml-1"
-                  icon="i-lucide-map-pin" @click="openLocation(r)"
+                  icon="i-lucide-map-pin" target="_blank"
+                  :to="{ path: '/dvr-map', query: dvrMapQuery(r)! }"
+                />
+                <UButton
+                  v-if="isMatching && dvrMapQuery(r)" size="xs" variant="outline" label="現在地" class="ml-1"
+                  icon="i-lucide-locate" @click="openLocation(r)"
                 />
                 <UButton v-if="canRecheck(r)" size="xs" variant="outline" label="再照合" class="ml-1" :loading="rechecking === rowKey(r)" :disabled="rechecking !== null" @click="recheck(r)" />
                 <UButton v-if="r.manual" size="xs" color="error" variant="outline" label="削除" class="ml-1" @click="deleteTarget = r" />
