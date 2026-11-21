@@ -1011,6 +1011,14 @@ describe("getVehicleLogTrack", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("maps the null-key HTTP 500 on the page GET to VenusSessionExpiredError (same as report pages)", async () => {
+    const jar = createCookieJar();
+    const body = "<title>キーを Null にすることはできません。パラメーター名:key</title>";
+    await expect(
+      getVehicleLogTrack(jar, "1802", "2026/07/03", "2026/07/03", sequenceFetch([new Response(body, { status: 500 })])),
+    ).rejects.toBeInstanceOf(VenusSessionExpiredError);
+  });
+
   it("throws on non-2xx at each postback stage", async () => {
     const jar = createCookieJar();
     const okHidden = () => new Response('<input id="__VIEWSTATE" value="v" />', { status: 200 });
