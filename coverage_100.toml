@@ -1386,6 +1386,11 @@ branches = true
 path = "app/utils/fuel-manual.ts"
 branches = true
 
+# 日報編集の給油モーダルで fuel (インタンク) の給油記録から選ぶ (候補の絞り込み・並べ方・theearth 形式への変換)。
+[[files]]
+path = "app/utils/daily-report-fuel-pick.ts"
+branches = true
+
 # 給油データ USB アップローダーの資格情報 (purpose fuel-utran) の純粋ロジック (Refs yhonda-ohishi/nginx#814)。
 [[files]]
 path = "app/utils/machine-credentials.ts"

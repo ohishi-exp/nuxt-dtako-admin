@@ -16,6 +16,12 @@
  * 編集制御解除は行単位 (対象運行 1 件だけ) でしか効かない (cdp-pair 実機確認、
  * Refs #183)。ロック中の行にだけ表示するボタンから呼ぶ。
  */
+import { getFuelIntank, getFuelStarts } from '~/utils/api'
+import { describeListFailure } from '~/utils/api-error'
+import { createRowsCache } from '~/utils/fuel-intank'
+import { comparableDatetime, fuelPickCandidates, startsCovering, type FuelPickCandidate } from '~/utils/daily-report-fuel-pick'
+import type { FuelIntankResponse, FuelStart } from '~/types'
+
 interface DailyReportRow {
   operationNo: string
   startDateTime: string
@@ -595,6 +601,9 @@ async function openExpenseModal(row: DailyReportRow) {
   expenseError.value = null
   recalculateResult.value = null
   resetNewFuelRow()
+  fuelPickOpen.value = false
+  fuelPickItems.value = []
+  fuelPickError.value = null
   linkSysEnabled.value = false
   linkResult.value = null
   reimportResult.value = null
@@ -651,6 +660,51 @@ function resetNewFuelRow() {
   newFuelRow.supplyType = ''
   newFuelRow.dateTime = ''
   newFuelRow.quantity = ''
+}
+
+// --- fuel (インタンク) の給油記録から新規行の日時・数量を埋める ---
+// start の突き合わせは上流で 1 件 6〜9 秒かかるので、読んだ start はページを開いている間覚えておく
+// (/fuel/intank と同じ createRowsCache。モーダルを開き直しても読み直さない)。
+
+const fuelStartsCache = createRowsCache<FuelStart[]>(async () => (await getFuelStarts()).rows)
+const fuelIntankCache = createRowsCache<FuelIntankResponse>(start => getFuelIntank(start))
+const fuelPickOpen = ref(false)
+const fuelPickLoading = ref(false)
+const fuelPickError = ref<string | null>(null)
+const fuelPickItems = ref<FuelPickCandidate[]>([])
+
+async function loadFuelPick() {
+  const target = selectedRow.value
+  if (!target) return
+  fuelPickOpen.value = true
+  fuelPickLoading.value = true
+  fuelPickError.value = null
+  fuelPickItems.value = []
+  try {
+    const from = comparableDatetime(target.startDateTime)
+    const to = comparableDatetime(target.workEndDateTime)
+    if (!from || !to) throw new Error(`運行の出庫・退社日時が読めません (${target.startDateTime} 〜 ${target.workEndDateTime})`)
+    const starts = startsCovering(await fuelStartsCache.get('starts'), from, to)
+    const tables = await Promise.all(starts.map(start => fuelIntankCache.get(start)))
+    if (isStaleOperationResponse(target, selectedRow.value)) return
+    fuelPickItems.value = fuelPickCandidates(
+      tables.flatMap(t => t.rows), target.operationNo, target.vehicleCd, from, to,
+      fuelRows.value.map(r => fuelEditForm[r.ctrlIndex]?.dateTime ?? r.dateTime),
+    )
+  }
+  catch (e) {
+    if (isStaleOperationResponse(target, selectedRow.value)) return
+    fuelPickError.value = describeListFailure(e, 'もう一度「fuel の給油から選ぶ」を押してください')
+  }
+  finally {
+    if (!isStaleOperationResponse(target, selectedRow.value)) fuelPickLoading.value = false
+  }
+}
+
+function pickFuel(c: FuelPickCandidate) {
+  newFuelRow.dateTime = c.dateTime
+  newFuelRow.quantity = c.quantity
+  fuelPickOpen.value = false
 }
 
 const newFuelCategoryName = computed(() => expenseMasters.value.supplyCategory[newFuelRow.supplyCategory.trim()] ?? '')
@@ -1870,6 +1924,37 @@ onMounted(() => {
                   </tr>
                 </tbody>
               </table>
+            </div>
+
+            <!-- fuel (インタンク) の給油記録から新規行の日時・数量を埋める -->
+            <div v-if="!expenseLoading" class="space-y-2">
+              <UButton
+                size="xs"
+                variant="outline"
+                icon="i-lucide-fuel"
+                label="fuel の給油から選ぶ"
+                :loading="fuelPickLoading"
+                @click="loadFuelPick"
+              />
+              <div v-if="fuelPickOpen && !fuelPickLoading" class="text-sm">
+                <div v-if="fuelPickError" class="text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
+                  {{ fuelPickError }}
+                </div>
+                <p v-else-if="fuelPickItems.length === 0" class="text-gray-500">
+                  この運行の時間帯にかかる fuel の記録に、車輌CD {{ selectedRow?.vehicleCd ?? '-' }} の給油はありません。
+                </p>
+                <div v-else class="flex flex-wrap gap-2">
+                  <UButton
+                    v-for="c in fuelPickItems"
+                    :key="c.key"
+                    size="xs"
+                    :color="c.alreadyEntered ? 'neutral' : 'primary'"
+                    :variant="c.linked || c.inOperation ? 'soft' : 'outline'"
+                    :label="c.label"
+                    @click="pickFuel(c)"
+                  />
+                </div>
+              </div>
             </div>
 
             <div v-if="expenseError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
