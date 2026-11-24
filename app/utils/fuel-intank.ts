@@ -92,6 +92,19 @@ export function dtakoRowOptions(
 }
 
 /**
+ * 誤差一覧の「紐づけ候補」: その行の当日の dtako 給油 (`dtako_fuel_array`) のうち、運行に紐づいていて
+ * (`dtako_row_id` が空でない)、いま紐づいている運行とは別のもの。同じ運行の給油が複数あっても 1 件にする。
+ */
+export function linkCandidates(row: FuelIntankRow): DtakoRowOption[] {
+  const seen = new Set<string>()
+  return dtakoRowOptions(row.dtako_fuel_array, null, row.dtako_row_times).filter((o) => {
+    if (o.value === '' || o.value === row.dtako_row_id || seen.has(o.value)) return false
+    seen.add(o.value)
+    return true
+  })
+}
+
+/**
  * 差異 (給油の数量 − dtako の合計)。dtako の合計が無い行は null (CakePHP は「error」と出す)。
  * 小数 2 桁に丸める (浮動小数の誤差で 0 が 0 でなくならないように)。
  */
