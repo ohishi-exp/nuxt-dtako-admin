@@ -9,6 +9,7 @@ import {
   quantityDiff,
   isDiffHighlighted,
   isOverTolerance,
+  linkCandidates,
   dailyReportEditQuery,
   normalizeVehicleCd,
   dvrMapQuery,
@@ -170,6 +171,21 @@ describe('isOverTolerance', () => {
   })
   it('集計なしは常に載せる', () => {
     expect(isOverTolerance(row({ qt: 0, dtako_fuel_sum: null }), 0.05)).toBe(true)
+  })
+})
+
+describe('linkCandidates', () => {
+  it('運行に紐づいた当日の給油だけを、同じ運行は 1 件にして返す (いまの紐づけと運行なしは除く)', () => {
+    const r = row({
+      dtako_row_id: 'A',
+      dtako_fuel_array: { 'A': ['202611150900_10.00'], 'B': ['202611151509_100.00', '202611151600_5.00'], '': ['202611151000_3.00'] },
+    })
+    expect(linkCandidates(r).map(o => o.value)).toEqual(['B'])
+    expect(linkCandidates(r)[0]!.label).toContain('2026/11/15 15:09 100.00')
+  })
+  it('当日の給油が無ければ空', () => {
+    expect(linkCandidates(row({ dtako_fuel_array: null }))).toEqual([])
+    expect(linkCandidates(row())).toEqual([])
   })
 })
 

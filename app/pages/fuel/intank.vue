@@ -11,7 +11,7 @@ import {
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
-  isDiffHighlighted, isOverTolerance, dailyReportEditQuery, dvrMapQuery, vehicleStateMarkerIndex, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  isDiffHighlighted, isOverTolerance, linkCandidates, dailyReportEditQuery, dvrMapQuery, vehicleStateMarkerIndex, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
   createRowsCache,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
@@ -406,6 +406,48 @@ const shownDiffList = computed(() => (diffList.value ?? []).filter(e => !diffCar
  * 表は rowsCache に覚えるので、一覧から start を開くときは読み直さない。並びは start の新しい順・start 内は応答の順。
  * 読み終えた start から順に表へ足す (全部を待たない)
  */
+/** 一覧の対象 start と、start ごとの誤差行 (紐づけた後に 1 start だけ差し替えるため関数の外に持つ) */
+let diffTargets: FuelStart[] = []
+const diffFound = new Map<string, FuelIntankRow[]>()
+function setDiffRows(start: FuelStart, rows: FuelIntankRow[]) {
+  diffFound.set(start.datetime, rows.filter(r => !DIFF_LIST_EXCLUDED_CARDS.has(r.fuel_card_id) && isOverTolerance(r, DIFF_TOLERANCE)))
+  diffList.value = diffTargets.flatMap(t => (diffFound.get(t.datetime) ?? []).map(row => ({ start: t, row })))
+}
+
+/** 紐づけ候補の選択 (行ごと。既定は先頭の候補) と、紐づけ中の行・失敗 */
+const linkChoice = ref<Record<string, string>>({})
+const linking = ref<string | null>(null)
+const linkError = ref<string | null>(null)
+function diffEntryKey(e: DiffListEntry): string {
+  return `${e.start.datetime}|${rowKey(e.row)}`
+}
+function chosenLink(e: DiffListEntry): string {
+  return linkChoice.value[diffEntryKey(e)] ?? linkCandidates(e.row)[0]?.value ?? ''
+}
+
+/**
+ * 一覧の行を選んだ候補の運行に紐づける (上の表の「編集」→「保存」と同じ PATCH)。
+ * 終わったらその start だけ読み直して一覧を差し替える (誤差が消えれば行も消える)。上の表がその start なら読み直す
+ */
+async function linkFromDiffList(e: DiffListEntry) {
+  const target = chosenLink(e)
+  if (!target) return
+  const key = diffEntryKey(e)
+  linking.value = key
+  linkError.value = null
+  try {
+    await updateFuelIntankDtakoRow(e.row.datetime, e.row.fuel_card_id, target)
+    setDiffRows(e.start, (await rowsCache.get(e.start.datetime, true)).rows)
+    if (selected.value === e.start.datetime) await loadRows(true)
+  }
+  catch (err) {
+    linkError.value = `${formatShortDatetime(e.row.datetime)} / card ${e.row.fuel_card_id}: ${describeCaughtError(err, 'もう一度「紐づけ」を押してください')}`
+  }
+  finally {
+    linking.value = null
+  }
+}
+
 async function buildDiffList() {
   const targets = starts.value.slice(0, DIFF_LIST_STARTS)
   diffListLoading.value = true
@@ -413,14 +455,13 @@ async function buildDiffList() {
   diffListTargets.value = targets.length
   diffListFailed.value = []
   diffList.value = []
-  const found = new Map<string, FuelIntankRow[]>()
+  diffTargets = targets
+  diffFound.clear()
   const queue = [...targets]
   const worker = async () => {
     for (let s = queue.shift(); s !== undefined; s = queue.shift()) {
       try {
-        const res = await rowsCache.get(s.datetime)
-        found.set(s.datetime, res.rows.filter(r => !DIFF_LIST_EXCLUDED_CARDS.has(r.fuel_card_id) && isOverTolerance(r, DIFF_TOLERANCE)))
-        diffList.value = targets.flatMap(start => (found.get(start.datetime) ?? []).map(row => ({ start, row })))
+        setDiffRows(s, (await rowsCache.get(s.datetime)).rows)
       }
       catch {
         diffListFailed.value.push(startLabel(s))
@@ -632,13 +673,14 @@ onMounted(async () => {
         :title="`${diffListFailed.length} 件の start を読めませんでした (一覧に入っていません)`"
         :description="`${diffListFailed.join(' / ')} — 「作り直す」を押してください`"
       />
+      <UAlert v-if="linkError" color="error" variant="subtle" icon="i-lucide-alert-triangle" :description="linkError" class="my-2" />
       <div v-if="shownDiffList.length > 0" class="overflow-x-auto mt-1">
         <table class="fuel-table">
           <thead>
-            <tr><th>start</th><th>D番号</th><th>card_id</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th /></tr>
+            <tr><th>start</th><th>D番号</th><th>card_id</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th>紐づけ候補</th><th /></tr>
           </thead>
           <tbody>
-            <tr v-for="e in shownDiffList" :key="`${e.start.datetime}|${rowKey(e.row)}`">
+            <tr v-for="e in shownDiffList" :key="diffEntryKey(e)">
               <td>{{ startLabel(e.start) }}</td>
               <td class="text-right">{{ e.row.slip_num }}</td>
               <td class="text-right">{{ e.row.fuel_card_id }}</td>
@@ -657,6 +699,21 @@ onMounted(async () => {
               <td class="text-right">{{ e.row.dtako_fuel_sum == null ? '' : formatQuantity(e.row.dtako_fuel_sum) }}</td>
               <td class="text-right">{{ quantityDiff(e.row) == null ? '集計なし' : formatQuantity(quantityDiff(e.row)!) }}</td>
               <td>{{ e.row.dtako_row?.driver_name ?? '' }}</td>
+              <td>
+                <div v-if="linkCandidates(e.row).length > 0" class="flex items-center gap-1">
+                  <select
+                    :value="chosenLink(e)" class="border rounded px-1 py-0.5 text-sm bg-white dark:bg-gray-900 max-w-[28rem]"
+                    @change="linkChoice[diffEntryKey(e)] = ($event.target as HTMLSelectElement).value"
+                  >
+                    <option v-for="o in linkCandidates(e.row)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                  </select>
+                  <UButton
+                    size="xs" label="紐づけ" :loading="linking === diffEntryKey(e)" :disabled="linking !== null"
+                    @click="linkFromDiffList(e)"
+                  />
+                </div>
+                <span v-else class="text-gray-500">候補なし</span>
+              </td>
               <td class="whitespace-nowrap">
                 <UButton size="xs" variant="outline" label="この start を開く" :disabled="selected === e.start.datetime" @click="selectStart(e.start.datetime)" />
                 <UButton
