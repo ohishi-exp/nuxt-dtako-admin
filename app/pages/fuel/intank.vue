@@ -384,8 +384,8 @@ async function recheck(r: FuelIntankRow) {
 
 const DIFF_LIST_STARTS = 30
 const DIFF_TOLERANCE = 0.05
-/** 誤差一覧に載せないカード (ユーザーの依頼で 100 番を除く) */
-const DIFF_LIST_EXCLUDED_CARDS: ReadonlySet<number> = new Set([100])
+/** 誤差一覧に載せないカード (ユーザーの依頼で 99 番と 100 番を除く) */
+const DIFF_LIST_EXCLUDED_CARDS: ReadonlySet<number> = new Set([99, 100])
 /** 一覧を作るときの同時読み込み数 (2 本だと 30 start で約 2 分かかるので 6 本にして 1 分弱に) */
 const DIFF_LIST_CONCURRENCY = 6
 interface DiffListEntry { start: FuelStart, row: FuelIntankRow }
