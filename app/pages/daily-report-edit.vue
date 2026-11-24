@@ -528,6 +528,16 @@ const recalculating = ref(false)
 const recalculateResult = ref<string | null>(null)
 // システム連携 (btnLinkSys): 再集計成功で有効化される
 const linkSysEnabled = ref(false)
+// 評価点再集計が成功したか。システム連携・dtako 取り込み直し・csvdata.zip は再集計の後でないと
+// 押せない (再集計を忘れて古い評価点のまま連携/取り込み/ダウンロードしないように)。
+// モーダルを開き直す・給油行を追加/保存/削除すると戻る (編集後は集計し直しが要る)。
+const expenseRecalculated = ref(false)
+/** 給油行を書き換えた後: 前の再集計は古いので、再集計が要る状態に戻す */
+function invalidateExpenseRecalc() {
+  expenseRecalculated.value = false
+  linkSysEnabled.value = false
+  recalculateResult.value = null
+}
 const linking = ref(false)
 const linkResult = ref<string | null>(null)
 // この運行の csvdata.zip ダウンロード (モーダル内、単一運行のみ)
@@ -604,6 +614,7 @@ async function openExpenseModal(row: DailyReportRow) {
   fuelPickOpen.value = false
   fuelPickItems.value = []
   fuelPickError.value = null
+  expenseRecalculated.value = false
   linkSysEnabled.value = false
   linkResult.value = null
   reimportResult.value = null
@@ -650,14 +661,14 @@ function closeExpenseModal() {
 }
 
 // 新規給油行 (テーブル最下段の入力行、theearth の最下段テンプレート行と同じ操作感)。
-// 給油 0 件の運行でも追加できる。
-const newFuelRow = reactive({ supplyCategory: '', supplyStation: '', supplyType: '', dateTime: '', quantity: '' })
+// 給油 0 件の運行でも追加できる。分類/区分/種別 CD は 1/1/1 (主燃料・自社・軽油) を既定で入れておく
+// (ほとんどの給油がこれ。違うときだけ書き換える)。
+const NEW_FUEL_ROW_DEFAULT_CD = { supplyCategory: '1', supplyStation: '1', supplyType: '1' } as const
+const newFuelRow = reactive({ ...NEW_FUEL_ROW_DEFAULT_CD, dateTime: '', quantity: '' })
 const addingFuelRow = ref(false)
 
 function resetNewFuelRow() {
-  newFuelRow.supplyCategory = ''
-  newFuelRow.supplyStation = ''
-  newFuelRow.supplyType = ''
+  Object.assign(newFuelRow, NEW_FUEL_ROW_DEFAULT_CD)
   newFuelRow.dateTime = ''
   newFuelRow.quantity = ''
 }
@@ -736,6 +747,7 @@ async function addNewFuelRow() {
     if (res.masters && Object.keys(res.masters.supplyCategory).length > 0) expenseMasters.value = res.masters
     syncFuelEditForm()
     resetNewFuelRow()
+    invalidateExpenseRecalc()
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -772,6 +784,7 @@ async function saveFuelRow(ctrlIndex: number) {
     if (isStaleOperationResponse(target, selectedRow.value)) return
     fuelRows.value = res.fuelRows
     syncFuelEditForm()
+    invalidateExpenseRecalc()
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -807,6 +820,7 @@ async function deleteFuelRow(ctrlIndex: number) {
     if (isStaleOperationResponse(target, selectedRow.value)) return
     fuelRows.value = res.fuelRows
     syncFuelEditForm()
+    invalidateExpenseRecalc()
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -837,6 +851,7 @@ async function recalculateExpense() {
     })
     if (isStaleOperationResponse(target, selectedRow.value)) return
     linkSysEnabled.value = res.linkSysEnabled
+    expenseRecalculated.value = true
     recalculateResult.value = res.linkSysEnabled
       ? '評価点再集計が完了しました (システム連動開始が有効になりました)'
       : '評価点再集計が完了しました'
@@ -1936,6 +1951,10 @@ onMounted(() => {
                 :loading="fuelPickLoading"
                 @click="loadFuelPick"
               />
+              <!-- 始業は theearth の表示のまま (MM/DD HH:mm)、終業は年補正済み (YYYY/MM/DD HH:mm) なので年を落としてそろえる -->
+              <span class="ml-3 text-xs text-gray-500 dark:text-gray-400">
+                始業 {{ selectedRow?.workStartDateTime ?? '-' }} / 終業 {{ selectedRow?.workEndDateTime.replace(/^\d{4}\//, '') || '-' }}
+              </span>
               <div v-if="fuelPickOpen && !fuelPickLoading" class="text-sm">
                 <div v-if="fuelPickError" class="text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
                   {{ fuelPickError }}
@@ -1984,7 +2003,7 @@ onMounted(() => {
                   label="システム連携"
                   color="error"
                   variant="outline"
-                  :disabled="!linkSysEnabled"
+                  :disabled="!expenseRecalculated || !linkSysEnabled"
                   :loading="linking"
                   title="評価点再集計の成功後に有効化されます (theearth へデータ連動)"
                   @click="startSystemLink"
@@ -1994,8 +2013,8 @@ onMounted(() => {
                   label="dtako に取り込み直す"
                   variant="outline"
                   :loading="reimporting"
-                  :disabled="reimporting"
-                  title="この運行を theearth から dtako (社内) に取り込み直す (インタンク画面の D数量が入れ替わる)"
+                  :disabled="reimporting || !expenseRecalculated"
+                  :title="expenseRecalculated ? 'この運行を theearth から dtako (社内) に取り込み直す (インタンク画面の D数量が入れ替わる)' : '評価点再集計の成功後に押せます'"
                   @click="reimportToDtako"
                 />
                 <UButton
@@ -2003,7 +2022,8 @@ onMounted(() => {
                   label="この運行の csvdata.zip"
                   variant="outline"
                   :loading="opeZipLoading"
-                  title="この運行 1 件だけの編集後 csvdata.zip をダウンロード"
+                  :disabled="!expenseRecalculated"
+                  :title="expenseRecalculated ? 'この運行 1 件だけの編集後 csvdata.zip をダウンロード' : '評価点再集計の成功後に押せます'"
                   @click="downloadOperationZip"
                 />
               </div>
