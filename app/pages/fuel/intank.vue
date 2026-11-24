@@ -163,14 +163,15 @@ async function reloadRowsAfterWrite() {
 
 /**
  * 「再読み込み」: 選んでいる start のまま、表と start・車両・カードの一覧を読み直す
- * (USB アップローダーが取り込んだ新しい start・未登録カードもここで出る)
+ * (USB アップローダーが取り込んだ新しい start・未登録カードもここで出る)。誤差一覧も作り直す
+ * (dtako 取り込みの後に押して D数量 を拾うため。start の一覧を読んでから作る)
  */
 const refreshing = ref(false)
 async function refresh() {
   refreshing.value = true
   rowsCache.clear()
   try {
-    await Promise.all([loadMasters(), loadRows(true)])
+    await Promise.all([loadMasters().then(autoBuildDiffList), loadRows(true)])
   }
   finally {
     refreshing.value = false
@@ -533,9 +534,16 @@ function reloadStartAfterLink(start: FuelStart) {
   })()
 }
 
-async function buildDiffList() {
-  // 「作り直す」(2 回目以降) は覚えた表を使わず読み直す (再取り込み・紐づけなど裏で変わった分を拾う)
-  const force = diffList.value !== null
+/**
+ * 開いたとき・「再読み込み」で誤差一覧を作る。作っている最中は重ねない (途中の結果が混ざる)。
+ * どちらも覚えた表は空なので読み直しを強いない (上の表と同じ start の読み込みを 1 本にまとめる)
+ */
+function autoBuildDiffList() {
+  if (starts.value.length > 0 && !diffListLoading.value) void buildDiffList(false)
+}
+
+/** `force`: 覚えた表を使わず読み直す。既定は「作り直す」(2 回目以降) のとき (再取り込み・紐づけなど裏で変わった分を拾う) */
+async function buildDiffList(force = diffList.value !== null) {
   const targets = starts.value.slice(0, DIFF_LIST_STARTS)
   diffListLoading.value = true
   diffListDone.value = 0
@@ -642,7 +650,7 @@ async function loadLocation() {
 onMounted(async () => {
   await loadMasters()
   // 誤差一覧は開いたら自動で作る (ユーザーの依頼)。上の表の読み込みと並べて走らせる (rowsCache が同じ start の読み込みをまとめる)
-  if (starts.value.length > 0) void buildDiffList()
+  autoBuildDiffList()
   if (selected.value !== LATEST) return
   const latest = starts.value[0]?.datetime
   if (latest) selected.value = latest
@@ -748,7 +756,7 @@ onMounted(async () => {
         <UButton
           size="sm" variant="outline" icon="i-lucide-list-checks"
           :label="diffList ? '作り直す' : '一覧を作る'"
-          :loading="diffListLoading" :disabled="diffListLoading || starts.length === 0" @click="buildDiffList"
+          :loading="diffListLoading" :disabled="diffListLoading || starts.length === 0" @click="buildDiffList()"
         />
         <span v-if="diffList" class="text-sm text-gray-600 dark:text-gray-400">
           <template v-if="diffListLoading">{{ diffListDone }} / {{ diffListTargets }} start を読みました (読めた分から出します) — </template>
