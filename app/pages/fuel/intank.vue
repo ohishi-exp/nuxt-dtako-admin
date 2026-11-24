@@ -396,7 +396,8 @@ const diffListFailed = ref<string[]>([])
 
 /**
  * 新しい順に 30 start を読み (1 件 6〜9 秒かかるので DIFF_LIST_CONCURRENCY 本ずつ)、誤差のある行を集める。
- * 表は rowsCache に覚えるので、一覧から start を開くときは読み直さない。並びは start の新しい順・start 内は応答の順
+ * 表は rowsCache に覚えるので、一覧から start を開くときは読み直さない。並びは start の新しい順・start 内は応答の順。
+ * 読み終えた start から順に表へ足す (全部を待たない)
  */
 async function buildDiffList() {
   const targets = starts.value.slice(0, DIFF_LIST_STARTS)
@@ -404,6 +405,7 @@ async function buildDiffList() {
   diffListDone.value = 0
   diffListTargets.value = targets.length
   diffListFailed.value = []
+  diffList.value = []
   const found = new Map<string, FuelIntankRow[]>()
   const queue = [...targets]
   const worker = async () => {
@@ -411,6 +413,7 @@ async function buildDiffList() {
       try {
         const res = await rowsCache.get(s.datetime)
         found.set(s.datetime, res.rows.filter(r => isOverTolerance(r, DIFF_TOLERANCE)))
+        diffList.value = targets.flatMap(start => (found.get(start.datetime) ?? []).map(row => ({ start, row })))
       }
       catch {
         diffListFailed.value.push(startLabel(s))
@@ -422,7 +425,6 @@ async function buildDiffList() {
   }
   try {
     await Promise.all(Array.from({ length: DIFF_LIST_CONCURRENCY }, worker))
-    diffList.value = targets.flatMap(start => (found.get(start.datetime) ?? []).map(row => ({ start, row })))
   }
   finally {
     diffListLoading.value = false
@@ -608,8 +610,8 @@ onMounted(async () => {
           :label="diffList ? '作り直す' : '一覧を作る'"
           :loading="diffListLoading" :disabled="diffListLoading || starts.length === 0" @click="buildDiffList"
         />
-        <span v-if="diffListLoading" class="text-sm text-gray-500">{{ diffListDone }} / {{ diffListTargets }} start を読みました (1 件 6〜9 秒)</span>
-        <span v-else-if="diffList" class="text-sm text-gray-600 dark:text-gray-400">
+        <span v-if="diffList" class="text-sm text-gray-600 dark:text-gray-400">
+          <template v-if="diffListLoading">{{ diffListDone }} / {{ diffListTargets }} start を読みました (読めた分から出します) — </template>
           差異 ±{{ DIFF_TOLERANCE }} を超える行と集計なし: {{ diffList.length }} 行
         </span>
       </div>
@@ -618,7 +620,7 @@ onMounted(async () => {
         :title="`${diffListFailed.length} 件の start を読めませんでした (一覧に入っていません)`"
         :description="`${diffListFailed.join(' / ')} — 「作り直す」を押してください`"
       />
-      <div v-if="diffList && diffList.length > 0 && !diffListLoading" class="overflow-x-auto mt-1">
+      <div v-if="diffList && diffList.length > 0" class="overflow-x-auto mt-1">
         <table class="fuel-table">
           <thead>
             <tr><th>start</th><th>D番号</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th /></tr>
