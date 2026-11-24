@@ -487,6 +487,8 @@ function reloadStartAfterLink(start: FuelStart) {
 }
 
 async function buildDiffList() {
+  // 「作り直す」(2 回目以降) は覚えた表を使わず読み直す (再取り込み・紐づけなど裏で変わった分を拾う)
+  const force = diffList.value !== null
   const targets = starts.value.slice(0, DIFF_LIST_STARTS)
   diffListLoading.value = true
   diffListDone.value = 0
@@ -499,7 +501,7 @@ async function buildDiffList() {
   const worker = async () => {
     for (let s = queue.shift(); s !== undefined; s = queue.shift()) {
       try {
-        setDiffRows(s, (await rowsCache.get(s.datetime)).rows)
+        setDiffRows(s, (await rowsCache.get(s.datetime, force)).rows)
       }
       catch {
         diffListFailed.value.push(startLabel(s))
