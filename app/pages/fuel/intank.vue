@@ -384,6 +384,8 @@ async function recheck(r: FuelIntankRow) {
 
 const DIFF_LIST_STARTS = 30
 const DIFF_TOLERANCE = 0.05
+/** 一覧を作るときの同時読み込み数 (2 本だと 30 start で約 2 分かかるので 6 本にして 1 分弱に) */
+const DIFF_LIST_CONCURRENCY = 6
 interface DiffListEntry { start: FuelStart, row: FuelIntankRow }
 const diffList = ref<DiffListEntry[] | null>(null)
 const diffListLoading = ref(false)
@@ -393,7 +395,7 @@ const diffListTargets = ref(0)
 const diffListFailed = ref<string[]>([])
 
 /**
- * 新しい順に 30 start を読み (1 件 6〜9 秒かかるので PREFETCH_CONCURRENCY 本ずつ)、誤差のある行を集める。
+ * 新しい順に 30 start を読み (1 件 6〜9 秒かかるので DIFF_LIST_CONCURRENCY 本ずつ)、誤差のある行を集める。
  * 表は rowsCache に覚えるので、一覧から start を開くときは読み直さない。並びは start の新しい順・start 内は応答の順
  */
 async function buildDiffList() {
@@ -419,7 +421,7 @@ async function buildDiffList() {
     }
   }
   try {
-    await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker))
+    await Promise.all(Array.from({ length: DIFF_LIST_CONCURRENCY }, worker))
     diffList.value = targets.flatMap(start => (found.get(start.datetime) ?? []).map(row => ({ start, row })))
   }
   finally {
