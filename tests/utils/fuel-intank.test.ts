@@ -8,6 +8,7 @@ import {
   dtakoRowOptions,
   quantityDiff,
   isDiffHighlighted,
+  isOverTolerance,
   dailyReportEditQuery,
   normalizeVehicleCd,
   dvrMapQuery,
@@ -156,6 +157,19 @@ describe('quantityDiff / isDiffHighlighted', () => {
     expect(isDiffHighlighted(row({ qt: 0, dtako_fuel_sum: null }))).toBe(true)
     expect(isDiffHighlighted(row({ qt: null, dtako_fuel_sum: null }))).toBe(true)
     expect(isDiffHighlighted(row())).toBe(true)
+  })
+})
+
+describe('isOverTolerance', () => {
+  it('差異の絶対値が許容を超えれば載せ、許容ちょうど以下は載せない (正負とも)', () => {
+    expect(isOverTolerance(row({ qt: 10.05, dtako_fuel_sum: 10 }), 0.05)).toBe(false)
+    expect(isOverTolerance(row({ qt: 9.95, dtako_fuel_sum: 10 }), 0.05)).toBe(false)
+    expect(isOverTolerance(row({ qt: 10, dtako_fuel_sum: 10 }), 0.05)).toBe(false)
+    expect(isOverTolerance(row({ qt: 10.06, dtako_fuel_sum: 10 }), 0.05)).toBe(true)
+    expect(isOverTolerance(row({ qt: 9.94, dtako_fuel_sum: 10 }), 0.05)).toBe(true)
+  })
+  it('集計なしは常に載せる', () => {
+    expect(isOverTolerance(row({ qt: 0, dtako_fuel_sum: null }), 0.05)).toBe(true)
   })
 })
 

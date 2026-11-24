@@ -11,7 +11,7 @@ import {
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
-  isDiffHighlighted, dailyReportEditQuery, dvrMapQuery, vehicleStateMarkerIndex, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  isDiffHighlighted, isOverTolerance, dailyReportEditQuery, dvrMapQuery, vehicleStateMarkerIndex, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
   createRowsCache,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
@@ -380,6 +380,55 @@ async function recheck(r: FuelIntankRow) {
   }
 }
 
+// --- 直近 30 start の誤差一覧 (差異の絶対値が 0.05 を超える行と集計なし。0.05 までは無視) ---
+
+const DIFF_LIST_STARTS = 30
+const DIFF_TOLERANCE = 0.05
+/** 一覧を作るときの同時読み込み数 (2 本だと 30 start で約 2 分かかるので 6 本にして 1 分弱に) */
+const DIFF_LIST_CONCURRENCY = 6
+interface DiffListEntry { start: FuelStart, row: FuelIntankRow }
+const diffList = ref<DiffListEntry[] | null>(null)
+const diffListLoading = ref(false)
+/** 読み終えた start の数 (失敗も数える) と、読めなかった start の表示 */
+const diffListDone = ref(0)
+const diffListTargets = ref(0)
+const diffListFailed = ref<string[]>([])
+
+/**
+ * 新しい順に 30 start を読み (1 件 6〜9 秒かかるので DIFF_LIST_CONCURRENCY 本ずつ)、誤差のある行を集める。
+ * 表は rowsCache に覚えるので、一覧から start を開くときは読み直さない。並びは start の新しい順・start 内は応答の順
+ */
+async function buildDiffList() {
+  const targets = starts.value.slice(0, DIFF_LIST_STARTS)
+  diffListLoading.value = true
+  diffListDone.value = 0
+  diffListTargets.value = targets.length
+  diffListFailed.value = []
+  const found = new Map<string, FuelIntankRow[]>()
+  const queue = [...targets]
+  const worker = async () => {
+    for (let s = queue.shift(); s !== undefined; s = queue.shift()) {
+      try {
+        const res = await rowsCache.get(s.datetime)
+        found.set(s.datetime, res.rows.filter(r => isOverTolerance(r, DIFF_TOLERANCE)))
+      }
+      catch {
+        diffListFailed.value.push(startLabel(s))
+      }
+      finally {
+        diffListDone.value++
+      }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: DIFF_LIST_CONCURRENCY }, worker))
+    diffList.value = targets.flatMap(start => (found.get(start.datetime) ?? []).map(row => ({ start, row })))
+  }
+  finally {
+    diffListLoading.value = false
+  }
+}
+
 function printPage() {
   window.print()
 }
@@ -548,6 +597,53 @@ onMounted(async () => {
         </tbody>
       </table>
       <p v-if="registerError" class="text-sm text-red-600 mt-1">{{ registerError }}</p>
+    </div>
+
+    <!-- 直近 30 start の誤差一覧 -->
+    <div class="fuel-no-print">
+      <div class="flex flex-wrap items-center gap-2">
+        <h3 class="font-medium">直近 {{ DIFF_LIST_STARTS }} start の誤差一覧</h3>
+        <UButton
+          size="sm" variant="outline" icon="i-lucide-list-checks"
+          :label="diffList ? '作り直す' : '一覧を作る'"
+          :loading="diffListLoading" :disabled="diffListLoading || starts.length === 0" @click="buildDiffList"
+        />
+        <span v-if="diffListLoading" class="text-sm text-gray-500">{{ diffListDone }} / {{ diffListTargets }} start を読みました (1 件 6〜9 秒)</span>
+        <span v-else-if="diffList" class="text-sm text-gray-600 dark:text-gray-400">
+          差異 ±{{ DIFF_TOLERANCE }} を超える行と集計なし: {{ diffList.length }} 行
+        </span>
+      </div>
+      <UAlert
+        v-if="!diffListLoading && diffListFailed.length > 0" color="error" variant="subtle" icon="i-lucide-alert-triangle" class="my-2"
+        :title="`${diffListFailed.length} 件の start を読めませんでした (一覧に入っていません)`"
+        :description="`${diffListFailed.join(' / ')} — 「作り直す」を押してください`"
+      />
+      <div v-if="diffList && diffList.length > 0 && !diffListLoading" class="overflow-x-auto mt-1">
+        <table class="fuel-table">
+          <thead>
+            <tr><th>start</th><th>D番号</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th /></tr>
+          </thead>
+          <tbody>
+            <tr v-for="e in diffList" :key="`${e.start.datetime}|${rowKey(e.row)}`">
+              <td>{{ startLabel(e.start) }}</td>
+              <td class="text-right">{{ e.row.slip_num }}</td>
+              <td>{{ carName(e.row) }}</td>
+              <td>{{ formatShortDatetime(e.row.datetime) }}</td>
+              <td class="text-right">{{ e.row.qt == null ? '' : formatQuantity(e.row.qt) }}</td>
+              <td class="text-right">{{ e.row.dtako_fuel_sum == null ? '' : formatQuantity(e.row.dtako_fuel_sum) }}</td>
+              <td class="text-right">{{ quantityDiff(e.row) == null ? '集計なし' : formatQuantity(quantityDiff(e.row)!) }}</td>
+              <td>{{ e.row.dtako_row?.driver_name ?? '' }}</td>
+              <td class="whitespace-nowrap">
+                <UButton size="xs" variant="outline" label="この start を開く" :disabled="selected === e.start.datetime" @click="selectStart(e.start.datetime)" />
+                <UButton
+                  size="xs" variant="outline" label="日報を直す" class="ml-1" icon="i-lucide-external-link" target="_blank"
+                  :to="{ path: '/daily-report-edit', query: dailyReportEditQuery(e.row) }"
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <!-- 給油の表 -->
