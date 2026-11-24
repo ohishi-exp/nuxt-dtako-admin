@@ -384,6 +384,8 @@ async function recheck(r: FuelIntankRow) {
 
 const DIFF_LIST_STARTS = 30
 const DIFF_TOLERANCE = 0.05
+/** 誤差一覧に載せないカード (ユーザーの依頼で 100 番を除く) */
+const DIFF_LIST_EXCLUDED_CARDS: ReadonlySet<number> = new Set([100])
 /** 一覧を作るときの同時読み込み数 (2 本だと 30 start で約 2 分かかるので 6 本にして 1 分弱に) */
 const DIFF_LIST_CONCURRENCY = 6
 interface DiffListEntry { start: FuelStart, row: FuelIntankRow }
@@ -393,6 +395,11 @@ const diffListLoading = ref(false)
 const diffListDone = ref(0)
 const diffListTargets = ref(0)
 const diffListFailed = ref<string[]>([])
+/** 車番で絞る (空文字 = すべて)。選択肢は一覧に出ている車番だけ。車番の無い行は「(車番なし)」 */
+const NO_CAR = '(車番なし)'
+const diffCarFilter = ref('')
+const diffCarOptions = computed(() => [...new Set((diffList.value ?? []).map(e => carName(e.row) || NO_CAR))].sort())
+const shownDiffList = computed(() => (diffList.value ?? []).filter(e => !diffCarFilter.value || (carName(e.row) || NO_CAR) === diffCarFilter.value))
 
 /**
  * 新しい順に 30 start を読み (1 件 6〜9 秒かかるので DIFF_LIST_CONCURRENCY 本ずつ)、誤差のある行を集める。
@@ -412,7 +419,7 @@ async function buildDiffList() {
     for (let s = queue.shift(); s !== undefined; s = queue.shift()) {
       try {
         const res = await rowsCache.get(s.datetime)
-        found.set(s.datetime, res.rows.filter(r => isOverTolerance(r, DIFF_TOLERANCE)))
+        found.set(s.datetime, res.rows.filter(r => !DIFF_LIST_EXCLUDED_CARDS.has(r.fuel_card_id) && isOverTolerance(r, DIFF_TOLERANCE)))
         diffList.value = targets.flatMap(start => (found.get(start.datetime) ?? []).map(row => ({ start, row })))
       }
       catch {
@@ -612,24 +619,39 @@ onMounted(async () => {
         />
         <span v-if="diffList" class="text-sm text-gray-600 dark:text-gray-400">
           <template v-if="diffListLoading">{{ diffListDone }} / {{ diffListTargets }} start を読みました (読めた分から出します) — </template>
-          差異 ±{{ DIFF_TOLERANCE }} を超える行と集計なし: {{ diffList.length }} 行
+          差異 ±{{ DIFF_TOLERANCE }} を超える行と集計なし (card {{ [...DIFF_LIST_EXCLUDED_CARDS].join('・') }} を除く): {{ diffList.length }} 行<template v-if="diffCarFilter"> (うち {{ diffCarFilter }} は {{ shownDiffList.length }} 行)</template>
         </span>
+        <!-- ★ USelect にしない (閉じていても全選択肢を描画して重い。上の start 選択と同じ理由)。素の select で足りる -->
+        <select v-if="diffList && diffList.length > 0" v-model="diffCarFilter" class="border rounded px-1 py-0.5 text-sm bg-white dark:bg-gray-900">
+          <option value="">車番: すべて</option>
+          <option v-for="c in diffCarOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
       </div>
       <UAlert
         v-if="!diffListLoading && diffListFailed.length > 0" color="error" variant="subtle" icon="i-lucide-alert-triangle" class="my-2"
         :title="`${diffListFailed.length} 件の start を読めませんでした (一覧に入っていません)`"
         :description="`${diffListFailed.join(' / ')} — 「作り直す」を押してください`"
       />
-      <div v-if="diffList && diffList.length > 0" class="overflow-x-auto mt-1">
+      <div v-if="shownDiffList.length > 0" class="overflow-x-auto mt-1">
         <table class="fuel-table">
           <thead>
-            <tr><th>start</th><th>D番号</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th /></tr>
+            <tr><th>start</th><th>D番号</th><th>card_id</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th /></tr>
           </thead>
           <tbody>
-            <tr v-for="e in diffList" :key="`${e.start.datetime}|${rowKey(e.row)}`">
+            <tr v-for="e in shownDiffList" :key="`${e.start.datetime}|${rowKey(e.row)}`">
               <td>{{ startLabel(e.start) }}</td>
               <td class="text-right">{{ e.row.slip_num }}</td>
-              <td>{{ carName(e.row) }}</td>
+              <td class="text-right">{{ e.row.fuel_card_id }}</td>
+              <td>
+                <!-- 押すとその車番で絞る。絞っているときに押すと解除 -->
+                <button
+                  type="button" class="text-primary underline-offset-2 hover:underline"
+                  :title="diffCarFilter ? '絞り込みを解除' : 'この車番で絞る'"
+                  @click="diffCarFilter = diffCarFilter ? '' : (carName(e.row) || NO_CAR)"
+                >
+                  {{ carName(e.row) || NO_CAR }}
+                </button>
+              </td>
               <td>{{ formatShortDatetime(e.row.datetime) }}</td>
               <td class="text-right">{{ e.row.qt == null ? '' : formatQuantity(e.row.qt) }}</td>
               <td class="text-right">{{ e.row.dtako_fuel_sum == null ? '' : formatQuantity(e.row.dtako_fuel_sum) }}</td>
