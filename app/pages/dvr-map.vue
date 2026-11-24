@@ -8,7 +8,7 @@
  * relay 側で DDMM → 十進度に変換済み。
  */
 import type { DvrMapMarker } from '~/components/DvrMap.vue'
-import { normalizeVehicleCd, vehicleStateMarkerIndex } from '~/utils/fuel-intank'
+import { dvrVehicleFromQuery, dvrVehicleLabel, matchesDvrVehicle, vehicleStateMarkerIndex } from '~/utils/fuel-intank'
 
 
 interface VehicleStatePoint {
@@ -172,20 +172,17 @@ function openTrackForVehicle(v: Pick<VehicleStatePoint, 'vehicleCd'>, day?: stri
   return loadTrack()
 }
 
-// --- URL query で開く (インタンク画面の「位置を見る」`?vehicle=<車輌CD>&at=YYYY-MM-DDTHH:mm`。Refs yhonda-ohishi/nginx#814) ---
+// --- URL query で開く (インタンク画面の「位置を見る」`?vehicle=<車輌CD>&at=YYYY-MM-DDTHH:mm`。車輌CD の無い車は `vehicle_name=<車番>`。Refs yhonda-ohishi/nginx#814) ---
 
 const route = useRoute()
 /** query を処理したか (onMounted と onLogin の両方から呼ぶので 1 回だけにする)。 */
 let routeQueryHandled = false
 
 /** `vehicle` と `at` がそろっていれば、その車輌のその日の動態履歴を読み、`at` に最も近い点を選ぶ。
- * masters の code とは `normalizeVehicleCd` どうしで比べる (先頭ゼロの差を吸収)。 */
-/** `?vehicle=<車輌CD>` だけ (`at` 無し) なら現在地タブでその車を選ぶ (タイムカードの「現在地」。
+ * masters とは `matchesDvrVehicle` で比べる (車輌CD は先頭ゼロの差を吸収、車番は空白を除く)。 */
+/** `?vehicle=<車輌CD>` (か `vehicle_name`) だけ (`at` 無し) なら現在地タブでその車を選ぶ (タイムカードの「現在地」。
  * Refs nginx#814 と同じ口)。全事業所で引かないと他事業所の車が居ないので、保存済みの事業所は復元しない。 */
-const stateVehicleQuery = (() => {
-  const vehicle = typeof route.query.vehicle === 'string' ? route.query.vehicle : ''
-  return route.query.at == null && /^\d{1,8}$/.test(vehicle) ? vehicle : null
-})()
+const stateVehicleQuery = route.query.at == null ? dvrVehicleFromQuery(route.query) : null
 let stateQueryHandled = false
 const stateQueryNotice = ref<string | null>(null)
 
@@ -194,23 +191,22 @@ function selectStateFromRouteQuery() {
   stateQueryHandled = true
   const idx = vehicleStateMarkerIndex(states.value, stateVehicleQuery)
   if (idx == null) {
-    stateQueryNotice.value = `車両 ${stateVehicleQuery} の現在地 (GPS) が見つかりません`
+    stateQueryNotice.value = `車両 ${dvrVehicleLabel(stateVehicleQuery)} の現在地 (GPS) が見つかりません`
     return
   }
   selectedStateIndex.value = idx
 }
 
 async function openFromRouteQuery() {
-  const vehicle = typeof route.query.vehicle === 'string' ? route.query.vehicle : ''
+  const q = dvrVehicleFromQuery(route.query)
   const at = typeof route.query.at === 'string' ? route.query.at : ''
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(at)
-  if (routeQueryHandled || !masters.value || !/^\d{1,8}$/.test(vehicle) || !m) return
+  if (routeQueryHandled || !masters.value || !q || !m) return
   routeQueryHandled = true
-  const want = normalizeVehicleCd(vehicle)
-  const found = masters.value.vehicles.find(v => normalizeVehicleCd(v.code) === want)
+  const found = masters.value.vehicles.find(v => matchesDvrVehicle(v.code, v.name, q))
   activeTab.value = 'track'
   if (!found) {
-    trackError.value = `車両 ${vehicle} が見つかりません`
+    trackError.value = `車両 ${dvrVehicleLabel(q)} が見つかりません`
     return
   }
   await openTrackForVehicle({ vehicleCd: found.code }, at.slice(0, 10))

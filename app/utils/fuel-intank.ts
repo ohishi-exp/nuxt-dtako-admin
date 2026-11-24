@@ -169,29 +169,66 @@ export function normalizeVehicleCd(v: string | null | undefined): string | null 
 }
 
 /**
- * `/dvr-map` の現在地一覧から、`vehicle` (車輌CD) の車で GPS が取れているものを探し、
- * 地図マーカー上の index (= GPS のある行だけ数えた順番) を返す。車輌CD の先頭ゼロの差は
- * `normalizeVehicleCd` で吸収する。見つからない・GPS が無い・`vehicle` が読めないときは null。
+ * `/dvr-map` で開く車の指定。車輌CD (`vehicle`) があればそれ、無ければ車番 (`vehicle_name`)。
+ * 車輌CD は dtako_cars から引くので、そこに行の無い車 (日報には紐づくのに車輌CD が空) は車番で探す。
+ * theearth の車両名は給油側の車番と同じ形 (`長崎100あ4381`) なので、空白を除いて比べる
+ */
+export type DvrVehicleQuery = { vehicle: string } | { vehicle_name: string }
+
+/** 車番の比較用の形 (空白を全部除く)。空なら null */
+export function compactVehicleName(v: string | null | undefined): string | null {
+  const s = (v ?? '').replace(/\s+/g, '')
+  return s === '' ? null : s
+}
+
+/** theearth の車 (車輌CD と車両名) が指定に当たるか */
+export function matchesDvrVehicle(cd: string | null | undefined, name: string | null | undefined, q: DvrVehicleQuery): boolean {
+  if ('vehicle' in q) {
+    const want = normalizeVehicleCd(q.vehicle)
+    return want !== null && normalizeVehicleCd(cd) === want
+  }
+  const want = compactVehicleName(q.vehicle_name)
+  return want !== null && compactVehicleName(name) === want
+}
+
+/** 画面に出す車の名前 (車輌CD か車番) */
+export function dvrVehicleLabel(q: DvrVehicleQuery): string {
+  return 'vehicle' in q ? q.vehicle : q.vehicle_name
+}
+
+/**
+ * URL の query から車の指定を読む (`vehicle` は数字 1〜8 桁、`vehicle_name` は空でない文字列)。
+ * 両方あれば `vehicle` を採る。読めなければ null
+ */
+export function dvrVehicleFromQuery(query: { vehicle?: unknown, vehicle_name?: unknown }): DvrVehicleQuery | null {
+  if (typeof query.vehicle === 'string' && /^\d{1,8}$/.test(query.vehicle)) return { vehicle: query.vehicle }
+  const name = typeof query.vehicle_name === 'string' ? compactVehicleName(query.vehicle_name) : null
+  return name ? { vehicle_name: name } : null
+}
+
+/**
+ * `/dvr-map` の現在地一覧から、指定の車で GPS が取れているものを探し、
+ * 地図マーカー上の index (= GPS のある行だけ数えた順番) を返す。見つからない・GPS が無いときは null。
  */
 export function vehicleStateMarkerIndex(
-  states: ReadonlyArray<{ vehicleCd: string | null, latitude: number | null, longitude: number | null }>,
-  vehicle: string,
+  states: ReadonlyArray<{ vehicleCd: string | null, vehicleName?: string | null, latitude: number | null, longitude: number | null }>,
+  q: DvrVehicleQuery,
 ): number | null {
-  const want = normalizeVehicleCd(vehicle)
-  if (!want) return null
   const withGps = states.filter(v => v.latitude != null && v.longitude != null)
-  const idx = withGps.findIndex(v => normalizeVehicleCd(v.vehicleCd) === want)
+  const idx = withGps.findIndex(v => matchesDvrVehicle(v.vehicleCd, v.vehicleName, q))
   return idx >= 0 ? idx : null
 }
 
 /**
- * 「位置を見る」で開く `/dvr-map` の query。`vehicle` は車輌CD、`at` は給油日時 (`YYYY-MM-DDTHH:mm`)。
- * 車輌CD が無い・読めない行は null (ボタンを出さない)。`at` の形は dvr-map 側が検査する。
+ * 「位置を見る」で開く `/dvr-map` の query。車の指定 ([`DvrVehicleQuery`]) と `at` (給油日時 `YYYY-MM-DDTHH:mm`)。
+ * 車輌CD も車番も無い行は null (ボタンを出さない)。`at` の形は dvr-map 側が検査する。
  */
-export function dvrMapQuery(row: FuelIntankRow): { vehicle: string, at: string } | null {
+export function dvrMapQuery(row: FuelIntankRow): DvrVehicleQuery & { at: string } | null {
+  const at = row.datetime.slice(0, 16).replace(' ', 'T')
   const vehicle = normalizeVehicleCd(row.car?.vehicle_cd)
-  if (!vehicle) return null
-  return { vehicle, at: row.datetime.slice(0, 16).replace(' ', 'T') }
+  if (vehicle) return { vehicle, at }
+  const name = compactVehicleName(row.car?.name ?? row.dtako_row?.car_name)
+  return name ? { vehicle_name: name, at } : null
 }
 
 /** 数量の合計 (表の最下行。CakePHP の `$sum += $fuelIntank->Qt`)。小数 2 桁に丸める。 */

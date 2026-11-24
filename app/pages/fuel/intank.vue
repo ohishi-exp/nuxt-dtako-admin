@@ -11,7 +11,7 @@ import {
 } from '~/utils/api'
 import {
   startLabel, formatShortDatetime, formatQuantity, dtakoRowOptions, quantityDiff,
-  isDiffHighlighted, isOverTolerance, linkCandidates, dailyReportEditQuery, dvrMapQuery, vehicleStateMarkerIndex, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
+  isDiffHighlighted, isOverTolerance, linkCandidates, dailyReportEditQuery, dvrMapQuery, dvrVehicleLabel, vehicleStateMarkerIndex, totalQuantity, uploadResultText, sha256FromKey, describeCsvError,
   createRowsCache,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
@@ -626,8 +626,8 @@ async function loadLocation() {
     })
     if (locationTarget.value !== r) return
     const withGps = res.vehicles.filter(v => v.latitude != null && v.longitude != null)
-    const idx = vehicleStateMarkerIndex(withGps, q.vehicle)
-    if (idx == null) locationError.value = `車両 ${q.vehicle} の現在地 (GPS) が見つかりません`
+    const idx = vehicleStateMarkerIndex(withGps, q)
+    if (idx == null) locationError.value = `車両 ${dvrVehicleLabel(q)} の現在地 (GPS) が見つかりません`
     else locationPoint.value = withGps[idx]!
   }
   catch (e) {
@@ -959,7 +959,7 @@ onMounted(async () => {
           <div class="flex justify-end gap-2">
             <UButton
               v-if="locationTarget && dvrMapQuery(locationTarget)" variant="outline" icon="i-lucide-external-link"
-              label="位置情報で開く" target="_blank" :to="{ path: '/dvr-map', query: { vehicle: dvrMapQuery(locationTarget)!.vehicle } }"
+              label="位置情報で開く" target="_blank" :to="{ path: '/dvr-map', query: { ...dvrMapQuery(locationTarget)!, at: undefined } }"
             />
             <UButton v-if="locationError" variant="outline" label="もう一度" :loading="locationLoading" @click="loadLocation" />
             <UButton label="閉じる" @click="locationTarget = null" />
