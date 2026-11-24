@@ -409,15 +409,23 @@ const shownDiffList = computed(() => (diffList.value ?? []).filter(e => !diffCar
 /** 一覧の対象 start と、start ごとの誤差行 (紐づけた後に 1 start だけ差し替えるため関数の外に持つ) */
 let diffTargets: FuelStart[] = []
 const diffFound = new Map<string, FuelIntankRow[]>()
+/**
+ * start の突き合わせ (上流の BY_START_SQL) は伝票番号 (slip_num_parent) だけで集めるので、番号が一周すると
+ * 去年の同じ番号の行も入ってくる。一覧には start の日時より前の行を載せない (日時は `YYYY-MM-DD HH:MM:SS` で文字列比較できる)
+ */
 function setDiffRows(start: FuelStart, rows: FuelIntankRow[]) {
-  diffFound.set(start.datetime, rows.filter(r => !DIFF_LIST_EXCLUDED_CARDS.has(r.fuel_card_id) && isOverTolerance(r, DIFF_TOLERANCE)))
+  diffFound.set(start.datetime, rows.filter(r => r.datetime >= start.datetime
+    && !DIFF_LIST_EXCLUDED_CARDS.has(r.fuel_card_id) && isOverTolerance(r, DIFF_TOLERANCE)))
   diffList.value = diffTargets.flatMap(t => (diffFound.get(t.datetime) ?? []).map(row => ({ start: t, row })))
 }
 
-/** 紐づけ候補の選択 (行ごと。既定は先頭の候補) と、紐づけ中の行・失敗 */
+/**
+ * 紐づけ候補の選択 (行ごと。既定は先頭の候補)・行ごとの状態・失敗。押した行だけ止め、他の行は続けて押せる
+ * (`saving` = 書き込み中、`linked` = 書けた・その start の読み直し待ち)
+ */
 const linkChoice = ref<Record<string, string>>({})
-const linking = ref<string | null>(null)
-const linkError = ref<string | null>(null)
+const linkState = ref<Record<string, 'saving' | 'linked'>>({})
+const linkErrors = ref<string[]>([])
 function diffEntryKey(e: DiffListEntry): string {
   return `${e.start.datetime}|${rowKey(e.row)}`
 }
@@ -431,21 +439,51 @@ function chosenLink(e: DiffListEntry): string {
  */
 async function linkFromDiffList(e: DiffListEntry) {
   const target = chosenLink(e)
-  if (!target) return
   const key = diffEntryKey(e)
-  linking.value = key
-  linkError.value = null
+  if (!target || linkState.value[key]) return
+  linkState.value[key] = 'saving'
   try {
     await updateFuelIntankDtakoRow(e.row.datetime, e.row.fuel_card_id, target)
-    setDiffRows(e.start, (await rowsCache.get(e.start.datetime, true)).rows)
-    if (selected.value === e.start.datetime) await loadRows(true)
+    linkState.value[key] = 'linked'
+    reloadStartAfterLink(e.start)
   }
   catch (err) {
-    linkError.value = `${formatShortDatetime(e.row.datetime)} / card ${e.row.fuel_card_id}: ${describeCaughtError(err, 'もう一度「紐づけ」を押してください')}`
+    delete linkState.value[key]
+    linkErrors.value.push(`${formatShortDatetime(e.row.datetime)} / card ${e.row.fuel_card_id}: ${describeCaughtError(err, 'もう一度「紐づけ」を押してください')}`)
   }
-  finally {
-    linking.value = null
+}
+
+/**
+ * 紐づけの後の読み直し (1 start 6〜9 秒) は待たずに裏で回す。同じ start の読み直し中にまた紐づけたら、
+ * 終わってからもう 1 回だけ読む (何度押しても読み直しは重ならない)。読み終えたらその start の行の状態を消す
+ */
+const reloadingStarts = new Set<string>()
+const reloadAgain = new Set<string>()
+function reloadStartAfterLink(start: FuelStart) {
+  const k = start.datetime
+  if (reloadingStarts.has(k)) {
+    reloadAgain.add(k)
+    return
   }
+  reloadingStarts.add(k)
+  void (async () => {
+    try {
+      do {
+        reloadAgain.delete(k)
+        setDiffRows(start, (await rowsCache.get(k, true)).rows)
+      } while (reloadAgain.has(k))
+      for (const key of Object.keys(linkState.value)) {
+        if (key.startsWith(`${k}|`) && linkState.value[key] === 'linked') delete linkState.value[key]
+      }
+      if (selected.value === k) await loadRows(true)
+    }
+    catch (err) {
+      linkErrors.value.push(`${startLabel(start)} を読み直せませんでした: ${describeCaughtError(err, '「作り直す」を押してください')}`)
+    }
+    finally {
+      reloadingStarts.delete(k)
+    }
+  })()
 }
 
 async function buildDiffList() {
@@ -673,7 +711,11 @@ onMounted(async () => {
         :title="`${diffListFailed.length} 件の start を読めませんでした (一覧に入っていません)`"
         :description="`${diffListFailed.join(' / ')} — 「作り直す」を押してください`"
       />
-      <UAlert v-if="linkError" color="error" variant="subtle" icon="i-lucide-alert-triangle" :description="linkError" class="my-2" />
+      <UAlert
+        v-if="linkErrors.length > 0" color="error" variant="subtle" icon="i-lucide-alert-triangle" class="my-2"
+        :description="linkErrors.join(' / ')"
+        :close="true" @update:open="linkErrors = []"
+      />
       <div v-if="shownDiffList.length > 0" class="overflow-x-auto mt-1">
         <table class="fuel-table">
           <thead>
@@ -708,7 +750,8 @@ onMounted(async () => {
                     <option v-for="o in linkCandidates(e.row)" :key="o.value" :value="o.value">{{ o.label }}</option>
                   </select>
                   <UButton
-                    size="xs" label="紐づけ" :loading="linking === diffEntryKey(e)" :disabled="linking !== null"
+                    size="xs" :label="linkState[diffEntryKey(e)] === 'linked' ? '紐づけ済み (読み直し中)' : '紐づけ'"
+                    :loading="linkState[diffEntryKey(e)] === 'saving'" :disabled="!!linkState[diffEntryKey(e)]"
                     @click="linkFromDiffList(e)"
                   />
                 </div>
