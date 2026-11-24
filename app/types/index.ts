@@ -463,6 +463,8 @@ export interface FuelIntankRow {
   dtako_row?: FuelDtakoRow | null
   /** その運行の当日の dtako 給油量の合計 (集計できなければ null) */
   dtako_fuel_sum?: number | null
+  /** 運行に紐づいていない行だけ: 同じ車両の運行のうち給油の後に帰庫したものの数 (0 = dtako のデータが未着)。rust-fuel-worker が足すまでは無い */
+  dtako_rows_after?: number | null
   /** `{dtako_row_id: ["yyyyMMddHHmm_1,234.50", …]}` (dtako_row_id が NULL の給油は `""` のキー) */
   dtako_fuel_array?: Record<string, string[]> | null
   /** `{dtako_row_id: {departed_at, returned_at}}` (運行の出庫・帰庫日時。rust-fuel-worker が足すまでは無い) */

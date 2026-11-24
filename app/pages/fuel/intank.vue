@@ -641,6 +641,8 @@ async function loadLocation() {
  */
 onMounted(async () => {
   await loadMasters()
+  // 誤差一覧は開いたら自動で作る (ユーザーの依頼)。上の表の読み込みと並べて走らせる (rowsCache が同じ start の読み込みをまとめる)
+  if (starts.value.length > 0) void buildDiffList()
   if (selected.value !== LATEST) return
   const latest = starts.value[0]?.datetime
   if (latest) selected.value = latest
@@ -710,8 +712,9 @@ onMounted(async () => {
     <UAlert v-if="masterError" class="fuel-no-print" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="start・車両・カードの一覧を読めませんでした" :description="masterError" />
 
     <!-- 未登録カード -->
-    <div v-if="unregistered.length > 0" class="fuel-no-print">
-      <h3 class="font-medium mb-1">未登録のカード ({{ unregistered.length }} 件)</h3>
+    <!-- 普段は閉じておく (ユーザーの依頼)。開くと今までどおり車両を選んで登録できる -->
+    <details v-if="unregistered.length > 0" class="fuel-no-print">
+      <summary class="font-medium mb-1 cursor-pointer">未登録のカード ({{ unregistered.length }} 件)</summary>
       <table class="fuel-table">
         <thead>
           <tr><th>card_id</th><th>車両</th><th /></tr>
@@ -736,7 +739,7 @@ onMounted(async () => {
         </tbody>
       </table>
       <p v-if="registerError" class="text-sm text-red-600 mt-1">{{ registerError }}</p>
-    </div>
+    </details>
 
     <!-- 直近 30 start の誤差一覧 -->
     <div class="fuel-no-print">
@@ -774,7 +777,7 @@ onMounted(async () => {
       <div v-if="shownDiffList.length > 0" class="overflow-x-auto mt-1">
         <table class="fuel-table">
           <thead>
-            <tr><th>start</th><th>D番号</th><th>card_id</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th>紐づけ候補</th><th /></tr>
+            <tr><th>start</th><th>D番号</th><th>card_id</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th title="同じ車両の運行のうち給油の後に帰庫したもの (運転手は見ない)。0 件なら dtako のデータがまだ届いていない">給油後の運行終了</th><th>紐づけ候補</th><th /></tr>
           </thead>
           <tbody>
             <tr v-for="e in shownDiffList" :key="diffEntryKey(e)" :class="{ 'opacity-50': isIgnored(e.row) }">
@@ -796,6 +799,11 @@ onMounted(async () => {
               <td class="text-right">{{ e.row.dtako_fuel_sum == null ? '' : formatQuantity(e.row.dtako_fuel_sum) }}</td>
               <td class="text-right">{{ quantityDiff(e.row) == null ? '集計なし' : formatQuantity(quantityDiff(e.row)!) }}</td>
               <td>{{ e.row.dtako_row?.driver_name ?? '' }}</td>
+              <td class="text-right">
+                <template v-if="e.row.dtako_rows_after == null" />
+                <span v-else-if="e.row.dtako_rows_after === 0" class="text-gray-500">0 件 (未着)</span>
+                <span v-else>{{ e.row.dtako_rows_after }} 件</span>
+              </td>
               <td>
                 <div v-if="linkCandidates(e.row).length > 0" class="flex items-center gap-1">
                   <select
