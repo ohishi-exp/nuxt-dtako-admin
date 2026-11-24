@@ -110,6 +110,15 @@ export function isDiffHighlighted(row: FuelIntankRow): boolean {
   return d === null || d !== 0
 }
 
+/**
+ * 誤差一覧に載せる行か。差異の絶対値が `tolerance` を超える行と、dtako の合計が無い (集計なし) 行。
+ * `tolerance` ちょうどは載せない (ユーザーの依頼「誤差 0.05 までは無視」)。
+ */
+export function isOverTolerance(row: FuelIntankRow, tolerance: number): boolean {
+  const d = quantityDiff(row)
+  return d === null || Math.abs(d) > tolerance
+}
+
 /** `YYYY-MM-DD…` の日付に日数を足して `YYYY-MM-DD` にする (暦の計算だけなので UTC で数える)。 */
 function shiftDate(ymd: string, days: number): string {
   const [y, m, d] = ymd.slice(0, 10).split('-').map(Number)
