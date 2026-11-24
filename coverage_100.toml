@@ -1377,6 +1377,11 @@ branches = true
 path = "app/utils/fuel-cards.ts"
 branches = true
 
+# 誤差一覧の「無視」(D1 fuel_intank_ignores) の本文の検査と鍵。
+[[files]]
+path = "app/utils/fuel-intank-ignore.ts"
+branches = true
+
 # 日報編集を運行NO で名指しして開く (旅費編集 CakePHP から、Refs yhonda-ohishi/nginx#814)。
 [[files]]
 path = "app/utils/daily-report-target.ts"

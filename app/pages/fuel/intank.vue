@@ -15,6 +15,7 @@ import {
   createRowsCache,
 } from '~/utils/fuel-intank'
 import { carOptions } from '~/utils/fuel-cards'
+import { ignoreKey } from '~/utils/fuel-intank-ignore'
 import { canRecheck, describeManualError } from '~/utils/fuel-manual'
 import { describeCaughtError, describeListFailure } from '~/utils/api-error'
 import { ONPREM_DTAKO_COMP_ID } from '~/utils/dtako-comps'
@@ -399,7 +400,53 @@ const diffListFailed = ref<string[]>([])
 const NO_CAR = '(車番なし)'
 const diffCarFilter = ref('')
 const diffCarOptions = computed(() => [...new Set((diffList.value ?? []).map(e => carName(e.row) || NO_CAR))].sort())
-const shownDiffList = computed(() => (diffList.value ?? []).filter(e => !diffCarFilter.value || (carName(e.row) || NO_CAR) === diffCarFilter.value))
+/**
+ * 「無視」にした給油行 (D1 `fuel_intank_ignores` を全員で共有。鍵は `ignoreKey`)。一覧からは消し、
+ * 「無視した行も表示」のときだけ薄く出して戻せるようにする
+ */
+const ignoredKeys = ref<Set<string>>(new Set())
+const showIgnored = ref(false)
+const ignoreError = ref<string | null>(null)
+const ignoringKey = ref<string | null>(null)
+function isIgnored(r: FuelIntankRow): boolean {
+  return ignoredKeys.value.has(ignoreKey(r))
+}
+const ignoredCount = computed(() => (diffList.value ?? []).filter(e => isIgnored(e.row)).length)
+const shownDiffList = computed(() => (diffList.value ?? []).filter(e =>
+  (!diffCarFilter.value || (carName(e.row) || NO_CAR) === diffCarFilter.value)
+  && (showIgnored.value || !isIgnored(e.row))))
+
+async function loadIgnores() {
+  try {
+    const res = await $fetch<{ ignores: { datetime: string, fuel_card_id: number }[] }>('/api/fuel/intank-ignores')
+    ignoredKeys.value = new Set(res.ignores.map(ignoreKey))
+  }
+  catch (err) {
+    ignoreError.value = `無視の一覧を読めませんでした (無視した行も出ています): ${describeCaughtError(err, '「作り直す」を押してください')}`
+  }
+}
+
+/** 1 行だけ無視にする / 戻す。画面は先に変え、失敗したら元に戻す */
+async function setIgnored(r: FuelIntankRow, ignored: boolean) {
+  const key = ignoreKey(r)
+  ignoringKey.value = key
+  ignoreError.value = null
+  const next = new Set(ignoredKeys.value)
+  if (ignored) next.add(key)
+  else next.delete(key)
+  const before = ignoredKeys.value
+  ignoredKeys.value = next
+  try {
+    await $fetch('/api/fuel/intank-ignores', { method: 'PUT', body: { datetime: r.datetime, fuel_card_id: r.fuel_card_id, ignored } })
+  }
+  catch (err) {
+    ignoredKeys.value = before
+    ignoreError.value = `${formatShortDatetime(r.datetime)} / card ${r.fuel_card_id}: ${describeCaughtError(err, 'もう一度押してください')}`
+  }
+  finally {
+    ignoringKey.value = null
+  }
+}
 
 /**
  * 新しい順に 30 start を読み (1 件 6〜9 秒かかるので DIFF_LIST_CONCURRENCY 本ずつ)、誤差のある行を集める。
@@ -496,6 +543,8 @@ async function buildDiffList() {
   diffListFailed.value = []
   diffList.value = []
   diffTargets = targets
+  ignoreError.value = null
+  void loadIgnores()
   diffFound.clear()
   const queue = [...targets]
   const worker = async () => {
@@ -700,8 +749,11 @@ onMounted(async () => {
         />
         <span v-if="diffList" class="text-sm text-gray-600 dark:text-gray-400">
           <template v-if="diffListLoading">{{ diffListDone }} / {{ diffListTargets }} start を読みました (読めた分から出します) — </template>
-          差異 ±{{ DIFF_TOLERANCE }} を超える行と集計なし (card {{ [...DIFF_LIST_EXCLUDED_CARDS].join('・') }} を除く): {{ diffList.length }} 行<template v-if="diffCarFilter"> (うち {{ diffCarFilter }} は {{ shownDiffList.length }} 行)</template>
+          差異 ±{{ DIFF_TOLERANCE }} を超える行と集計なし (card {{ [...DIFF_LIST_EXCLUDED_CARDS].join('・') }} を除く): {{ diffList.length - ignoredCount }} 行<template v-if="diffCarFilter"> (うち表示 {{ shownDiffList.length }} 行)</template>
         </span>
+        <label v-if="ignoredCount > 0" class="text-sm text-gray-600 dark:text-gray-400 flex items-center gap-1">
+          <input v-model="showIgnored" type="checkbox">無視した {{ ignoredCount }} 行も表示
+        </label>
         <!-- ★ USelect にしない (閉じていても全選択肢を描画して重い。上の start 選択と同じ理由)。素の select で足りる -->
         <select v-if="diffList && diffList.length > 0" v-model="diffCarFilter" class="border rounded px-1 py-0.5 text-sm bg-white dark:bg-gray-900">
           <option value="">車番: すべて</option>
@@ -713,6 +765,7 @@ onMounted(async () => {
         :title="`${diffListFailed.length} 件の start を読めませんでした (一覧に入っていません)`"
         :description="`${diffListFailed.join(' / ')} — 「作り直す」を押してください`"
       />
+      <UAlert v-if="ignoreError" color="error" variant="subtle" icon="i-lucide-alert-triangle" class="my-2" :description="ignoreError" />
       <UAlert
         v-if="linkErrors.length > 0" color="error" variant="subtle" icon="i-lucide-alert-triangle" class="my-2"
         :description="linkErrors.join(' / ')"
@@ -724,7 +777,7 @@ onMounted(async () => {
             <tr><th>start</th><th>D番号</th><th>card_id</th><th>車番</th><th>日時</th><th>数量</th><th>D数量</th><th>差異</th><th>乗務員</th><th>紐づけ候補</th><th /></tr>
           </thead>
           <tbody>
-            <tr v-for="e in shownDiffList" :key="diffEntryKey(e)">
+            <tr v-for="e in shownDiffList" :key="diffEntryKey(e)" :class="{ 'opacity-50': isIgnored(e.row) }">
               <td>{{ startLabel(e.start) }}</td>
               <td class="text-right">{{ e.row.slip_num }}</td>
               <td class="text-right">{{ e.row.fuel_card_id }}</td>
@@ -760,6 +813,11 @@ onMounted(async () => {
                 <span v-else class="text-gray-500">候補なし</span>
               </td>
               <td class="whitespace-nowrap">
+                <UButton
+                  size="xs" :color="isIgnored(e.row) ? 'neutral' : 'warning'" variant="outline" class="mr-1"
+                  :label="isIgnored(e.row) ? '無視を戻す' : '無視'" :loading="ignoringKey === ignoreKey(e.row)"
+                  @click="setIgnored(e.row, !isIgnored(e.row))"
+                />
                 <UButton size="xs" variant="outline" label="この start を開く" :disabled="selected === e.start.datetime" @click="selectStart(e.start.datetime)" />
                 <UButton
                   size="xs" variant="outline" label="日報を直す" class="ml-1" icon="i-lucide-external-link" target="_blank"
