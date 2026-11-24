@@ -13,6 +13,10 @@ import {
   dailyReportEditQuery,
   normalizeVehicleCd,
   dvrMapQuery,
+  compactVehicleName,
+  matchesDvrVehicle,
+  dvrVehicleLabel,
+  dvrVehicleFromQuery,
   vehicleStateMarkerIndex,
   totalQuantity,
   uploadResultText,
@@ -251,11 +255,49 @@ describe('dvrMapQuery', () => {
     expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: '0000002158' } })))
       .toEqual({ vehicle: '2158', at: '2023-12-20T08:10' })
   })
-  it('car・車輌CD が無い・読めなければ null', () => {
+  it('車輌CD が無い・読めなければ車番 (空白を除く) で引く。car に名前が無ければ運行の車番', () => {
+    // 本番の 長崎100あ4381 (car.id 438100) は dtako_cars に行が無く vehicle_cd が null だった
+    expect(dvrMapQuery(row({ car: { id: '438100', name: '長崎100あ4381', vehicle_cd: null } })))
+      .toEqual({ vehicle_name: '長崎100あ4381', at: '2023-12-20T08:10' })
+    expect(dvrMapQuery(row({ car: { id: '5', name: '長崎 100 あ 4381' } })))
+      .toEqual({ vehicle_name: '長崎100あ4381', at: '2023-12-20T08:10' })
+    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: 'x1' } })))
+      .toEqual({ vehicle_name: '1号車', at: '2023-12-20T08:10' })
+    expect(dvrMapQuery(row({ car: null, dtako_row: { id: 'd', car_cc: '438100', car_name: '長崎100あ4381', departed_at: null, returned_at: null, driver_id: null, driver_name: null } })))
+      .toEqual({ vehicle_name: '長崎100あ4381', at: '2023-12-20T08:10' })
+  })
+  it('車輌CD も車番も無ければ null', () => {
     expect(dvrMapQuery(row())).toBeNull()
-    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車' } }))).toBeNull()
-    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: null } }))).toBeNull()
-    expect(dvrMapQuery(row({ car: { id: '5', name: '1号車', vehicle_cd: 'x1' } }))).toBeNull()
+    expect(dvrMapQuery(row({ car: { id: '5', name: null, vehicle_cd: null } }))).toBeNull()
+    expect(dvrMapQuery(row({ car: { id: '5', name: '  ' } }))).toBeNull()
+  })
+})
+
+describe('compactVehicleName / matchesDvrVehicle / dvrVehicleLabel / dvrVehicleFromQuery', () => {
+  it('車番は空白 (全角も) を除き、空なら null', () => {
+    expect(compactVehicleName(' 長崎100あ\u30004381 ')).toBe('長崎100あ4381')
+    expect(compactVehicleName('')).toBeNull()
+    expect(compactVehicleName(null)).toBeNull()
+    expect(compactVehicleName(undefined)).toBeNull()
+  })
+  it('車輌CD の指定は車輌CD で、車番の指定は車両名で比べる', () => {
+    expect(matchesDvrVehicle('0000004381', '別名', { vehicle: '4381' })).toBe(true)
+    expect(matchesDvrVehicle(null, '長崎100あ4381', { vehicle: '4381' })).toBe(false)
+    expect(matchesDvrVehicle('1', 'x', { vehicle: 'ab' })).toBe(false)
+    expect(matchesDvrVehicle('9999', '長崎 100あ4381', { vehicle_name: '長崎100あ4381' })).toBe(true)
+    expect(matchesDvrVehicle('4381', null, { vehicle_name: '長崎100あ4381' })).toBe(false)
+    expect(matchesDvrVehicle('4381', '', { vehicle_name: '' })).toBe(false)
+  })
+  it('画面に出す名前', () => {
+    expect(dvrVehicleLabel({ vehicle: '2158' })).toBe('2158')
+    expect(dvrVehicleLabel({ vehicle_name: '長崎100あ4381' })).toBe('長崎100あ4381')
+  })
+  it('query から読む (vehicle は数字 1〜8 桁を優先、無ければ vehicle_name)', () => {
+    expect(dvrVehicleFromQuery({ vehicle: '2158', vehicle_name: '長崎100あ4381' })).toEqual({ vehicle: '2158' })
+    expect(dvrVehicleFromQuery({ vehicle: 'x', vehicle_name: ' 長崎100あ4381' })).toEqual({ vehicle_name: '長崎100あ4381' })
+    expect(dvrVehicleFromQuery({ vehicle_name: ['a'] })).toBeNull()
+    expect(dvrVehicleFromQuery({ vehicle_name: ' ' })).toBeNull()
+    expect(dvrVehicleFromQuery({})).toBeNull()
   })
 })
 describe('totalQuantity', () => {
@@ -394,13 +436,17 @@ describe('vehicleStateMarkerIndex', () => {
     { vehicleCd: '3333', ...gps },
   ]
   it('GPS のある行だけ数えた index を返す (先頭ゼロは無視)', () => {
-    expect(vehicleStateMarkerIndex(states, '2158')).toBe(0)
-    expect(vehicleStateMarkerIndex(states, '00003333')).toBe(2)
+    expect(vehicleStateMarkerIndex(states, { vehicle: '2158' })).toBe(0)
+    expect(vehicleStateMarkerIndex(states, { vehicle: '00003333' })).toBe(2)
+  })
+  it('車番の指定は車両名で探す (車輌CD の無い車)', () => {
+    expect(vehicleStateMarkerIndex([{ vehicleCd: '9', vehicleName: '長崎100あ4381', ...noGps }, { vehicleCd: '4381', vehicleName: '長崎 100あ4381', ...gps }], { vehicle_name: '長崎100あ4381' })).toBe(0)
   })
   it('GPS が無い車・居ない車・読めない vehicle は null', () => {
-    expect(vehicleStateMarkerIndex(states, '1111')).toBeNull()
-    expect(vehicleStateMarkerIndex(states, '9999')).toBeNull()
-    expect(vehicleStateMarkerIndex(states, '')).toBeNull()
-    expect(vehicleStateMarkerIndex([{ vehicleCd: '1', latitude: 1, longitude: null }], '1')).toBeNull()
+    expect(vehicleStateMarkerIndex(states, { vehicle: '1111' })).toBeNull()
+    expect(vehicleStateMarkerIndex(states, { vehicle: '9999' })).toBeNull()
+    expect(vehicleStateMarkerIndex(states, { vehicle: '' })).toBeNull()
+    expect(vehicleStateMarkerIndex(states, { vehicle_name: '長崎100あ9999' })).toBeNull()
+    expect(vehicleStateMarkerIndex([{ vehicleCd: '1', latitude: 1, longitude: null }], { vehicle: '1' })).toBeNull()
   })
 })
