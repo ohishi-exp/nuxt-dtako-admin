@@ -169,7 +169,8 @@ import {
   type KyuyoAuthorizer,
   KINTAI_WORKER_BASE,
   kintaiAutoloader,
-  relayAutoloadPending,
+  relayKintaiWrite,
+  DTAKO_MAKECSV_PATH,
   kintaiReader,
   kintaiWorkerScope,
   kintaiRelayFailStatus,
@@ -833,6 +834,9 @@ const KINTAI_SINGLE_COMP_PATHS = new Set([
   "/restraint-api/kintai/refresh/mysql",
   // インタンク画面の「取り込み口の CSV を取り込む」(社内 CakePHP の autoload を zip 無しで)
   "/restraint-api/kintai/autoload-pending",
+  // 社内 CakePHP の一番星×デジタコ突合 (読む) と、合わない運行の CSV の ichizip への書き出し (書く)
+  "/restraint-api/kintai/ichiban-check",
+  "/restraint-api/kintai/ichiban-makecsv",
   "/restraint-api/kintai/day-events-lookup",
   "/restraint-api/kintai/day-operations",
   "/restraint-api/kintai/onprem-month-operations",
@@ -5105,6 +5109,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/autoload-pending" && request.method === "POST") {
       return this.handleKintaiAutoloadPending(record!);
     }
+    // 社内 CakePHP の一番星×デジタコ突合と CSV の書き出し。会社の判定は上の KINTAI_SINGLE_COMP_PATHS
+    if (url.pathname === "/restraint-api/kintai/ichiban-check" && request.method === "GET") {
+      return this.handleKintaiIchibanCheck(record!, url);
+    }
+    if (url.pathname === "/restraint-api/kintai/ichiban-makecsv" && request.method === "POST") {
+      return this.handleKintaiIchibanMakecsv(record!, request);
+    }
     // ②(取り込み)の後、オンプレから実物の23桁 unko_no を引く (viewer 認可、
     // 読むだけ・②を実行しない。Refs #625)
     if (url.pathname === "/restraint-api/kintai/day-events-lookup" && request.method === "GET") {
@@ -8325,13 +8336,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * POST /restraint-api/kintai/autoload-pending — 社内 CakePHP の取り込み口 (`/dtako-events/autoload`) を
    * zip 無しで叩き、そこに残っている CSV を取り込ませる (インタンク画面のボタン)。本文は読まない。
    * **運行 1 件を名指ししない一括の口** (オンプレ側が許容している動き、kintai-ops §4.7)。押せるのは
-   * `KINTAI_COMP_ID` の会社の閲覧者 (KINTAI_SINGLE_COMP_PATHS)。送り先と応答の写し方は `relayAutoloadPending`。
+   * `KINTAI_COMP_ID` の会社の閲覧者 (KINTAI_SINGLE_COMP_PATHS)。送り先と応答の写し方は `relayKintaiWrite`。
    * theearth を使わないので scrape の列には並べない。
    */
   private async handleKintaiAutoloadPending(record: TheearthSessionRecord): Promise<Response> {
     const autoloader = await this.kintaiAutoloaderFor(record.compId, "kintai_autoload_pending", DTAKO_AUTOLOAD_PENDING_PATH);
     if (!autoloader) return dvrJsonError(503, KINTAI_AUTOLOAD_NOT_CONFIGURED);
-    const { status, body } = await relayAutoloadPending(autoloader);
+    const { status, body } = await relayKintaiWrite(autoloader, DTAKO_AUTOLOAD_PENDING_PATH);
     if (status !== 200) console.error(JSON.stringify({ kintai_autoload_pending: "failed", status, ...body }));
     return Response.json(body, { status });
   }
@@ -8538,22 +8549,68 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const q = new URLSearchParams({ month: ym });
     if (driver) q.set("driver", driver);
     // 勤怠 Worker は CakePHP の 3xx を追わず 502 にする。非 2xx と同じ扱い
-    const upstream = await reader.read(`/api/kintai/pdf-json?${q.toString()}`);
+    return this.fetchNginxJson(reader, `/api/kintai/pdf-json?${q.toString()}`, "タイムカードPDF API");
+  }
+
+  /**
+   * 勤怠 Worker が中継する社内 CakePHP の JSON を読む (pdf-json・一番星突合)。`label` はエラーの文言の頭。
+   * 非 2xx と、HTTP 200 + `{error}` (nginx#784) を [`RelayUpstreamError`] にする。
+   */
+  private async fetchNginxJson(reader: KintaiReader, path: string, label: string): Promise<unknown> {
+    const upstream = await reader.read(path);
     const rawText = await upstream.text();
     if (!upstream.ok) {
-      console.error(JSON.stringify({ pdf_json: "upstream-error", status: upstream.status }));
+      console.error(JSON.stringify({ nginx_json: "upstream-error", path: path.split("?")[0], status: upstream.status }));
       throw new RelayUpstreamError(
         // 200 字だと CakePHP の HTML エラーページの <head> で埋まり、肝心の
         // 「Error: Call to undefined ...」が切れて読めない (#492 の実機確認で実際に踏んだ)
-        `タイムカードPDF API が ${upstream.status} を返しました: ${rawText.slice(0, 600)}`,
+        `${label} が ${upstream.status} を返しました: ${rawText.slice(0, 600)}`,
       );
     }
     const body: unknown = JSON.parse(rawText);
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
     // `rows` が無いだけになり、画面に「差なし」と出てしまう
     const upstreamError = pdfJsonError(body);
-    if (upstreamError) throw new RelayUpstreamError(`タイムカードPDF API: ${upstreamError}`);
+    if (upstreamError) throw new RelayUpstreamError(`${label}: ${upstreamError}`);
     return body;
+  }
+
+  /**
+   * GET /restraint-api/kintai/ichiban-check?month=YYYY-MM — 社内 CakePHP の「一番星×デジタコ突合」
+   * (合わない運行の `dtako_rows.id` と項目ごとの差分) を**そのまま**中継する。粗利タブの月次突合
+   * (`profit/margin.vue`) とは別物で、数字は一致しない (こちらは ichizip へ CSV を出すための差分)。
+   * キャッシュしない (CSV を出した後に押し直して、消えたかを見るため)。
+   */
+  private async handleKintaiIchibanCheck(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    try {
+      const reader = await this.kintaiReaderFor(record.compId);
+      if (!reader) throw new RelayConfigError(KINTAI_WORKER_UNAVAILABLE);
+      const path = `/api/kintai/ichiban-check?month=${parsed.ym}`;
+      return Response.json(await this.fetchNginxJson(reader, path, "一番星突合 API"));
+    } catch (err) {
+      return this.relayErrorResponse("ichiban_check", err, "一番星突合 API の取得に失敗しました");
+    }
+  }
+
+  /**
+   * POST /restraint-api/kintai/ichiban-makecsv 本文 `{"ids":["<dtako_rows.id>", …]}` — 合わない運行の CSV を
+   * 社内 CakePHP に ichizip の取り込みフォルダへ書き出させる (勤怠 Worker の `POST /api/dtako/makecsv`、書き込みの
+   * token 付き)。id の桁・件数の検査は勤怠 Worker が持つので、ここは「`ids` が空でない配列か」だけを見る。
+   * 応答 (id ごとの結果) と失敗の写し方は `relayKintaiWrite`。同じ id を送り直すと同じファイルを上書きするだけ。
+   */
+  private async handleKintaiIchibanMakecsv(record: TheearthSessionRecord, request: Request): Promise<Response> {
+    const ids = ((await request.json().catch(() => null)) as { ids?: unknown } | null)?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return dvrJsonError(400, 'body は {"ids":["<dtako_rows.id>", …]} の JSON で送ってください');
+    }
+    const writer = await this.kintaiAutoloaderFor(record.compId, "kintai_ichiban_makecsv", DTAKO_MAKECSV_PATH);
+    if (!writer) return dvrJsonError(503, KINTAI_AUTOLOAD_NOT_CONFIGURED);
+    const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids }) };
+    const { status, body } = await relayKintaiWrite(writer, DTAKO_MAKECSV_PATH, init);
+    if (status !== 200) console.error(JSON.stringify({ kintai_ichiban_makecsv: "failed", status, ...body }));
+    return Response.json(body, { status });
   }
 
   /** 乗務員CD クエリの検証。未指定は null、書式違いは `Error` (= 400)。 */

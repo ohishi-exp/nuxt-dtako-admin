@@ -47,7 +47,6 @@
  */
 
 import { resolveSecretBinding } from "./cron";
-import { DTAKO_AUTOLOAD_PENDING_PATH } from "./dtako-reimport";
 import { describeUnknownError } from "./scrape-queue";
 import { parseGcpShiftDays, type GcpNonWorking, type GcpShiftDay } from "./gcp-day-summaries";
 
@@ -395,7 +394,7 @@ export interface KintaiAutoloadEnv extends KintaiReaderEnv {
 }
 
 export interface KintaiAutoloader {
-  /** `path` は [`kintaiAutoloader`] に渡した口 (`/api/dtako/autoload?...` か `/api/dtako/autoload-pending`)。 */
+  /** `path` は [`kintaiAutoloader`] に渡した口 (`/api/dtako/autoload?...`・`/api/dtako/autoload-pending`・`/api/dtako/makecsv`)。 */
   autoload(path: string, init: RequestInit): Promise<Response>;
 }
 
@@ -423,24 +422,32 @@ export async function kintaiAutoloader(
   return null;
 }
 
-/** [`relayAutoloadPending`] の結果 (relay がそのまま status と JSON で返す)。 */
-export interface AutoloadPendingResult {
+/** [`relayKintaiWrite`] の結果 (relay がそのまま status と JSON で返す)。 */
+export interface KintaiWriteResult {
   status: number;
   body: Record<string, unknown>;
 }
 
+/** 合わない運行の CSV を社内 CakePHP に ichizip へ書き出させる勤怠 Worker の口 (本文 `{"ids":[…]}`)。 */
+export const DTAKO_MAKECSV_PATH = "/api/dtako/makecsv";
+
 /**
- * インタンク画面の「取り込み口の CSV を取り込む」: 勤怠 Worker の `POST /api/dtako/autoload-pending` へ送り、
- * 応答 (CakePHP の `status`・`body_excerpt`・`location`) を素通しする。**成否は判定しない** (307 でも取り込みは走る)。
+ * 社内 CakePHP に書かせる勤怠 Worker の口 (`POST /api/dtako/autoload-pending` = インタンク画面の「取り込み口の CSV を
+ * 取り込む」、`POST /api/dtako/makecsv` = 一番星突合の「CSV を出す」) へ送り、応答 (CakePHP の JSON) を素通しする。
+ * **成否は判定しない** (autoload-pending は 307 でも取り込みが走る)。
  *
  * - 送信が投げた・勤怠 Worker が 502 (CakePHP へ送った後の失敗・待ちの打ち切り) → `uncertain: true`。
- *   取り込みは応答より前に走るので、押し直す前に画面で確かめてもらう
- * - それ以外の非 2xx (403 / 503 / 未 deploy の 404) は送っていないので `uncertain: false`
+ *   書き込みは応答より前に走るので、押し直す前に画面で確かめてもらう
+ * - それ以外の非 2xx (400 / 403 / 503 / 未 deploy の 404) は送っていないので `uncertain: false`
  */
-export async function relayAutoloadPending(loader: KintaiAutoloader): Promise<AutoloadPendingResult> {
+export async function relayKintaiWrite(
+  loader: KintaiAutoloader,
+  path: string,
+  init: RequestInit = { method: "POST" },
+): Promise<KintaiWriteResult> {
   let res: Response;
   try {
-    res = await loader.autoload(DTAKO_AUTOLOAD_PENDING_PATH, { method: "POST" });
+    res = await loader.autoload(path, init);
   } catch (err) {
     return { status: 502, body: { error: `勤怠 Worker に送れたか分かりません: ${describeUnknownError(err)}`, uncertain: true } };
   }
