@@ -65,6 +65,7 @@ interface Call {
   url: string;
   method: string;
   headers: Record<string, string>;
+  body?: unknown;
 }
 
 function headersOf(init?: RequestInit): Record<string, string> {
@@ -125,7 +126,7 @@ function makeDO(opts: Setup = {}) {
       : {
           KINTAI: {
             fetch: vi.fn(async (url: string, init?: RequestInit) => {
-              kintai.push({ url, method: init?.method ?? "GET", headers: headersOf(init) });
+              kintai.push({ url, method: init?.method ?? "GET", headers: headersOf(init), body: init?.body });
               return reply(url);
             }),
           },
@@ -273,6 +274,9 @@ const ROUTES: Array<
   ],
   ["pdf-json", "GET", `/restraint-api/kintai/pdf-json?month=${YM}&driver=4219`, undefined, [
     "/api/kintai/pdf-json?driver=4219&month=2026-06",
+  ], 503],
+  ["ichiban-check (一番星×デジタコ突合)", "GET", `/restraint-api/kintai/ichiban-check?month=${YM}`, undefined, [
+    "/api/kintai/ichiban-check?month=2026-06",
   ], 503],
   [
     "timecard-compare: pdf-json・kosoku-daily (view=compare) 2 か月",
@@ -624,6 +628,45 @@ describe("autoload-pending (インタンク画面の「取り込み口の CSV �
     const res = await call("POST", "/restraint-api/kintai/autoload-pending");
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "勤怠 Worker (KINTAI) の書き込み (KINTAI_WRITE_TOKEN) が使えません" });
+    expect(kintai).toEqual([]);
+    expect(onprem).toEqual([]);
+  });
+});
+
+describe("ichiban-makecsv (一番星突合の「CSV を出す」) は勤怠 Worker の書き込みの口だけ", () => {
+  const ID = "26060507533000000042861";
+
+  it("本番の設定: 勤怠 Worker の /api/dtako/makecsv へ token・自社のテナント・ids だけの JSON を付けて 1 回だけ送る", async () => {
+    const { call, onprem, kintai, authWorker } = makeDO();
+    const res = await call("POST", "/restraint-api/kintai/ichiban-makecsv", { ids: [ID], extra: 1 });
+    expect(res.status).toBe(200);
+    expect(kintai.map((c) => [new URL(c.url).pathname, c.method, c.headers["x-kintai-write-token"], c.headers["x-kintai-tenant-id"]])).toEqual([
+      ["/api/dtako/makecsv", "POST", "write-token", TENANT],
+    ]);
+    expect(kintai[0]!.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(String(kintai[0]!.body))).toEqual({ ids: [ID] });
+    expect(kintaiReads(onprem)).toEqual([]);
+    expect(authWorker).toEqual([]);
+  });
+
+  it.each([
+    ["ids が無い", {}],
+    ["ids が空", { ids: [] }],
+    ["ids が配列でない", { ids: ID }],
+  ])("%s なら 400。どこにも送らない", async (_l, body) => {
+    const { call, kintai } = makeDO();
+    const res = await call("POST", "/restraint-api/kintai/ichiban-makecsv", body);
+    expect(res.status).toBe(400);
+    expect(kintai).toEqual([]);
+  });
+
+  it.each([
+    ["binding が無い", { kintaiBinding: false }],
+    ["書き込み token が無い", { writeToken: false }],
+  ] as const)("%s なら 503。どこにも送らない", async (_l, opts) => {
+    const { call, onprem, kintai } = makeDO(opts);
+    const res = await call("POST", "/restraint-api/kintai/ichiban-makecsv", { ids: [ID] });
+    expect(res.status).toBe(503);
     expect(kintai).toEqual([]);
     expect(onprem).toEqual([]);
   });

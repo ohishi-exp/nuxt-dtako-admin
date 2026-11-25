@@ -23,7 +23,8 @@ import {
   tenantForCompId,
   buildDeps,
   kintaiAutoloader,
-  relayAutoloadPending,
+  relayKintaiWrite,
+  DTAKO_MAKECSV_PATH,
   kintaiRestStartWriter,
   putKintaiRestStartOverrides,
   REST_START_OVERRIDES_PATH,
@@ -2131,7 +2132,7 @@ describe("kintaiRestStartWriter / putKintaiRestStartOverrides — 休息の開�
   });
 });
 
-describe("relayAutoloadPending — zip を付けない取り込みの応答の写し方", () => {
+describe("relayKintaiWrite — 社内 CakePHP に書かせる口 (autoload-pending・makecsv) の応答の写し方", () => {
   const loader = (impl: () => Promise<Response>) => {
     const autoload = vi.fn(async (_path: string, _init: RequestInit) => impl());
     return { autoload };
@@ -2140,7 +2141,7 @@ describe("relayAutoloadPending — zip を付けない取り込みの応答の�
   it("勤怠 Worker の口へ POST し、2xx の JSON (CakePHP の status・body_excerpt・location) を素通しする。307 も成功と断定せずそのまま", async () => {
     const body = { status: 307, body_excerpt: "", location: "/" };
     const l = loader(async () => json(body));
-    expect(await relayAutoloadPending(l)).toEqual({ status: 200, body });
+    expect(await relayKintaiWrite(l, "/api/dtako/autoload-pending")).toEqual({ status: 200, body });
     expect(l.autoload).toHaveBeenCalledWith("/api/dtako/autoload-pending", { method: "POST" });
   });
 
@@ -2150,19 +2151,27 @@ describe("relayAutoloadPending — zip を付けない取り込みの応答の�
     [403, "forbidden", false],
     [404, "Not Found", false],
   ])("勤怠 Worker が %i なら 502 で返す。502 (送った後の失敗) だけ uncertain", async (status, text, uncertain) => {
-    const res = await relayAutoloadPending(loader(async () => new Response(text, { status })));
+    const res = await relayKintaiWrite(loader(async () => new Response(text, { status })), "/api/dtako/autoload-pending");
     expect(res).toEqual({ status: 502, body: { error: `勤怠 Worker が ${status} を返しました: ${text}`, uncertain } });
   });
 
   it("送信が投げたら uncertain (取り込みは応答より前に走りうる)", async () => {
-    const res = await relayAutoloadPending(loader(async () => Promise.reject(new Error("network lost"))));
+    const res = await relayKintaiWrite(loader(async () => Promise.reject(new Error("network lost"))), "/api/dtako/autoload-pending");
     expect(res.status).toBe(502);
     expect(res.body.uncertain).toBe(true);
     expect(res.body.error).toContain("network lost");
   });
 
+  it("makecsv: 渡した init (JSON の本文とヘッダー) をそのまま送り、id ごとの結果を素通しする", async () => {
+    const body = { results: [{ id: "26060507533000000042861", written: ["a.csv"] }] };
+    const l = loader(async () => json(body));
+    const init = { method: "POST", headers: { "content-type": "application/json" }, body: '{"ids":["1"]}' };
+    expect(await relayKintaiWrite(l, DTAKO_MAKECSV_PATH, init)).toEqual({ status: 200, body });
+    expect(l.autoload).toHaveBeenCalledWith("/api/dtako/makecsv", init);
+  });
+
   it("2xx でも JSON でなければ 502 + uncertain (届いた後なので)", async () => {
-    const res = await relayAutoloadPending(loader(async () => new Response("<html>", { status: 200 })));
+    const res = await relayKintaiWrite(loader(async () => new Response("<html>", { status: 200 })), "/api/dtako/autoload-pending");
     expect(res).toEqual({ status: 502, body: { error: "勤怠 Worker の応答が JSON ではありません: <html>", uncertain: true } });
   });
 });

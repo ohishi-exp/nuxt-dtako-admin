@@ -1400,3 +1400,7 @@ branches = true
 [[files]]
 path = "app/utils/machine-credentials.ts"
 branches = true
+
+[[files]]
+path = "app/utils/ichiban-check.ts"
+branches = true
