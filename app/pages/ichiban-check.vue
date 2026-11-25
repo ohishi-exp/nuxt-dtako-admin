@@ -103,9 +103,12 @@ async function load() {
   results.value = []
   writeError.value = null
   try {
+    // retry: 0 — ofetch は GET の 502 を既定で 1 回やり直す (dev で 2 回飛ぶのを実測)。突合は社内で 30〜40 秒かかる
+    // 重い計算で、打ち切り (502) のあとにもう 1 回走らせると待ちも社内の負荷も倍になる。やり直しは人が押す
     const res = await $fetch<IchibanCheckResponse>('/restraint-api/kintai/ichiban-check', {
       query: { month: month.value },
       headers,
+      retry: 0,
     })
     rows.value = flattenIchibanCheck(res)
     selected.value = new Set()
