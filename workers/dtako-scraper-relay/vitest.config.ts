@@ -32,6 +32,7 @@ export default defineConfig({
         'src/theearth-venus-client.ts',
         'src/etc-meisai-client.ts',
         'src/cron.ts',
+        'src/ichiban-makecsv.ts',
         'src/theearth-report-client.ts',
         'src/theearth-restraint-client.ts',
         'src/theearth-net780-client.ts',

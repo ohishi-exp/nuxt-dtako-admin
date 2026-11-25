@@ -23,6 +23,10 @@ name: dtako-scraper-relay DO worker
 # (`test/restraint-wage-allowance-rate-shared.test.ts`) の**両側に同じ入力で当てる**
 # ための共有 fixture (#1017 ④)。**片側だけ規則が動いたことを検出するのが目的**なので、
 # fixture だけを触った PR でこの gate が回らないと目的そのものが果たせない。
+#
+# `tests/fixtures/ichiban-check/**` も同じ理由 — 一番星突合の「すべて出す」の運行 id を
+# 画面 (`tests/utils/ichiban-check-shared.test.ts`) と cron (`test/ichiban-makecsv.test.ts`) の
+# 両側に同じ入力で当てる共有 fixture。
 
 # pull_request: typecheck + test (coverage 100% gate) のみ実行し deploy は skip。
 # push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
@@ -34,6 +38,7 @@ on:
       - 'workers/dtako-scraper-relay/**'
       - 'migrations/**'
       - 'scripts/d1/**'
+      - 'tests/fixtures/ichiban-check/**'
       - 'tests/fixtures/restraint-wage/**'
       - 'tests/fixtures/allowance-rate/**'
       - '.github/workflows/dtako-scraper-relay-deploy.yml'
@@ -42,6 +47,7 @@ on:
       - 'workers/dtako-scraper-relay/**'
       - 'migrations/**'
       - 'scripts/d1/**'
+      - 'tests/fixtures/ichiban-check/**'
       - 'tests/fixtures/restraint-wage/**'
       - 'tests/fixtures/allowance-rate/**'
       - '.github/workflows/dtako-scraper-relay-deploy.yml'

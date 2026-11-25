@@ -11,6 +11,8 @@ import {
   VEHICLE_STATE_TARGETS_KV_KEY,
   ETC_CRON,
   NETPRINT_CRON,
+  ICHIBAN_MAKECSV_CRON,
+  ichibanMakecsvMonths,
   RESTRAINT_SYNC_CRON,
   currentYmJst,
   dispatchNetprintTargets,
@@ -518,6 +520,77 @@ describe('dispatchNetprintTargets (cron と手動実行が共有する dispatch)
     const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
     expect(await dispatchNetprintTargets('27324455', [], '2026-08-20', '', okDoCall(calls))).toEqual([])
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe('ichibanMakecsvMonths (JST)', () => {
+  it('JST 15 日までは前月 + 当月 (前月が先)', () => {
+    // 2026-11-14T20:00Z = JST 11/15 05:00
+    expect(ichibanMakecsvMonths(new Date('2026-11-14T20:00:00Z'))).toEqual(['2026-10', '2026-11'])
+  })
+  it('JST 16 日からは当月だけ (UTC ではまだ 15 日でも)', () => {
+    // 2026-11-15T20:00Z = JST 11/16 05:00
+    expect(ichibanMakecsvMonths(new Date('2026-11-15T20:00:00Z'))).toEqual(['2026-11'])
+  })
+  it('1 月の前月は前年 12 月', () => {
+    expect(ichibanMakecsvMonths(new Date('2026-12-31T20:00:00Z'))).toEqual(['2026-12', '2027-01'])
+  })
+})
+
+describe('runScheduledCron: 一番星突合の CSV 書き出し', () => {
+  const day3 = new Date('2026-11-02T20:00:00Z') // JST 11/03
+
+  it('cron 式は JST 05:00', () => {
+    expect(ICHIBAN_MAKECSV_CRON).toBe('0 20 * * *')
+  })
+
+  it('KINTAI_COMP_ID の 1 社の DO へ、月ごとに直列で送る', async () => {
+    const order: string[] = []
+    let inFlight = 0
+    const callDo: CronDoCall = async (doKey, path, body) => {
+      inFlight += 1
+      expect(inFlight).toBe(1) // 並列にしない
+      order.push(`${doKey} ${path} ${body.comp_id} ${body.month}`)
+      await new Promise(r => setTimeout(r, 5))
+      inFlight -= 1
+      return { ok: true, status: 200, text: '差分 3 行 / 運行 2 件 → 書き出した 2 件 / 飛ばした 0 件 / 失敗 0 件' }
+    }
+    const results = await runScheduledCron(ICHIBAN_MAKECSV_CRON, { kintaiCompId: ' 27324455 ' }, callDo, day3)
+    expect(order).toEqual([
+      'scraper-comp-27324455 /cron/ichiban-makecsv 27324455 2026-10',
+      'scraper-comp-27324455 /cron/ichiban-makecsv 27324455 2026-11',
+    ])
+    expect(results.map(r => [r.kind, r.target, r.ok])).toEqual([
+      ['ichiban-makecsv', '2026-10', true],
+      ['ichiban-makecsv', '2026-11', true],
+    ])
+    expect(results[0].detail).toContain('書き出した 2 件')
+  })
+
+  it('KINTAI_COMP_ID 未設定は DO を叩かず ok=false', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(ICHIBAN_MAKECSV_CRON, {}, okDoCall(calls), day3)
+    expect(calls).toHaveLength(0)
+    expect(results).toEqual([expect.objectContaining({ kind: 'ichiban-makecsv', target: '*', ok: false })])
+  })
+
+  it('1 か月目が失敗しても 2 か月目は回し、失敗はそれぞれ ok=false', async () => {
+    let n = 0
+    const callDo: CronDoCall = async () => {
+      n += 1
+      if (n === 1) throw new Error('boom')
+      return { ok: false, status: 502, text: '一番星突合 API の取得に失敗しました' }
+    }
+    const results = await runScheduledCron(ICHIBAN_MAKECSV_CRON, { kintaiCompId: '27324455' }, callDo, day3)
+    expect(results.map(r => [r.target, r.ok, r.detail])).toEqual([
+      ['2026-10', false, 'boom'],
+      ['2026-11', false, 'HTTP 502: 一番星突合 API の取得に失敗しました'],
+    ])
+  })
+
+  it('Error でない throw も文字列で残す', async () => {
+    const results = await runScheduledCron(ICHIBAN_MAKECSV_CRON, { kintaiCompId: '27324455' }, async () => { throw 'x' }, new Date('2026-11-20T20:00:00Z'))
+    expect(results).toEqual([expect.objectContaining({ target: '2026-11', ok: false, detail: 'x' })])
   })
 })
 
