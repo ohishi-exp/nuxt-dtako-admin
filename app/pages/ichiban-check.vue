@@ -193,6 +193,7 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
         <div class="flex items-center gap-3 mb-2">
           <UButton
             icon="i-lucide-file-output"
+            class="shrink-0 whitespace-nowrap"
             :loading="writing === 'all'"
             :disabled="writing !== null || shownIds.length === 0"
             @click="writeCsv(shownIds, 'all')"
@@ -225,15 +226,15 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
         <div class="overflow-x-auto">
           <table class="w-full text-sm border-collapse">
             <thead>
-              <tr class="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+              <tr class="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                <th class="py-2 pr-2 font-medium" />
                 <th class="py-2 pr-3 font-medium">項目</th>
                 <th class="py-2 pr-3 font-medium">乗務員</th>
                 <th class="py-2 pr-3 font-medium">日付 / キー</th>
                 <th class="py-2 pr-3 font-medium text-right">一番星</th>
                 <th class="py-2 pr-3 font-medium text-right">差分</th>
                 <th class="py-2 pr-3 font-medium">車両 / 部門</th>
-                <th class="py-2 pr-3 font-medium">運行</th>
-                <th class="py-2 font-medium" />
+                <th class="py-2 font-medium">運行</th>
               </tr>
             </thead>
             <tbody>
@@ -243,14 +244,7 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
                 class="border-b border-gray-100 dark:border-gray-800"
                 :class="row.etcExcluded ? 'bg-yellow-50 dark:bg-yellow-900/20' : ''"
               >
-                <td class="py-1.5 pr-3 whitespace-nowrap">{{ row.category }}<span v-if="row.item" class="text-gray-500 dark:text-gray-400"> / {{ row.item }}</span></td>
-                <td class="py-1.5 pr-3 whitespace-nowrap">{{ row.driverCd }} {{ row.driverName }}</td>
-                <td class="py-1.5 pr-3 tabular-nums">{{ row.label }}</td>
-                <td class="py-1.5 pr-3 tabular-nums text-right">{{ row.value }}</td>
-                <td class="py-1.5 pr-3 tabular-nums text-right">{{ row.diff }}</td>
-                <td class="py-1.5 pr-3 tabular-nums whitespace-nowrap">{{ [row.vehicle, row.dept].filter(Boolean).join(' / ') }}</td>
-                <td class="py-1.5 pr-3 tabular-nums text-xs text-gray-500 dark:text-gray-400">{{ row.ids.length ? row.ids.join(' ') : '—' }}</td>
-                <td class="py-1.5 whitespace-nowrap">
+                <td class="py-1.5 pr-2 whitespace-nowrap">
                   <UButton
                     v-if="row.ids.length > 0"
                     size="xs"
@@ -262,6 +256,13 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
                     出す
                   </UButton>
                 </td>
+                <td class="py-1.5 pr-3 whitespace-nowrap">{{ row.category }}<span v-if="row.item" class="text-gray-500 dark:text-gray-400"> / {{ row.item }}</span></td>
+                <td class="py-1.5 pr-3 whitespace-nowrap">{{ row.driverCd }} {{ row.driverName }}</td>
+                <td class="py-1.5 pr-3 tabular-nums">{{ row.label }}</td>
+                <td class="py-1.5 pr-3 tabular-nums text-right">{{ row.value }}</td>
+                <td class="py-1.5 pr-3 tabular-nums text-right">{{ row.diff }}</td>
+                <td class="py-1.5 pr-3 tabular-nums whitespace-nowrap">{{ [row.vehicle, row.dept].filter(Boolean).join(' / ') }}</td>
+                <td class="py-1.5 tabular-nums text-xs text-gray-500 dark:text-gray-400">{{ row.ids.length ? row.ids.join(' ') : '—' }}</td>
               </tr>
             </tbody>
           </table>
