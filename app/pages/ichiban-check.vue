@@ -26,9 +26,9 @@ import {
  * **粗利タブの月次突合とは別物で、数字は一致しない** (こちらは一番星へ取り込む CSV を出し直す運行を選ぶための差分)。
  */
 
+/** 既定は今月 (ブラウザの暦)。 */
 function defaultMonth(): string {
   const d = new Date()
-  d.setMonth(d.getMonth() - 1)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
@@ -38,9 +38,9 @@ const loadError = ref<string | null>(null)
 const loadedMonth = ref<string | null>(null)
 const rows = ref<IchibanCheckRow[]>([])
 const category = ref<IchibanCheckCategory | 'all'>('all')
-const selected = ref<Set<string>>(new Set())
 
-const writing = ref(false)
+/** 書き出し中の対象 (`'all'` = すべて出す、それ以外は行の key)。null は待機中。 */
+const writing = ref<string | null>(null)
 const writeError = ref<string | null>(null)
 const results = ref<MakecsvResult[]>([])
 
@@ -66,30 +66,8 @@ const shown = computed(() =>
   category.value === 'all' ? rows.value : rows.value.filter(r => r.category === category.value),
 )
 
-const selectableShown = computed(() => shown.value.filter(r => r.ids.length > 0))
-
-const selectedIds = computed(() => idsOfRows(rows.value.filter(r => selected.value.has(r.key))))
-
-const allShownSelected = computed(() =>
-  selectableShown.value.length > 0 && selectableShown.value.every(r => selected.value.has(r.key)),
-)
-
-function toggleRow(row: IchibanCheckRow) {
-  const next = new Set(selected.value)
-  if (next.has(row.key)) next.delete(row.key)
-  else next.add(row.key)
-  selected.value = next
-}
-
-function toggleAllShown() {
-  const next = new Set(selected.value)
-  const on = !allShownSelected.value
-  for (const r of selectableShown.value) {
-    if (on) next.add(r.key)
-    else next.delete(r.key)
-  }
-  selected.value = next
-}
+/** 「すべて出す」の対象 = 表示中 (項目で絞っていればその項目) の行の運行。 */
+const shownIds = computed(() => idsOfRows(shown.value))
 
 async function load() {
   if (loading.value) return
@@ -111,7 +89,6 @@ async function load() {
       retry: 0,
     })
     rows.value = flattenIchibanCheck(res)
-    selected.value = new Set()
     loadedMonth.value = month.value
   }
   catch (e) {
@@ -122,17 +99,20 @@ async function load() {
   }
 }
 
-/** 選んだ運行の CSV を出す。勤怠 Worker の 1 回あたりの上限 (500 件) ごとに順に送る。 */
-async function writeCsv() {
-  const ids = selectedIds.value
+/**
+ * 運行の CSV を出す。`target` は「すべて出す」(`'all'`) か 1 行の key で、押したボタンの読み込み表示に使う。
+ * 勤怠 Worker の 1 回あたりの上限 (500 件) ごとに順に送る。確認は件数の多い「すべて出す」のときだけ
+ * (1 行は旧画面の make と同じく押せば出す。同じ運行を出し直しても同じファイルを上書きするだけ)。
+ */
+async function writeCsv(ids: string[], target: string) {
   if (writing.value || ids.length === 0) return
-  if (!window.confirm(`${ids.length} 件の運行の CSV を ichizip の取り込みフォルダへ書き出します (旧画面の make と同じ)。よろしいですか？`)) return
+  if (target === 'all' && !window.confirm(`表示中の ${ids.length} 件の運行の CSV を ichizip の取り込みフォルダへ書き出します (旧画面の SS と同じ)。よろしいですか？`)) return
   const headers = viewerHeaders()
   if (!headers) {
     writeError.value = 'ログインの情報がありません。ページを読み込み直してからもう一度押してください'
     return
   }
-  writing.value = true
+  writing.value = target
   writeError.value = null
   results.value = []
   try {
@@ -150,7 +130,7 @@ async function writeCsv() {
     writeError.value = uncertain ? MAKECSV_UNCERTAIN : describeCaughtError(e, 'もう一度押してください')
   }
   finally {
-    writing.value = false
+    writing.value = null
   }
 }
 
@@ -213,13 +193,13 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
         <div class="flex items-center gap-3 mb-2">
           <UButton
             icon="i-lucide-file-output"
-            :loading="writing"
-            :disabled="selectedIds.length === 0"
-            @click="writeCsv"
+            :loading="writing === 'all'"
+            :disabled="writing !== null || shownIds.length === 0"
+            @click="writeCsv(shownIds, 'all')"
           >
-            選んだ運行の CSV を出す ({{ selectedIds.length }} 件)
+            すべて出す ({{ shownIds.length }} 件)
           </UButton>
-          <span class="text-xs text-gray-500 dark:text-gray-400">運行の無い行 (経費の未対応コード等) は選べません。黄色は ETC 連携を除外中の車両の運行です。</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">表示中の行の運行をまとめて出します。行ごとに出すときは各行の「出す」。運行の無い行 (経費の未対応コード等) は出せません。黄色は ETC 連携を除外中の車両の運行です。</span>
         </div>
 
         <p v-if="writeError" class="text-sm text-red-600 dark:text-red-400 mb-2">
@@ -246,16 +226,14 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
           <table class="w-full text-sm border-collapse">
             <thead>
               <tr class="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                <th class="py-2 pr-2">
-                  <input type="checkbox" :checked="allShownSelected" :disabled="selectableShown.length === 0" aria-label="表示中の行をすべて選ぶ" @change="toggleAllShown">
-                </th>
                 <th class="py-2 pr-3 font-medium">項目</th>
                 <th class="py-2 pr-3 font-medium">乗務員</th>
                 <th class="py-2 pr-3 font-medium">日付 / キー</th>
                 <th class="py-2 pr-3 font-medium text-right">一番星</th>
                 <th class="py-2 pr-3 font-medium text-right">差分</th>
                 <th class="py-2 pr-3 font-medium">車両 / 部門</th>
-                <th class="py-2 font-medium">運行</th>
+                <th class="py-2 pr-3 font-medium">運行</th>
+                <th class="py-2 font-medium" />
               </tr>
             </thead>
             <tbody>
@@ -265,22 +243,25 @@ const STATUS_CLASS: Record<MakecsvResult['status'], string> = {
                 class="border-b border-gray-100 dark:border-gray-800"
                 :class="row.etcExcluded ? 'bg-yellow-50 dark:bg-yellow-900/20' : ''"
               >
-                <td class="py-1.5 pr-2">
-                  <input
-                    type="checkbox"
-                    :checked="selected.has(row.key)"
-                    :disabled="row.ids.length === 0"
-                    :aria-label="`${row.category} ${row.driverCd} ${row.label} を選ぶ`"
-                    @change="toggleRow(row)"
-                  >
-                </td>
                 <td class="py-1.5 pr-3 whitespace-nowrap">{{ row.category }}<span v-if="row.item" class="text-gray-500 dark:text-gray-400"> / {{ row.item }}</span></td>
                 <td class="py-1.5 pr-3 whitespace-nowrap">{{ row.driverCd }} {{ row.driverName }}</td>
                 <td class="py-1.5 pr-3 tabular-nums">{{ row.label }}</td>
                 <td class="py-1.5 pr-3 tabular-nums text-right">{{ row.value }}</td>
                 <td class="py-1.5 pr-3 tabular-nums text-right">{{ row.diff }}</td>
                 <td class="py-1.5 pr-3 tabular-nums whitespace-nowrap">{{ [row.vehicle, row.dept].filter(Boolean).join(' / ') }}</td>
-                <td class="py-1.5 tabular-nums text-xs text-gray-500 dark:text-gray-400">{{ row.ids.length ? row.ids.join(' ') : '—' }}</td>
+                <td class="py-1.5 pr-3 tabular-nums text-xs text-gray-500 dark:text-gray-400">{{ row.ids.length ? row.ids.join(' ') : '—' }}</td>
+                <td class="py-1.5 whitespace-nowrap">
+                  <UButton
+                    v-if="row.ids.length > 0"
+                    size="xs"
+                    variant="outline"
+                    :loading="writing === row.key"
+                    :disabled="writing !== null"
+                    @click="writeCsv(row.ids, row.key)"
+                  >
+                    出す
+                  </UButton>
+                </td>
               </tr>
             </tbody>
           </table>
