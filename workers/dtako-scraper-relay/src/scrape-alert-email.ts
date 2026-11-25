@@ -104,6 +104,17 @@ export function buildScrapeAlertSubject(startDate: string, endDate: string): str
   return `[dtako] 取り込み失敗 ${formatReadingDateRange(startDate, endDate)}`;
 }
 
+/** 成功の件名。`[dtako] 取り込み成功 <読取日 YYYY/MM/DD>`。失敗と同じ宛先へ送る
+ * (「メールが来ない」を「失敗していない」と読まないよう、成功も毎回知らせる)。 */
+export function buildScrapeSuccessSubject(startDate: string, endDate: string): string {
+  return `[dtako] 取り込み成功 ${formatReadingDateRange(startDate, endDate)}`;
+}
+
+/** 成功の本文。会社と読取日だけ (失敗の本文と同じく運行NO・key は載せない)。 */
+export function buildScrapeSuccessBody(compId: string, startDate: string, endDate: string): string {
+  return `【dtako スクレイプ】comp_id ${compId} の ${formatReadingDateRange(startDate, endDate)}分の自動取り込みに成功しました。`;
+}
+
 export interface ScrapeAlertEmailDeps {
   /** KV `scrape_alert_email` の生の値。**throw してよい** (ここで catch する)。 */
   readConfig: () => Promise<string | null>;

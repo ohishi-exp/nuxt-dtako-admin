@@ -4,6 +4,8 @@ import {
   buildDtakoCronAlertBody,
   buildScrapeAlertEmail,
   buildScrapeAlertSubject,
+  buildScrapeSuccessBody,
+  buildScrapeSuccessSubject,
   dtakoCronAlertReason,
   parseScrapeAlertEmailConfig,
   recalcPendingAlertReason,
@@ -108,6 +110,13 @@ describe("buildScrapeAlertEmail", () => {
   it("件名は読取日の範囲 (日次は 1 日だけ)", () => {
     expect(buildScrapeAlertSubject("2026-10-05", "2026-10-06")).toBe(
       "[dtako] 取り込み失敗 2026/10/05〜2026/10/06",
+    );
+  });
+
+  it("成功の件名と本文 (会社と読取日だけ)", () => {
+    expect(buildScrapeSuccessSubject("2026-10-05", "2026-10-05")).toBe("[dtako] 取り込み成功 2026/10/05");
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-06")).toBe(
+      "【dtako スクレイプ】comp_id 12345678 の 2026/10/05〜2026/10/06分の自動取り込みに成功しました。",
     );
   });
 });

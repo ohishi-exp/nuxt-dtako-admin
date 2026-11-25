@@ -546,6 +546,8 @@ import {
   ALERT_REASON_FOLD_NOT_CONFIGURED,
   ALERT_REASON_NO_SHARED_SECRET,
   buildScrapeAlertSubject,
+  buildScrapeSuccessBody,
+  buildScrapeSuccessSubject,
   recalcPendingAlertReason,
   SCRAPE_ALERT_EMAIL_KV_KEY,
   sendScrapeAlertEmail,
@@ -1789,6 +1791,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
       if (alertReasons.length > 0) {
         await this.notifyScrapeFailure(logBase, account, range, alertReasons.join(" / "), false, sharedSecret);
+      } else {
+        // 成功もメールで知らせる (LINE WORKS には送らない)。届かなければ経路の故障と分かる
+        await sendScrapeAlertEmail(
+          scrapeAlertEmailDeps(this.env),
+          buildScrapeSuccessSubject(range.startDate, range.endDate),
+          buildScrapeSuccessBody(account.comp_id, range.startDate, range.endDate),
+          logBase,
+        );
       }
     } catch (err) {
       const { message, evidence } = describeScrapeFailure(err);

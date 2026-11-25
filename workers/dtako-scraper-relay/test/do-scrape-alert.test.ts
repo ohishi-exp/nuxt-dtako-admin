@@ -316,7 +316,7 @@ describe("runCronDtakoScrape の失敗を人へ届ける (Refs #967)", () => {
     });
   });
 
-  it("★ 成功したときは 1 通も送らない (陰性対照)", async () => {
+  it("★ 成功したときは LINE WORKS には送らず、成功のメールを 1 通だけ送る", async () => {
     const { sent, mails, run } = makeDO();
     // ZIP マジック (`PK\x03\x04`) だけを持つ最小の応答。alc へのアップロードは
     // 上の stub が 200 を返すので、catch には 1 度も入らない。
@@ -326,9 +326,11 @@ describe("runCronDtakoScrape の失敗を人へ届ける (Refs #967)", () => {
     await run(ACCOUNT, RANGE, "job-6");
     errs.restore();
 
-    // アップロード先 (alc-internal-proxy) は叩くが、LINE WORKS へもメールへも 1 通も出さない。
     expect(sent).toHaveLength(0);
-    expect(mails).toHaveLength(0);
+    expect(mails).toHaveLength(1);
+    expect(mailBody(mails[0]!.raw)).toBe(
+      "【dtako スクレイプ】comp_id 27324455 の 2026/08/28分の自動取り込みに成功しました。",
+    );
   });
 });
 
@@ -473,7 +475,8 @@ describe("取り込みの失敗をメールでも届ける (Refs #1206)", () => 
 
     expect(foldMonth).toHaveBeenCalledTimes(1);
     expect(sent).toHaveLength(0);
-    expect(mails).toHaveLength(0);
+    // 失敗のメールは出ない (出るのは成功の 1 通だけ)
+    expect(mails.map((m) => mailBody(m.raw))).toEqual([expect.stringContaining("自動取り込みに成功しました")]);
   });
 
   it("★ D4: 要再計算が failed > 0 を返したら 1 通", async () => {
@@ -510,7 +513,8 @@ describe("取り込みの失敗をメールでも届ける (Refs #1206)", () => 
     errs.restore();
 
     expect(sent).toHaveLength(0);
-    expect(mails).toHaveLength(0);
+    // 失敗のメールは出ない (出るのは成功の 1 通だけ)
+    expect(mails.map((m) => mailBody(m.raw))).toEqual([expect.stringContaining("自動取り込みに成功しました")]);
   });
 
   it("★ 同じ取り込みで複数起きたら理由を並べて 1 通 (1 回の取り込みにつき最大 1 通)", async () => {
