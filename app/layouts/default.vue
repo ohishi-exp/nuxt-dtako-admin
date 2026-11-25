@@ -29,6 +29,7 @@ const navigation = [
   { label: '運行手当', icon: 'i-lucide-coins', to: '/profit/allowance' },
   { label: '粗利', icon: 'i-lucide-trending-up', to: '/profit/margin' },
   { label: '一番星ヘルスチェック', icon: 'i-lucide-heart-pulse', to: '/ichiban-health' },
+  { label: '一番星×デジタコ突合', icon: 'i-lucide-scale', to: '/ichiban-check' },
   { label: '給与DB取得', icon: 'i-lucide-database', to: '/kyuyo-fetch' },
   { label: 'リモートアプリ', icon: 'i-lucide-monitor', to: '/remote-app' },
   { label: '給油', icon: 'i-lucide-fuel', to: '/fuel/intank' },
