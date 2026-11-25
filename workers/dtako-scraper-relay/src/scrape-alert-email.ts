@@ -231,3 +231,25 @@ export const ALERT_REASON_CRON_THREW = "日次 cron が取り込みを積む前�
 export function buildDtakoCronAlertBody(date: string, reason: string): string {
   return `【dtako スクレイプ】${formatReadingDateRange(date, date)}分の日次取り込み: ${reason}`;
 }
+
+/**
+ * 一番星突合の CSV 書き出し cron (`ICHIBAN_MAKECSV_CRON`) の結果メール。**成功でも失敗でも毎回送る**
+ * (無人で社内フォルダへ書くので、走ったこと自体を人へ届ける)。月ごとに 1 行 (DO の要約 or 失敗の理由)。
+ * 結果が 1 件も無い (dispatch の前に落ちた) ときは `threw` の文面にする。
+ */
+export function buildIchibanMakecsvEmail(
+  results: CronRunResult[],
+  now: Date,
+  threw = false,
+): { subject: string; body: string } {
+  const today = new Date(now.getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  const day = formatReadingDateRange(today, today);
+  const ok = !threw && results.length > 0 && results.every((r) => r.ok);
+  const lines = threw
+    ? ["cron が書き出しを始める前に失敗しました (設定の読み取り等)。"]
+    : results.map((r) => `${r.target}: ${r.ok ? "" : "[失敗] "}${r.detail}`);
+  return {
+    subject: `[dtako] 一番星突合の CSV 書き出し ${ok ? "成功" : "失敗あり"} ${day}`,
+    body: [`【一番星×デジタコ突合】${day} 05:00 の自動「すべて出す」`, ...lines].join("\n"),
+  };
+}

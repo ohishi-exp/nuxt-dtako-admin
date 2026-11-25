@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ALERT_REASON_FOLD_FAILED,
   buildDtakoCronAlertBody,
+  buildIchibanMakecsvEmail,
   buildScrapeAlertEmail,
   buildScrapeAlertSubject,
   buildScrapeSuccessBody,
@@ -271,5 +272,34 @@ describe("dtakoCronAlertReason", () => {
     expect(buildDtakoCronAlertBody("2026-10-05", "理由")).toBe(
       "【dtako スクレイプ】2026/10/05分の日次取り込み: 理由",
     );
+  });
+});
+
+describe("buildIchibanMakecsvEmail (成功でも失敗でも送る)", () => {
+  const now = new Date("2026-11-02T20:00:00Z"); // JST 11/03 05:00
+  const ok = (target: string): CronRunResult => ({ kind: "ichiban-makecsv", target, ok: true, detail: "HTTP 200: 書き出した 2 件" });
+
+  it("全月成功なら件名は成功、月ごとに 1 行", () => {
+    const mail = buildIchibanMakecsvEmail([ok("2026-10"), ok("2026-11")], now);
+    expect(mail.subject).toBe("[dtako] 一番星突合の CSV 書き出し 成功 2026/11/03");
+    expect(mail.body).toBe(
+      "【一番星×デジタコ突合】2026/11/03 05:00 の自動「すべて出す」\n2026-10: HTTP 200: 書き出した 2 件\n2026-11: HTTP 200: 書き出した 2 件",
+    );
+  });
+
+  it("1 月でも失敗があれば件名は失敗あり、その行に [失敗]", () => {
+    const mail = buildIchibanMakecsvEmail([ok("2026-10"), { kind: "ichiban-makecsv", target: "2026-11", ok: false, detail: "HTTP 502: x" }], now);
+    expect(mail.subject).toContain("失敗あり");
+    expect(mail.body).toContain("2026-11: [失敗] HTTP 502: x");
+  });
+
+  it("結果が空 (KINTAI_COMP_ID 未設定以外で 0 件) も失敗扱い", () => {
+    expect(buildIchibanMakecsvEmail([], now).subject).toContain("失敗あり");
+  });
+
+  it("dispatch の前に落ちたときの文面", () => {
+    const mail = buildIchibanMakecsvEmail([], now, true);
+    expect(mail.subject).toContain("失敗あり");
+    expect(mail.body).toContain("始める前に失敗しました");
   });
 });

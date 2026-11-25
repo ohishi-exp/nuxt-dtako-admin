@@ -554,6 +554,7 @@ import {
   splitFailedAlertReason,
   type ScrapeAlertEmailDeps,
 } from "./scrape-alert-email";
+import { chunkIds, countMakecsvResults, ichibanCheckIds, type MakecsvCounts } from "./ichiban-makecsv";
 import {
   fetchBranchDailyReport,
   fetchDailyReportPdf,
@@ -1412,6 +1413,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/cron/vehicle-state/last" && request.method === "GET") {
       const last = await this.ctx.storage.get<VehicleStateCronLastRun>(VEHICLE_STATE_LAST_RUN_KEY);
       return Response.json({ last: last ?? null });
+    }
+
+    // 一番星突合の「すべて出す」を無人で押す (ICHIBAN_MAKECSV_CRON)。**本番の社内フォルダへ書く口**だが、
+    // `/cron/*` は index.ts が DO へ渡す prefix に無いので外からは届かない (scheduled handler だけ)。
+    // 他の `/cron/*` と同じく追加の認可は持たない。
+    if (url.pathname === "/cron/ichiban-makecsv" && request.method === "POST") {
+      return this.handleCronIchibanMakecsv(request);
     }
 
     // 前日分の運転日報を netprint へ登録し予約番号を LINE WORKS へ通知する
@@ -8621,6 +8629,44 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const { status, body } = await relayKintaiWrite(writer, DTAKO_MAKECSV_PATH, init);
     if (status !== 200) console.error(JSON.stringify({ kintai_ichiban_makecsv: "failed", status, ...body }));
     return Response.json(body, { status });
+  }
+
+  /**
+   * POST /cron/ichiban-makecsv — body {comp_id, month}。画面 `/ichiban-check` の「突合を読む」→
+   * 「すべて出す」(項目で絞らない全行の運行) を無人で行う。**中身は画面と同じ 2 つの口をそのまま呼ぶだけ**
+   * (`handleKintaiIchibanCheck` / `handleKintaiIchibanMakecsv`)。id の集め方・500 件ずつの分け方は
+   * `ichiban-makecsv.ts` (画面と同じ規則を写したもの。両側に同じ fixture を当てて固定)。
+   *
+   * 既存の `/cron/dtako` のような 202 + alarm にせず**同期で返す**: 結果 (件数) を cron 側がメールに載せるため。
+   * 突合 40 秒 + 書き出しで数分に収まり、scheduled の waitUntil の中で待てる。
+   * 応答は人が読む 1 行の要約 (text)。書き出しに 1 件でも失敗があれば 502。
+   */
+  private async handleCronIchibanMakecsv(request: Request): Promise<Response> {
+    const parsed = await parseCronCompMonthBody(request, "/restraint-api/kintai/ichiban-check");
+    if (parsed instanceof Response) return parsed;
+    const check = await this.handleKintaiIchibanCheck(parsed.record, parsed.url);
+    if (!check.ok) return check;
+    const { rows, ids } = ichibanCheckIds(await check.json());
+    const n: MakecsvCounts = { written: 0, skipped: 0, error: 0 };
+    let sent = 0;
+    for (const chunk of chunkIds(ids)) {
+      const res = await this.handleKintaiIchibanMakecsv(
+        parsed.record,
+        new Request("https://relay.internal/restraint-api/kintai/ichiban-makecsv", {
+          method: "POST",
+          body: JSON.stringify({ ids: chunk }),
+        }),
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        return new Response(`運行 ${ids.length} 件のうち ${sent} 件まで書き出した後に失敗: ${text.slice(0, 300)}`, { status: res.status });
+      }
+      countMakecsvResults(await res.json(), n);
+      sent += chunk.length;
+    }
+    const summary = `差分 ${rows} 行 / 運行 ${ids.length} 件 → 書き出した ${n.written} 件 / 飛ばした ${n.skipped} 件 / 失敗 ${n.error} 件`;
+    console.log(JSON.stringify({ cron_ichiban_makecsv: parsed.url.searchParams.get("month"), ...n, rows, ids: ids.length }));
+    return new Response(summary, { status: n.error > 0 ? 502 : 200 });
   }
 
   /** 乗務員CD クエリの検証。未指定は null、書式違いは `Error` (= 400)。 */

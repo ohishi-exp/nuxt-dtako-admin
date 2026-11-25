@@ -10,6 +10,7 @@ import {
   ALERT_REASON_CRON_THREW,
   buildDtakoCronAlertBody,
   buildScrapeAlertSubject,
+  buildIchibanMakecsvEmail,
   dtakoCronAlertReason,
   sendScrapeAlertEmail,
 } from "./scrape-alert-email";
@@ -36,6 +37,7 @@ import {
 import {
   asWritableConfigKv,
   DTAKO_CRON,
+  ICHIBAN_MAKECSV_CRON,
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
   dispatchCompIdTargets,
@@ -45,6 +47,7 @@ import {
   parseDvrTargets,
   parseVehicleStateTargets,
   type CompIdTarget,
+  type CronRunResult,
   resolveDtakoAccountsRaw,
   resolveDvrTargetsRaw,
   resolveNetprintTargetsRaw,
@@ -151,6 +154,12 @@ async function alertDtakoCron(env: RelayWorkerEnv, now: Date, reason: string): P
     buildDtakoCronAlertBody(date, reason),
     { scheduled: DTAKO_CRON },
   );
+}
+
+/** 一番星突合の CSV 書き出し cron の結果メール (成功でも失敗でも送る)。throw しない。 */
+async function mailIchibanMakecsv(env: RelayWorkerEnv, results: CronRunResult[], now: Date, threw = false): Promise<void> {
+  const { subject, body } = buildIchibanMakecsvEmail(results, now, threw);
+  await sendScrapeAlertEmail(scrapeAlertEmailDeps(env), subject, body, { scheduled: ICHIBAN_MAKECSV_CRON });
 }
 
 export default {
@@ -502,7 +511,10 @@ export default {
             const reason = dtakoCronAlertReason(results);
             if (reason) await alertDtakoCron(env, now, reason);
           }
+          // 一番星突合の CSV 書き出しは成否に関わらず毎回 1 通。
+          if (controller.cron === ICHIBAN_MAKECSV_CRON) await mailIchibanMakecsv(env, results, now);
         } catch (err) {
+          if (controller.cron === ICHIBAN_MAKECSV_CRON) await mailIchibanMakecsv(env, [], now, true);
           // dispatch の前 (KV の読み取り等) で落ちた。**握らずに投げ直す** — 従来どおり
           // cron の実行ごと失敗として Observability に出す。日次取り込みの回だけ人へ届ける。
           if (controller.cron === DTAKO_CRON) await alertDtakoCron(env, now, ALERT_REASON_CRON_THREW);

@@ -70,6 +70,23 @@ export const DVR_CRON = "*/10 * * * *";
  */
 export const VEHICLE_STATE_CRON = DVR_CRON;
 
+/**
+ * 一番星×デジタコ突合の「すべて出す」(合わない運行の CSV を ichizip の取り込みフォルダへ
+ * 出し直す、画面 `/ichiban-check`) を無人で押す cron 式 (UTC)。**JST 5:00** — 日次
+ * スクレイプ (JST 1:00) と拘束サマリ同期 (JST 4:00) の後、ETC (JST 6 時〜) の前。
+ * 対象月は [`ichibanMakecsvMonths`]。会社は `KINTAI_COMP_ID` の 1 社 (社内 dtako を持つ会社)。
+ * **本番の社内フォルダへ書くので staging には足さない** (wrangler.toml の注記)。
+ */
+export const ICHIBAN_MAKECSV_CRON = "0 20 * * *";
+
+/** 一番星突合の cron が回す月。当月 + **JST の 15 日まで**は前月も (月初は前月の
+ * 一番星側の締めが続いているため)。前月を先に並べる。 */
+export function ichibanMakecsvMonths(now: Date): string[] {
+  const cur = currentYmJst(now);
+  const day = Number(new Date(now.getTime() + 9 * 3600 * 1000).toISOString().slice(8, 10));
+  return day <= 15 ? [prevYm(cur), cur] : [cur];
+}
+
 export interface DtakoAccountEntry {
   comp_id: string;
   user_name: string;
@@ -474,7 +491,7 @@ export async function dispatchEtcAccounts(
 export const DTAKO_ACCOUNTS_EMPTY_DETAIL = "DTAKO_ACCOUNTS 未設定のため skip";
 
 export interface CronRunResult {
-  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "vehicle-state" | "none";
+  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "vehicle-state" | "ichiban-makecsv" | "none";
   target: string;
   ok: boolean;
   detail: string;
@@ -752,6 +769,24 @@ export async function runScheduledCron(
       dispatchCompIdTargets("vehicle-state", parseVehicleStateTargets(env.vehicleStateTargetsRaw), "/cron/vehicle-state", "VEHICLE_STATE_TARGETS", callDo),
     ]);
     return [...dvr, ...vehicleState];
+  }
+
+  if (cron === ICHIBAN_MAKECSV_CRON) {
+    const compId = (env.kintaiCompId ?? "").trim();
+    if (!compId) {
+      return [{ kind: "ichiban-makecsv", target: "*", ok: false, detail: "KINTAI_COMP_ID 未設定のため一番星突合の CSV 書き出しを実行できません" }];
+    }
+    // 月は**直列**に回す — 突合は社内 CakePHP で 1 回 40 秒ほどの重い計算で、並べると社内の負荷が倍になる。
+    const results: CronRunResult[] = [];
+    for (const month of ichibanMakecsvMonths(now)) {
+      try {
+        const res = await callDo(`scraper-comp-${compId}`, "/cron/ichiban-makecsv", { comp_id: compId, month });
+        results.push({ kind: "ichiban-makecsv", target: month, ok: res.ok, detail: `HTTP ${res.status}: ${res.text.slice(0, 300)}` });
+      } catch (err) {
+        results.push({ kind: "ichiban-makecsv", target: month, ok: false, detail: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return results;
   }
 
   return [{ kind: "none", target: cron, ok: false, detail: "未知の cron 式です (wrangler.toml の triggers と cron.ts の定数がズレています)" }];

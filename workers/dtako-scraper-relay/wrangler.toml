@@ -103,7 +103,7 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 # VPS / GCE cron の Worker 移行 (Refs ohishi-exp/dtako-scraper#22 /
 # ohishi-exp/browser-render-rust#14)。cron 式は src/cron.ts の
 # DTAKO_CRON / ETC_CRON / RESTRAINT_SYNC_CRON / NETPRINT_CRON /
-# DRIVER_MASTER_SYNC_CRON / DVR_CRON 定数と一致させること (ズレると
+# DRIVER_MASTER_SYNC_CRON / DVR_CRON / ICHIBAN_MAKECSV_CRON 定数と一致させること (ズレると
 # scheduled handler が「未知の cron 式」を log して何もしない)。
 # ★ **この一致を機械検証する gate はまだ無い** (別 issue #1095)。定数を足したら
 #   本番 [triggers] と (足すなら) [env.staging.triggers] を手で揃えること。
@@ -167,6 +167,12 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 #                          **device credential は要らない** — AUTH_WORKER_RPC binding が
 #                          無ければ fail-closed で 503。上の「staging には足さない」は
 #                          車輌動態にもそのまま当てはまる (= staging では 1 度も走らない)。
+# - "0 20 * * *"         = 05:00 JST。一番星×デジタコ突合の「すべて出す」(画面
+#                          /ichiban-check) を無人で押し、合わない運行の CSV を ichizip の
+#                          取り込みフォルダへ出し直す。当月 + JST 15 日までは前月も (直列)。
+#                          対象は KINTAI_COMP_ID の 1 社。実行のたび成否をメールで送る
+#                          (KV scrape_alert_email の宛先)。★ **staging には足さない** —
+#                          本番と同じ社内の取り込みフォルダへ書く口なので。
 [triggers]
 crons = [
   "0 16 * * *",
@@ -175,6 +181,7 @@ crons = [
   "30 21 * * *",
   "0 22,3,6,8,10 * * *",
   "*/10 * * * *",
+  "0 20 * * *",
 ]
 
 # ETC 明細 CSV の保存先 (app 本体の DTAKO_R2 と同じ dtako-uploads bucket)。
@@ -330,10 +337,10 @@ enabled = true
 [[env.staging.tail_consumers]]
 service = "nuxt-dtako-admin-scraper-relay-tail-staging"
 
-# ★ 本番 [triggers] の 6 本のうち 3 本を**意図的に外している** — 日次 (下記) と
+# ★ 本番 [triggers] の 7 本のうち 4 本を**意図的に外している** — 日次 (下記) と
 # "0 22,3,6,8,10 * * *" (乗務員マスタ同期、Refs ippoan/alc-app-s3#125) と
-# "*/10 * * * *" (DVR 取り込み、Refs #1094)。理由の本体は top-level [triggers] の
-# 各 cron の項に書いてある (この 2 本だけ「staging には足さない」と明記されている)。
+# "*/10 * * * *" (DVR 取り込み、Refs #1094) と "0 20 * * *" (一番星突合の CSV 書き出し)。
+# 理由の本体は top-level [triggers] の各 cron の項に書いてある (「staging には足さない」と明記)。
 #
 # ★ **dtako 日次 "0 16 * * *" は staging から外した** (Refs ippoan/rust-alc-api#725)。
 # staging は本番と同じ theearth アカウント (DTAKO_CONFIG_KV は本番と同じ namespace) を
