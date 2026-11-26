@@ -165,13 +165,24 @@ function csvPageHtml(opts: { omit?: string; tableDate?: string } = {}): string {
     txtDriver_1: '<input type="text" id="txtDriver_1" name="ctl00$MainContent$txtDriver_1" value="" />',
     ddlDriver_0: '<select id="ddlDriver_0" name="ctl00$MainContent$ddlDriver_0"><option value="0000000000" selected="selected"></option></select>',
     ddlDriver_1: '<select id="ddlDriver_1" name="ctl00$MainContent$ddlDriver_1"><option value="9999999999" selected="selected"></option></select>',
+    // 出力ファイル形式 (Refs #1287)。**画面の既定 (selected) は連動出力形式ではない**形にしておく —
+    // 送る値が selected ではなく表示文字列で選ばれていることをテストで見分けられるように。
+    ddlSystem: CSV_SYSTEM_SELECT_HTML,
   }
   if (opts.omit) delete fields[opts.omit]
   return `<html><body><table><tr><td>${tableDate}</td></tr></table>${Object.values(fields).join('\n')}</body></html>`
 }
 
+/** 出力ファイル形式の select (値・並びは架空。「連動出力形式」の表示文字列だけが実画面と同じ)。 */
+const CSV_SYSTEM_SELECT_HTML =
+  '<select name="ctl00$MainContent$ddlSystem" id="MainContent_ddlSystem">' +
+  '<option selected="selected" value="0">別の形式</option>' +
+  '<option value="7">連動出力形式</option>' +
+  '</select>'
+
 const STAGE1_CONFIRM_HTML = `<html><body>
   <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="STAGE2VS" />
+  ${CSV_SYSTEM_SELECT_HTML}
   <input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" value="ダウンロード" />
 </body></html>`
 
@@ -179,6 +190,7 @@ const STAGE1_CONFIRM_NO_OUTPUT_HTML = `<html><body>この日付範囲にはデ�
 
 const STAGE1_CONFIRM_NO_VALUE_HTML = `<html><body>
   <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="STAGE2VS" />
+  ${CSV_SYSTEM_SELECT_HTML}
   <input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" />
 </body></html>`
 
@@ -1176,5 +1188,92 @@ describe('scrapeViaHttp', () => {
     )
     const names = timer.report().phases.map((p) => p.name)
     expect(names).toEqual(['login', 'csv_get', 'stage1', 'stage2'])
+  })
+})
+
+describe('downloadCsvZip の出力ファイル形式 = 連動出力形式 (Refs #1287)', () => {
+  // 日次 cron の zip に KUDGSIR.csv (料金所) と KUDGFUL.csv (給油) が無かった真因は、cron が
+  // ddlSystem を送らず連動出力形式でない形式で出力されていたこと。運行 1 件の経路
+  // (`downloadOperationCsvZip`) は全フィールドを送るので連動出力形式で取れていた。
+  const range = { startDate: '2026-11-25', endDate: '2026-11-25' }
+  const SYSTEM = 'ctl00$MainContent$ddlSystem'
+
+  /** 呼ばれた順に応答を返し、POST の body を残す fetch。 */
+  function recordingFetch(responses: Array<() => Response>) {
+    const bodies: URLSearchParams[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      if (init?.method === 'POST') bodies.push(new URLSearchParams(String(init.body ?? '')))
+      return responses[call++]()
+    }) as FetchLike
+    return { bodies, fetchImpl, calls: () => call }
+  }
+
+  const select = (options: string) => `<select name="${SYSTEM}" id="MainContent_ddlSystem">${options}</select>`
+  const confirmWith = (systemHtml: string) => `<html><body>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="STAGE2VS" />
+  ${systemHtml}
+  <input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" value="ダウンロード" />
+</body></html>`
+  /** GET のページの ddlSystem を差し替える (残りは既存の fixture のまま)。 */
+  const csvPageWith = (systemHtml: string | null) =>
+    csvPageHtml({ omit: 'ddlSystem' }).replace('</body>', `${systemHtml ?? ''}</body>`)
+
+  it('★ stage1 / stage2 の両方に、表示文字列が「連動出力形式」の option の value を載せる (selected ではない)', async () => {
+    const r = recordingFetch([() => html(csvPageHtml()), () => html(STAGE1_CONFIRM_HTML), () => zipResponse()])
+    await downloadCsvZip(createCookieJar(), range, r.fetchImpl)
+    expect(r.bodies).toHaveLength(2)
+    // fixture の selected は value=0 (別の形式)。送るのは連動出力形式の 7。
+    expect(r.bodies[0].get(SYSTEM)).toBe('7')
+    expect(r.bodies[1].get(SYSTEM)).toBe('7')
+    // 日付範囲など既存の項目はそのまま (足しただけで何も落としていない)
+    expect(r.bodies[1].get('ctl00$MainContent$SelectM')).toBe('rdoSelect1')
+    expect(r.bodies[1].get('ctl00$MainContent$btnCsvSvrOutput')).toBe('ダウンロード')
+  })
+
+  it('★ option の並びや value が違っても文字列で拾う — 段ごとに、その段で受けたページの value を送る', async () => {
+    const getPage = csvPageWith(
+      select('<option value="A">連動出力形式 (旧)</option><option value="B" selected="selected">連動出力形式</option>'),
+    )
+    const confirm = confirmWith(
+      select('<option value="12">\n  連動出力形式\n</option><option value="0" selected="selected">別の形式</option>'),
+    )
+    const r = recordingFetch([() => html(getPage), () => html(confirm), () => zipResponse()])
+    await downloadCsvZip(createCookieJar(), range, r.fetchImpl)
+    // 前方一致ではなく完全一致 (「連動出力形式 (旧)」は選ばない)
+    expect(r.bodies[0].get(SYSTEM)).toBe('B')
+    // 確認ページでは先頭・前後に空白。GET の値 (B) を使い回さない
+    expect(r.bodies[1].get(SYSTEM)).toBe('12')
+  })
+
+  it('★ GET のページに ddlSystem が無ければ throw し、POST を 1 本も出さない', async () => {
+    const r = recordingFetch([() => html(csvPageWith(null))])
+    const err = (await downloadCsvZip(createCookieJar(), range, r.fetchImpl).catch((e: unknown) => e)) as Error
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    expect(err.message).toContain('CSV ダウンロードページ')
+    expect(err.message).toContain('連動出力形式')
+    expect(r.bodies).toHaveLength(0)
+  })
+
+  it('★ ddlSystem はあるが「連動出力形式」の option が無ければ throw (黙って別の形式で取らない)', async () => {
+    const r = recordingFetch([
+      () => html(csvPageWith(select('<option value="0" selected="selected">別の形式</option>'))),
+    ])
+    const err = await downloadCsvZip(createCookieJar(), range, r.fetchImpl).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    expect(r.bodies).toHaveLength(0)
+  })
+
+  it('★ 確認ページに ddlSystem が無ければ stage2 を出さずに throw (evidence は確認ページのもの)', async () => {
+    const confirmNoSystem = confirmWith('')
+    const r = recordingFetch([() => html(csvPageHtml()), () => html(confirmNoSystem)])
+    const err = (await downloadCsvZip(createCookieJar(), range, r.fetchImpl).catch(
+      (e: unknown) => e,
+    )) as TheearthPageMismatchError
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    expect(err.message).toContain('確認ページ')
+    expect(err.bodyPrefix).toBe(confirmNoSystem)
+    expect(r.bodies).toHaveLength(1)
+    expect(r.calls()).toBe(2)
   })
 })
