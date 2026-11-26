@@ -22,7 +22,6 @@ import {
 
 interface DavEnv {
   INTERNAL_SHARED_SECRET?: unknown
-  ETC_SCAN_TENANT_IDS?: unknown
   AUTH_MCRED?: MachineCredentialRpc
   ALC_REDACT?: AlcRedactRpc
   DTAKO_DB?: D1DatabaseLite
@@ -52,7 +51,6 @@ export default defineEventHandler(async (event) => {
         mcred: env.AUTH_MCRED,
         redact: env.ALC_REDACT,
         db: env.DTAKO_DB,
-        allowedTenants: await resolveSecret(env.ETC_SCAN_TENANT_IDS).catch(() => null),
         now: () => new Date().toISOString(),
       })
     }

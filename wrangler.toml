@@ -96,7 +96,7 @@ service = "ichibanboshi-ichiban"
 # 複合機の ETC コーポレートカード発行明細書 (Refs #1287)。`/dav/**` の受け口が使う auth-worker の RPC 2 本。
 # AUTH_MCRED: Basic を照合して tenant を返す (`issueTicket`、用途 `etc-scan`)。
 # ALC_REDACT: 明細書の PDF を OCR する (`extractEtcCard`)。どちらも entrypoint ごとに別 class (呼べるメソッドが閉じる)。
-# 受け付ける tenant は secret `ETC_SCAN_TENANT_IDS` (カンマ区切り、未設定は全拒否)。public repo なのでここに書かない。
+# 受け付ける tenant の照合は auth-worker の `issueTicket` が `APP_TENANT_ACL` (dtako の origin) で行う (front に tenant の一覧は持たない)。
 [[services]]
 binding = "AUTH_MCRED"
 service = "auth-worker"

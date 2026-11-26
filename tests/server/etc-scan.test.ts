@@ -14,7 +14,6 @@ import {
   listForTenant,
   parseExtractResult,
   parseId,
-  parseTenantList,
   runOcr,
   shaPrefix,
   updateRegistrationFields,
@@ -36,12 +35,6 @@ const redactOf = (res: ReturnType<typeof redactResult>) => ({ extractEtcCard: vi
 describe('小物', () => {
   it('shaPrefix は先頭 12 桁', () => {
     expect(shaPrefix(SHA_A)).toBe('aaaaaaaaaaaa')
-  })
-  it('parseTenantList: カンマ区切り・空白除去、未設定/空は空集合 (誰も通さない)', () => {
-    expect([...parseTenantList(' t1 , t2,,')]).toEqual(['t1', 't2'])
-    expect(parseTenantList(null).size).toBe(0)
-    expect(parseTenantList(undefined).size).toBe(0)
-    expect(parseTenantList('').size).toBe(0)
   })
   it('isSha256Hex は 64 桁の小文字 hex だけ', () => {
     expect(isSha256Hex(SHA_A)).toBe(true)

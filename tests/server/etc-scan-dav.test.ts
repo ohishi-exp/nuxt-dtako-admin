@@ -101,7 +101,7 @@ describe('handlePut', () => {
     db = await openEtcScanD1()
     issueTicket.mockReset().mockResolvedValue({ ticket: 'tk', tenantId: 't1', username: 'mc_1' })
     extractEtcCard.mockReset().mockResolvedValue(redactResult({ rows: [ROW_OK] }))
-    deps = { mcred: { issueTicket }, redact: { extractEtcCard }, db, allowedTenants: 't0, t1', now: () => NOW }
+    deps = { mcred: { issueTicket }, redact: { extractEtcCard }, db, now: () => NOW }
   })
 
   it('認証なしは 401、上限超えは 413、0 バイトは 201 (どれも RPC を呼ばない)', async () => {
@@ -127,15 +127,6 @@ describe('handlePut', () => {
     const out = await handlePut(BASIC, fakePdf(), deps)
     expect(out.kind).toBe('rejected')
     expect(out.reply).toEqual({ status: 401, headers: { 'WWW-Authenticate': 'Basic realm="etc-scan", charset="UTF-8"' } })
-    expect(db.rows('SELECT sha256 FROM etc_card_scans')).toEqual([])
-  })
-
-  it('tenant が ETC_SCAN_TENANT_IDS に無い・未設定・空なら 403 で保存しない (fail-closed)', async () => {
-    for (const allowedTenants of ['t0', null, '']) {
-      const out = await handlePut(BASIC, fakePdf(), { ...deps, allowedTenants })
-      expect(out.kind).toBe('forbidden_tenant')
-      expect(out.reply.status).toBe(403)
-    }
     expect(db.rows('SELECT sha256 FROM etc_card_scans')).toEqual([])
     expect(extractEtcCard).not.toHaveBeenCalled()
   })
