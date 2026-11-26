@@ -878,21 +878,19 @@ export const CSV_SYSTEM_LABEL = "連動出力形式";
  * 選んで取った zip と運行 1 件の zip (`downloadOperationCsvZip`、全フィールドを送る) にある
  * `KUDGFUL.csv`・`KUDGSIR.csv` が無かった。
  *
- * value は決め打ちせず、option の**表示文字列**で探す。見つからなければ throw — 黙って別の形式で
- * 取らない (取り込みは通るが料金所が欠ける、を繰り返さないため)。
+ * value は決め打ちせず、option の**表示文字列**で探す。見つからなければ null。
+ *
+ * - **GET のページ (stage1) で null なら throw** — 黙って別の形式で取らない (取り込みは通るが
+ *   料金所が欠ける、を繰り返さないため)。画面にこの select があることはユーザーのスクショで確認済み。
+ * - **確認ページ (stage2) で null なら stage1 の value を使い、warn 1 行** — 確認ページにこの select が
+ *   あるかは実物で確かめていない (選択モードの確認ページの記録 #203 からの推定)。推定が外れたときに
+ *   毎日の dtako の取り込みを丸ごと止めないため。
  */
-function csvSystemField(html: string, page: string, evidence: () => TheearthEvidence): Record<string, string> {
+function findCsvSystemValue(html: string): string | null {
   const option = parseSelectOptions(html, "name", CSV_SYSTEM_SELECT_NAME)?.options.find(
     (o) => o.label === CSV_SYSTEM_LABEL,
   );
-  if (!option) {
-    throw new TheearthPageMismatchError(
-      `${page}に出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢 (name=${CSV_SYSTEM_SELECT_NAME}) が見つかりません`,
-      evidence(),
-      html,
-    );
-  }
-  return { [CSV_SYSTEM_SELECT_NAME]: decodeHtmlEntities(option.value) };
+  return option ? decodeHtmlEntities(option.value) : null;
 }
 
 /** ZIP のマジックバイト (`PK\x03\x04`) で始まるか。 */
@@ -1127,11 +1125,19 @@ export async function downloadCsvZip(
   }
 
   // 出力ファイル形式 = 連動出力形式 (Refs #1287)。stage1 / stage2 ともに、その段で受けた
-  // ページの option から value を拾って送る ([`csvSystemField`] の doc)。
+  // ページの option から value を拾って送る ([`findCsvSystemValue`] の doc)。
+  const systemValue = findCsvSystemValue(html);
+  if (systemValue === null) {
+    throw new TheearthPageMismatchError(
+      `CSV ダウンロードページに出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢 (name=${CSV_SYSTEM_SELECT_NAME}) が見つかりません`,
+      buildEvidence(getRes, html, Date.now() - getT0),
+      html,
+    );
+  }
   const stage1Body = new URLSearchParams({
     ...hidden,
     ...dateRange,
-    ...csvSystemField(html, "CSV ダウンロードページ", () => buildEvidence(getRes, html, Date.now() - getT0)),
+    [CSV_SYSTEM_SELECT_NAME]: systemValue,
     [fields.get("btnCsvSvr")!.name]: fields.get("btnCsvSvr")!.value,
   });
 
@@ -1171,12 +1177,22 @@ export async function downloadCsvZip(
       stage1Html,
     );
   }
+  let stage2SystemValue = findCsvSystemValue(stage1Html);
+  if (stage2SystemValue === null) {
+    console.warn(
+      JSON.stringify({
+        csv_request: "date_range",
+        status: "confirm_page_without_csv_system",
+        message: `確認ページに出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢が無いため、GET のページの値を送る`,
+        value: systemValue,
+      }),
+    );
+    stage2SystemValue = systemValue;
+  }
   const stage2Body = new URLSearchParams({
     ...hidden2,
     ...dateRange,
-    ...csvSystemField(stage1Html, "CSV ダウンロードの確認ページ", () =>
-      buildEvidence(stage1Res, stage1Html, Date.now() - stage1T0),
-    ),
+    [CSV_SYSTEM_SELECT_NAME]: stage2SystemValue,
     [outputButton.name]: outputButton.value || "ダウンロード",
   });
   const stage2Res = await measurePhase(timer, "stage2", () =>

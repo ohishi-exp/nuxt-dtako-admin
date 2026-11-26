@@ -1264,16 +1264,29 @@ describe('downloadCsvZip の出力ファイル形式 = 連動出力形式 (Refs 
     expect(r.bodies).toHaveLength(0)
   })
 
-  it('★ 確認ページに ddlSystem が無ければ stage2 を出さずに throw (evidence は確認ページのもの)', async () => {
-    const confirmNoSystem = confirmWith('')
-    const r = recordingFetch([() => html(csvPageHtml()), () => html(confirmNoSystem)])
-    const err = (await downloadCsvZip(createCookieJar(), range, r.fetchImpl).catch(
-      (e: unknown) => e,
-    )) as TheearthPageMismatchError
-    expect(err).toBeInstanceOf(TheearthPageMismatchError)
-    expect(err.message).toContain('確認ページ')
-    expect(err.bodyPrefix).toBe(confirmNoSystem)
-    expect(r.bodies).toHaveLength(1)
-    expect(r.calls()).toBe(2)
+  it.each([
+    ['select が無い', ''],
+    ['「連動出力形式」の option が無い', '<select name="ctl00$MainContent$ddlSystem"><option value="0" selected="selected">別の形式</option></select>'],
+  ])('★ 確認ページに%sときは throw せず、GET のページの value を stage2 に送って warn 1 行', async (_label, systemHtml) => {
+    // 確認ページに ddlSystem があるかは実物で未確認。推定が外れても毎日の取り込みを止めない。
+    const warns: string[] = []
+    const spy = vi.spyOn(console, 'warn').mockImplementation((l: unknown) => void warns.push(String(l)))
+    const r = recordingFetch([() => html(csvPageHtml()), () => html(confirmWith(systemHtml)), () => zipResponse()])
+    const buf = await downloadCsvZip(createCookieJar(), range, r.fetchImpl)
+    spy.mockRestore()
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+    expect(r.bodies).toHaveLength(2)
+    expect(r.bodies[1].get(SYSTEM)).toBe('7') // GET のページで拾った値
+    expect(warns).toHaveLength(1)
+    expect(JSON.parse(warns[0])).toMatchObject({ status: 'confirm_page_without_csv_system', value: '7' })
+  })
+
+  it('★ 確認ページに「連動出力形式」があれば warn は出ない (陽性対照)', async () => {
+    const warns: string[] = []
+    const spy = vi.spyOn(console, 'warn').mockImplementation((l: unknown) => void warns.push(String(l)))
+    const r = recordingFetch([() => html(csvPageHtml()), () => html(STAGE1_CONFIRM_HTML), () => zipResponse()])
+    await downloadCsvZip(createCookieJar(), range, r.fetchImpl)
+    spy.mockRestore()
+    expect(warns).toEqual([])
   })
 })
