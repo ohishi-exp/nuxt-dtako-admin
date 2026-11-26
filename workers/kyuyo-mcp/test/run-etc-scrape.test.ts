@@ -34,7 +34,8 @@ describe("run_etc_scrape (Refs ohishi-exp/nuxt-dtako-admin#1287)", () => {
   it("説明文が「ログインする」「種別とログイン後のパスを記録する」「受け付けまで」を名指しする", () => {
     expect(runEtcScrapeTool.description).toMatch(/ログインし/);
     expect(runEtcScrapeTool.description).toMatch(/ログイン後のパス/);
-    expect(runEtcScrapeTool.description).toMatch(/受け付けた/);
+    expect(runEtcScrapeTool.description).toMatch(/応答の ok は受け付けただけ/);
+    expect(runEtcScrapeTool.description).toMatch(/数十秒〜1 分後/);
   });
 
   it("binding / secret が無ければ fail-closed", async () => {

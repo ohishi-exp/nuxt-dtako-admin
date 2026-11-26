@@ -2424,7 +2424,8 @@ export const runEtcScrapeTool = {
     "ETC 明細 CSV の取得を cron (JST 6,7,8,9 時) を待たずに 1 回走らせる。etc-meisai.jp へ " +
     "ETC_ACCOUNTS の各アカウントで 1 回ずつログインし、法人/個人の種別とログイン後のパスを " +
     "relay に記録する (ETC カード追加登録の担当判定に使われる)。" +
-    "relay は 202 で受けて裏で回すので、**応答の ok は「受け付けた」までで、ログインの結末ではない**。" +
+    "relay は 202 で受けて裏で回すので、**応答の ok は受け付けただけ。ログインと種別の記録は数十秒〜1 分後**" +
+    "(結末は relay の tail の account_type_stored の行で見る)。" +
     "応答は `{total, ok, results:[{target, ok}]}` (target は user_id の末尾 4 桁)。" +
     "全アカウントで受け付けに失敗したときだけ relay が 502 を返す。",
   inputSchema: noArgs,
