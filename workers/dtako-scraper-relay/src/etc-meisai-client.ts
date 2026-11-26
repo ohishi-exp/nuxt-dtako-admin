@@ -484,18 +484,27 @@ export interface EtcLoginParams {
   password: string;
 }
 
-/** ログイン後ページの「カードの追加登録」リンク (法人のメニューにしか無い)。種別判定
- * (`detectAccountType`) と登録画面への遷移 (`registerEtcCard`) が同じ条件で探す。 */
-export function findCardRegisterLink(html: string): EtcLink | undefined {
-  return parseLinks(html).find(
-    (l) =>
-      l.text.includes("カードの追加登録") ||
-      l.href.includes(ETC_FUNC_CARD_REGISTER) ||
-      l.onclick.includes(ETC_FUNC_CARD_REGISTER),
-  );
+/** リンク 1 本 (href・onclick) が持つ 10 桁の機能コード (`funccode=…` と `submitPage('…', …)` の引数)。
+ * `collectMenuFuncCodes` と `findCardRegisterLink` が同じ規則で読む。 */
+function linkFuncCodes(l: EtcLink): string[] {
+  const codes: string[] = [];
+  for (const s of [l.href, l.onclick]) {
+    for (const m of s.matchAll(/funccode=(\d{10})(?!\d)/g)) codes.push(m[1]);
+    for (const call of s.matchAll(/submitPage\(([^)]*)\)/g)) {
+      for (const m of call[1].matchAll(/['"](\d{10})['"]/g)) codes.push(m[1]);
+    }
+  }
+  return codes;
 }
 
-/** ログイン後ページからアカウント種別を判定する。**「カードの追加登録」リンクがあれば法人**。
+/** ログイン後ページの「カードの追加登録」リンク = 機能コード 1034000000 を持つリンク (法人のメニューにしか無い)。
+ * 種別判定 (`detectAccountType`) と登録画面への遷移 (`registerEtcCard`) が同じ条件で探す。
+ * リンク文字列では判定しない — 法人でないアカウントのページにも同じ文字列のリンクがあった (本番 2026-11-26)。 */
+export function findCardRegisterLink(html: string): EtcLink | undefined {
+  return parseLinks(html).find((l) => linkFuncCodes(l).includes(ETC_FUNC_CARD_REGISTER));
+}
+
+/** ログイン後ページからアカウント種別を判定する。**機能コード 1034000000 (「カードの追加登録」) のリンクがあれば法人**。
  *
  * 以前は URL の `/etc_corp_meisai/` で分けていたが、実物は法人も個人も同じ `/etc/R?funccode=…`
  * のルーターに来るので必ず個人になっていた (2026-11-26 本番 relay ログ、Refs #1287)。登録を担当
@@ -509,12 +518,7 @@ export function detectAccountType(page: EtcPage): EtcAccountType {
 export function collectMenuFuncCodes(html: string): string[] {
   const codes = new Set<string>();
   for (const l of parseLinks(html)) {
-    for (const s of [l.href, l.onclick]) {
-      for (const m of s.matchAll(/funccode=(\d{10})(?!\d)/g)) codes.add(m[1]);
-      for (const call of s.matchAll(/submitPage\(([^)]*)\)/g)) {
-        for (const m of call[1].matchAll(/['"](\d{10})['"]/g)) codes.add(m[1]);
-      }
-    }
+    for (const c of linkFuncCodes(l)) codes.add(c);
   }
   return [...codes].sort();
 }

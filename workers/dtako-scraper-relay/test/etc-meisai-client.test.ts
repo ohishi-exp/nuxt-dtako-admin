@@ -451,14 +451,23 @@ describe('withNextfunc / parseCsvFilename / detectAccountType', () => {
   })
 
   // Refs #1287: 実物は法人も個人も同じ /etc/R に来るので、URL ではなくメニューの中身で決める
-  it('ログイン後ページに「カードの追加登録」リンクがあれば法人、無ければ個人', () => {
+  it('ログイン後ページに機能コード 1034000000 のリンクがあれば法人、無ければ個人', () => {
     const R = 'https://www.etc-meisai.jp/etc/R?funccode=1013000000'
     expect(detectAccountType(page(R, CORP_MENU_HTML))).toBe('corporate')
-    // 文言だけ / onclick の機能コードだけでも法人
-    expect(detectAccountType(page(R, '<a href="#">カードの追加登録/削除</a>'))).toBe('corporate')
+    // submitPage('1034000000', …) の href / funccode=1034000000 の href / onclick の機能コードは法人 (文言は問わない)
+    expect(detectAccountType(page(R, `<a href="javascript:submitPage('1034000000','1034000000')">x</a>`))).toBe('corporate')
+    expect(detectAccountType(page(R, '<a href="/etc/R?funccode=1034000000&amp;nextfunc=1034000000">x</a>'))).toBe('corporate')
     expect(
       detectAccountType(page(R, `<a href="javascript:void(0)" onclick="submitPage('frm','/etc/R?funccode=1034000000')">登録</a>`)),
     ).toBe('corporate')
+    // 本番 2026-11-26: 個人のページにも同じ文字列のリンクがあった。文字列だけでは法人にしない
+    expect(detectAccountType(page(R, '<a href="#">カードの追加登録/削除</a>'))).toBe('personal')
+    expect(
+      detectAccountType(page(R, `<a href="javascript:submitPage('1021000000','1021000000')">カードの追加登録</a>`)),
+    ).toBe('personal')
+    // 11 桁の中の部分一致は機能コードとして読まない
+    expect(detectAccountType(page(R, '<a href="/etc/R?funccode=10340000001">x</a>'))).toBe('personal')
+    expect(detectAccountType(page(R, `<a href="javascript:submitPage('10340000001')">x</a>`))).toBe('personal')
     expect(detectAccountType(page(R, MENU_HTML))).toBe('personal')
     // URL に etc_corp_meisai が入っていても、リンクが無ければ個人 (URL は見ない)
     expect(detectAccountType(page('https://www.etc-meisai.jp/etc_corp_meisai/top', MENU_HTML))).toBe('personal')
@@ -1362,6 +1371,11 @@ ${buttons}</form></body></html>`
     await expect(registerEtcCard(createCookieJar(), session('<p>menu</p>'), FIELDS, 'dry_run', fetch, 1000)).rejects.toThrow(
       '「カードの追加登録/削除」リンクが見つかりません',
     )
+    expect(calls).toHaveLength(0)
+    // 文字列だけ一致して機能コード 1034000000 を持たないリンクは辿らない
+    await expect(
+      registerEtcCard(createCookieJar(), session('<a href="#">カードの追加登録/削除</a>'), FIELDS, 'dry_run', fetch, 1000),
+    ).rejects.toThrow('「カードの追加登録/削除」リンクが見つかりません')
     expect(calls).toHaveLength(0)
   })
 
