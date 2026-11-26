@@ -35,6 +35,7 @@ import listHandler from '../../server/api/etc-cards/index.get'
 import patchHandler from '../../server/api/etc-cards/[id].patch'
 import regDateHandler from '../../server/api/etc-cards/[id]/registration-date.patch'
 import registerHandler from '../../server/api/etc-cards/[id]/register.post'
+import rescanHandler from '../../server/api/etc-cards/[id]/rescan.post'
 import ocrHandler from '../../server/api/etc-cards/scans/[sha256]/ocr.post'
 import { insertScan, runOcr } from '../../server/utils/etc-scan'
 import { ROW_OK, ROW_PARTIAL, fakePdf, openEtcScanD1, redactResult, type EtcScanD1 } from '../helpers/etc-scan-d1'
@@ -235,6 +236,32 @@ describe('/api/etc-cards', () => {
     requireAuthMock.mockResolvedValue({ role: 'admin', tenant_id: 't2' })
     expect((await rejection(call(registerHandler, event({ method: 'POST', params: { id: '1' } })))).statusCode).toBe(404)
     expect((await rejection(call(registerHandler, event({ method: 'POST', params: { id: '0' } })))).statusCode).toBe(400)
+    expect(relayFetch).not.toHaveBeenCalled()
+  })
+
+  it('rescan: relay の POST /etc-card/rescan へ {id} を共有秘密付きで送り、202 と応答をそのまま返す', async () => {
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({ accepted: true, id: 1, comp_ids: ['c1'] }), { status: 202 }))
+    const e = event({ method: 'POST', params: { id: '1' } })
+    expect(await call(rescanHandler, e)).toEqual({ accepted: true, id: 1, comp_ids: ['c1'] })
+    expect(e.res.status).toBe(202)
+    const [url, init] = relayFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://relay.internal/etc-card/rescan')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBe('{"id":1}')
+    expect((init.headers as Record<string, string>)['X-Alc-Proxy-Secret']).toBe(SECRET)
+  })
+
+  it('rescan: relay の失敗は status ごと (本文の error を添えて)、他テナントの行・id の誤りは relay を呼ばない', async () => {
+    relayFetch.mockResolvedValue(new Response('Not Found', { status: 404 }))
+    expect((await rejection(call(rescanHandler, event({ method: 'POST', params: { id: '1' } })))).statusCode).toBe(404)
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({ error: 'off' }), { status: 503 }))
+    const off = await rejection(call(rescanHandler, event({ method: 'POST', params: { id: '1' } })))
+    expect(off.statusCode).toBe(503)
+    expect(off.message).toContain('503 off')
+    relayFetch.mockClear()
+    requireAuthMock.mockResolvedValue({ role: 'admin', tenant_id: 't2' })
+    expect((await rejection(call(rescanHandler, event({ method: 'POST', params: { id: '1' } })))).statusCode).toBe(404)
+    expect((await rejection(call(rescanHandler, event({ method: 'POST', params: { id: 'x' } })))).statusCode).toBe(400)
     expect(relayFetch).not.toHaveBeenCalled()
   })
 

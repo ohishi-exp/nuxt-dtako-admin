@@ -5,6 +5,8 @@
  *   - 要確認 (4 項目のどれかが読めなかった行) を手で直して保存 (揃えば「走行待ち」へ)
  *   - OCR に失敗した scan の「再 OCR」
  *   - 行ごとの「今すぐ登録」(relay へ転送。走行日の照合と etc-meisai.jp への登録は relay の担当)
+ *   - 走行待ちの行の「走行日を探し直す」(relay がその車の運行ごとに theearth から zip を取り直して走行日を探す。
+ *     202 で受けて後で回すので、結果は再読み込みで見る)
  *   - 行ごとの「登録日」(空なら受信日)。relay はこの日より前の走行を、そのカードの利用日にしない
  * カード番号は末尾 5 桁しか受け取らない (API が全桁を返さない)。
  * 下に複合機の資格情報 (purpose `etc-scan`) の発行・一覧を置く (部品 `MachineCredentials`、`/fuel/credentials` と共有)。
@@ -17,7 +19,9 @@ import {
   STATUSES,
   STATUS_LABEL,
   canRegister,
+  canRescan,
   countByStatus,
+  RESCAN_ACCEPTED_TEXT,
   etcCardErrorText,
   formatBytes,
   maskedCard,
@@ -171,6 +175,21 @@ async function register(r: EtcCardView) {
   }
 }
 
+// ---- 走行日を探し直す ----
+async function rescan(r: EtcCardView) {
+  busy.value = `rescan-${r.id}`
+  try {
+    await $fetch(`/api/etc-cards/${r.id}/rescan`, { method: 'POST', body: {}, headers: authHeaders() })
+    notes.value[`row-${r.id}`] = { ok: true, text: RESCAN_ACCEPTED_TEXT }
+  }
+  catch (e) {
+    notes.value[`row-${r.id}`] = { ok: false, text: `探し直せませんでした: ${etcCardErrorText(e, 'もう一度「走行日を探し直す」を押してください')}` }
+  }
+  finally {
+    busy.value = null
+  }
+}
+
 const statusColor: Record<EtcCardStatus, 'warning' | 'neutral' | 'info' | 'success' | 'error'> = {
   needs_review: 'warning',
   waiting_run: 'neutral',
@@ -300,6 +319,16 @@ onMounted(load)
                   :loading="busy === `reg-${r.id}`"
                   :disabled="busy !== null"
                   @click="register(r)"
+                />
+                <UButton
+                  v-if="canRescan(r)"
+                  size="xs"
+                  variant="outline"
+                  label="走行日を探し直す"
+                  class="ml-1"
+                  :loading="busy === `rescan-${r.id}`"
+                  :disabled="busy !== null"
+                  @click="rescan(r)"
                 />
               </td>
             </tr>

@@ -119,6 +119,23 @@ export async function sendViaAlcInternalProxy(
   return text;
 }
 
+/**
+ * `AUTH_WORKER` service binding 経由で shared-secret class の口を **GET** し、status と本文を返す
+ * (Refs #1287 の「走行日を探し直す」が運行の一覧と 1 運行の KUDGSIR を読む)。
+ * **非 2xx でも投げない** — 404 (その運行の CSV が無い) を呼び手が数えて飛ばすため。判定は呼び手。
+ * ヘッダは {@link sendViaAlcInternalProxy} と同じ 2 つ (`tenantId` は省略できない)。
+ */
+export async function getViaAlcInternalProxy(
+  req: Pick<AlcInternalProxyRequest, "path" | "sharedSecret" | "tenantId">,
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
+): Promise<{ status: number; text: string }> {
+  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${req.path}`, {
+    method: "GET",
+    headers: { "X-Alc-Proxy-Secret": req.sharedSecret, "X-Tenant-ID": req.tenantId },
+  });
+  return { status: res.status, text: await res.text() };
+}
+
 /** `AUTH_WORKER` service binding 経由で `/alc-internal-proxy/api/upload` に zip を送る。 */
 export async function uploadDtakoZipViaAlcInternalProxy(
   input: AlcInternalUploadInput,

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   applyEdit,
   canRegister,
+  canRescan,
+  RESCAN_ACCEPTED_TEXT,
   cardLast5,
   countByStatus,
   effectiveRegistrationDate,
@@ -142,6 +144,10 @@ describe('表示', () => {
       .toEqual({ needs_review: 2, waiting_run: 0, dry_run_ok: 0, registered: 1, failed: 0 })
   })
   it('今すぐ登録は要確認と登録済みには出さない', () => {
+    expect(canRescan({ status: 'waiting_run', plate4: '1234' })).toBe(true)
+    expect(canRescan({ status: 'waiting_run', plate4: null })).toBe(false)
+    expect(canRescan({ status: 'dry_run_ok', plate4: '1234' })).toBe(false)
+    expect(RESCAN_ACCEPTED_TEXT).toBe('探し直しを受け付けました。数分後に再読み込みしてください')
     expect(canRegister('needs_review')).toBe(false)
     expect(canRegister('registered')).toBe(false)
     expect(canRegister('waiting_run')).toBe(true)
