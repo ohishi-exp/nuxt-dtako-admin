@@ -8,6 +8,7 @@ import {
   DVR_MAX_FILES_PER_RUN,
   DVR_NOTIFICATION_WINDOW_HOURS,
   DVR_NOTIFICATIONS_INGEST_PATH,
+  DVR_FILE_READ_PATH,
   DVR_STALE_ALERT_HOURS,
   DvrIngestError,
   dvrFileIngestPath,
@@ -19,6 +20,7 @@ import {
   planDvrFileWork,
   postDvrNotifications,
   putDvrFile,
+  getStoredDvrFile,
   selectRecentDvrNotifications,
   toDvrIngestItems,
   type DvrPendingFile,
@@ -448,6 +450,62 @@ describe('putDvrFile', () => {
     await expect(
       putDvrFile({ sharedSecret: 's', tenantId: 't', id: 'u1', body }, fetchImpl),
     ).rejects.toThrow('file too large')
+  })
+})
+
+describe('getStoredDvrFile', () => {
+  const NET780 = new Uint8Array([0x4e, 0x45, 0x54, 0x37, 0x38, 0x30, 0x09])
+  const input = { sharedSecret: 's', tenantId: 'tenant-a', serialNo: 'SN 1', fileName: 'a&b.vdf' }
+
+  async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+    return new Uint8Array(await new Response(stream).arrayBuffer())
+  }
+
+  it('★ 自然キーを query で送り、テナントを明示して GET する。中身は NET780 を検証して返す', async () => {
+    let capturedUrl = ''
+    let capturedInit: RequestInit | undefined
+    const fetchImpl: FetchLike = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      capturedUrl = String(url)
+      capturedInit = init
+      return new Response(NET780, { status: 200 })
+    }) as FetchLike
+
+    const stream = await getStoredDvrFile(input, fetchImpl)
+
+    expect(await readAll(stream!)).toEqual(NET780)
+    const url = new URL(capturedUrl)
+    expect(`${url.origin}${url.pathname}`).toBe(`${INTERNAL_PROXY_BASE}${DVR_FILE_READ_PATH}`)
+    // URL エンコードが要る文字も崩れずに届く (key の部品の検査は alc-dtako 側)
+    expect(url.searchParams.get('serial_no')).toBe('SN 1')
+    expect(url.searchParams.get('file_name')).toBe('a&b.vdf')
+    expect(capturedInit?.method).toBe('GET')
+    const headers = capturedInit?.headers as Record<string, string>
+    expect(headers['X-Alc-Proxy-Secret']).toBe('s')
+    expect(headers['X-Tenant-ID']).toBe('tenant-a')
+  })
+
+  it('まだ置いていない (404) は null', async () => {
+    const fetchImpl: FetchLike = (async () => new Response(null, { status: 404 })) as FetchLike
+    expect(await getStoredDvrFile(input, fetchImpl)).toBeNull()
+  })
+
+  it('それ以外の失敗は status 付きで throw する', async () => {
+    const fetchImpl: FetchLike = (async () => new Response('forbidden', { status: 403 })) as FetchLike
+    const err = await getStoredDvrFile(input, fetchImpl).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(AlcInternalUploadError)
+    expect((err as AlcInternalUploadError).status).toBe(403)
+    expect((err as Error).message).toContain('forbidden')
+  })
+
+  it('200 でも body が無ければ throw する', async () => {
+    const fetchImpl: FetchLike = (async () => new Response(null, { status: 200 })) as FetchLike
+    await expect(getStoredDvrFile(input, fetchImpl)).rejects.toThrow(`${DVR_FILE_READ_PATH} failed (200)`)
+  })
+
+  it('NET780 でない中身は動画として返さない', async () => {
+    const fetchImpl: FetchLike = (async () =>
+      new Response(new Uint8Array([1, 2, 3, 4, 5, 6, 7]), { status: 200 })) as FetchLike
+    await expect(getStoredDvrFile(input, fetchImpl)).rejects.toThrow('NET780')
   })
 })
 

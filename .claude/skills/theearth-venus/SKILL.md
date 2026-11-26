@@ -257,6 +257,15 @@ Worker (`theearth-client`) は **login → 遷移せず即 VenusBridge POST / co
    → 200 / application/octet-stream / 先頭マジック "NET780" (0x4E 45 54 37 38 30)
 ```
 
+**ビューアの「表示」(`/dvr-api/file`) は theearth より先に R2 を見る**: 10 分おきの DVR cron
+(`runDvrCron`) が `ready` の `.vdf` を alc-dtako の R2 (`{tenant_id}/dvr/{serial_no}/{file_name}`) に
+置いているので、`openStoredDvrFile` → `getStoredDvrFile` (`dvr-ingest.ts`) が alc-internal-proxy の
+`GET /api/dvr/file` で読み、無い (404)・読めない・会社が DTAKO_ACCOUNTS に無い時だけ下の 2 段へ落ちる。
+応答ヘッダ `x-dvr-source: r2|theearth` でどちらが答えたか分かる。theearth の 2 段は**応答ヘッダまで
+30 秒の上限**付き (`DEFAULT_REQUEST_TIMEOUT_MS`。本体の転送には掛けない) — 上限が無いと応答しない
+theearth が `theearthQueue` を塞ぎ、一覧の再読込まで含む後続の `/dvr-api/*` が全部止まる
+(「表示」が終わらず、再読込で直る、の症状)。
+
 **`/dvrData/{comp}/{support}/{vehicle}/{fn}/{fn}.vdf` を通知行から組み立てる決定論パス仮説は
 実データで 404**。必ず `Request_DvrFileDownload` に url を解決させる。`FilePath` 列は空。
 `.vdf` は数十 MB になるので DO/メモリに載せず **stream 素通し** (マジック検証は status

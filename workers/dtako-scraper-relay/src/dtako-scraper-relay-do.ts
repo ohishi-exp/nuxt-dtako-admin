@@ -40,6 +40,7 @@ import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
 import { PromiseQueue } from "./promise-queue";
 import {
   createCookieJar,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   login,
   scrapeViaHttp,
   TheearthClientError,
@@ -269,6 +270,7 @@ import {
   DVR_MAX_FILES_PER_RUN,
   DVR_NOTIFICATION_WINDOW_HOURS,
   DVR_STALE_ALERT_HOURS,
+  getStoredDvrFile,
   judgeDvrStaleness,
   planDvrFileWork,
   postDvrNotifications,
@@ -4891,10 +4893,47 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(400, "serial / filename が必要です");
     }
 
+    // 10 分おきの DVR cron が R2 に置いた物があれば、theearth に行かずにそれを返す。
+    const stored = await this.openStoredDvrFile(record.compId, serial, filename);
+    if (stored) {
+      return new Response(stored, {
+        status: 200,
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": `attachment; filename="${filename}"`,
+          "cache-control": "no-store",
+          "x-dvr-source": "r2",
+        },
+      });
+    }
+
     const jar: CookieJar = { cookies: new Map(record.cookies) };
+    const startedAt = Date.now();
     try {
-      const target = await requestDvrDownloadPath(jar, serial, filename);
-      const stream = await openDvrFileStream(jar, dvrDataUrl(target.path));
+      // theearth が応答しないと、この呼び出しが theearthQueue を塞いで後続の /dvr-api/*
+      // (一覧の再読込も) が全部止まる。応答ヘッダまでに上限を掛けて loud fail にする。
+      const target = await requestDvrDownloadPath(
+        jar,
+        serial,
+        filename,
+        fetch,
+        DEFAULT_REQUEST_TIMEOUT_MS,
+      );
+      const resolvedAt = Date.now();
+      const stream = await openDvrFileStream(
+        jar,
+        dvrDataUrl(target.path),
+        fetch,
+        DEFAULT_REQUEST_TIMEOUT_MS,
+      );
+      console.log(
+        JSON.stringify({
+          dvr_file: "theearth",
+          comp_id: record.compId,
+          resolve_ms: resolvedAt - startedAt,
+          headers_ms: Date.now() - resolvedAt,
+        }),
+      );
       // cookie 更新を書き戻す (セッション延命)。stream 開始後なので await はしない
       // (ヘッダ送出をブロックしない) — 失敗しても致命的でない。
       this.ctx.waitUntil(
@@ -4909,6 +4948,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           "content-type": "application/octet-stream",
           "content-disposition": `attachment; filename="${target.filename}"`,
           "cache-control": "no-store",
+          "x-dvr-source": "theearth",
         },
       });
     } catch (err) {
@@ -4922,6 +4962,46 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           ? err.message
           : `DVR 動画ファイルの取得に失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(502, message);
+    }
+  }
+
+  /** DVR cron が R2 に置いた `.vdf` を alc-dtako から読む。**置いていない・読めない時は
+   * null** (呼び出し側は theearth へ落とす — R2 は速くするための近道で、無くても動く)。
+   * テナントは**セッションの comp_id から DTAKO_ACCOUNTS で引く** (cron が書いた key と
+   * 同じテナント。ブラウザの申告は使わない)。DTAKO_ACCOUNTS に無い会社・secret 未設定は
+   * 近道を使わないだけ。 */
+  private async openStoredDvrFile(
+    compId: string,
+    serialNo: string,
+    fileName: string,
+  ): Promise<ReadableStream<Uint8Array> | null> {
+    const startedAt = Date.now();
+    try {
+      const account = await this.resolveAccount(compId);
+      const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+      if (!account?.tenant_id || !sharedSecret || !this.env.AUTH_WORKER) return null;
+      const stream = await getStoredDvrFile(
+        { sharedSecret, tenantId: account.tenant_id, serialNo, fileName },
+        this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+      );
+      console.log(
+        JSON.stringify({
+          dvr_file: stream ? "r2" : "r2_miss",
+          comp_id: compId,
+          ms: Date.now() - startedAt,
+        }),
+      );
+      return stream;
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          dvr_file: "r2_failed",
+          comp_id: compId,
+          ms: Date.now() - startedAt,
+          error: describeUnknownError(err),
+        }),
+      );
+      return null;
     }
   }
 

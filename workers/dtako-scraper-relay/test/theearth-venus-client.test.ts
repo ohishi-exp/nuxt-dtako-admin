@@ -439,6 +439,50 @@ describe("assertVdfMagic / validateVdfMagicStream", () => {
   });
 });
 
+/** 応答しない theearth (signal が abort されるまで待ち、abort で reject する)。 */
+const hangingFetch: FetchLike = ((_url: RequestInfo | URL, init?: RequestInit) =>
+  new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+  })) as FetchLike;
+
+describe("DVR file timeouts", () => {
+  it("requestDvrDownloadPath: 応答が来なければ上限で loud fail する (段の名前と ms 付き)", async () => {
+    const jar = createCookieJar();
+    await expect(requestDvrDownloadPath(jar, "S", "F.vdf", hangingFetch, 20)).rejects.toThrow(
+      /Request_DvrFileDownload\) がタイムアウトしました \(20ms\)/,
+    );
+  });
+
+  it("openDvrFileStream: 応答ヘッダが来なければ上限で loud fail する", async () => {
+    const jar = createCookieJar();
+    await expect(openDvrFileStream(jar, "https://theearth-np.com/dvrData/x", hangingFetch, 20)).rejects.toThrow(
+      /dvrData\) がタイムアウトしました \(20ms\)/,
+    );
+  });
+
+  it("openDvrFileStream: ★ 上限はヘッダまで — 上限を過ぎてから届く本体は切らない", async () => {
+    let signal: AbortSignal | undefined;
+    const fetchImpl: FetchLike = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(VDF_BYTES.subarray(0, 6));
+          // ヘッダ後、上限 (20ms) を過ぎてから残りが届く
+          setTimeout(() => {
+            controller.enqueue(VDF_BYTES.subarray(6));
+            controller.close();
+          }, 60);
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as FetchLike;
+    const jar = createCookieJar();
+    const stream = await openDvrFileStream(jar, "https://theearth-np.com/dvrData/x", fetchImpl, 20);
+    expect(await readAll(stream)).toEqual(VDF_BYTES);
+    expect(signal?.aborted).toBe(false);
+  });
+});
+
 describe("openDvrFileStream", () => {
   it("returns a validated stream on success", async () => {
     const fetchImpl = sequenceFetch([new Response(VDF_BYTES, { status: 200 })]);
