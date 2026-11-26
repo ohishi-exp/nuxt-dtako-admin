@@ -3,7 +3,10 @@ import {
   LABEL_MAX,
   ONE_TIME_NOTICE,
   PURPOSE,
+  PURPOSES,
+  PURPOSE_TEXT,
   createMachineCredentialApi,
+  toPurpose,
   ISSUE_GUIDE,
   credentialErrorText,
   errorCodeText,
@@ -207,5 +210,43 @@ describe('sortCredentials', () => {
     const input = [a, b, c, d]
     expect(sortCredentials(input).map(r => r.username)).toEqual(['c', 'b', 'd', 'a'])
     expect(input.map(r => r.username)).toEqual(['a', 'b', 'c', 'd'])
+  })
+})
+
+describe('用途の選択 (Refs #1287)', () => {
+  it('選べるのは fuel-utran と etc-scan、既定は fuel-utran', () => {
+    expect(PURPOSES).toEqual(['fuel-utran', 'etc-scan'])
+    expect(toPurpose('etc-scan')).toBe('etc-scan')
+    expect(toPurpose('fuel-utran')).toBe('fuel-utran')
+    // 知らない値・空は既定に戻す (leave-scan をこの画面から発行させない)
+    expect(toPurpose('leave-scan')).toBe('fuel-utran')
+    expect(toPurpose(undefined)).toBe('fuel-utran')
+  })
+  it('既定の文は従来の定数と同じ (fuel-utran の画面の文言は変えない)', () => {
+    expect(PURPOSE_TEXT['fuel-utran'].notice).toBe(ONE_TIME_NOTICE)
+    expect(PURPOSE_TEXT['fuel-utran'].guide).toBe(ISSUE_GUIDE)
+    expect(PURPOSE_TEXT['fuel-utran'].nameLabel).toBe('PC 名')
+  })
+  it('etc-scan の文は複合機を案内し、Windows アプリを案内しない', () => {
+    const t = PURPOSE_TEXT['etc-scan']
+    expect(t.guide).toContain('複合機')
+    expect(t.notice).toContain('複合機')
+    expect(`${t.guide}${t.notice}`).not.toContain('Windows')
+    expect(t.nameLabel).toBe('機器名')
+  })
+  it('purpose を渡すと list / issue がその用途で呼ぶ', async () => {
+    const { fetcher, calls } = fakeFetcher([])
+    const URL = 'https://auth-staging.ippoan.org'
+    const api = createMachineCredentialApi(fetcher, URL, 'etc-scan')
+    await api.list()
+    await api.issue(' 本社 2F ')
+    expect(calls).toEqual([
+      { url: `${URL}/api/machine-credentials`, options: { query: { purpose: 'etc-scan' } } },
+      { url: `${URL}/api/machine-credentials`, options: { method: 'POST', body: { purpose: 'etc-scan', label: '本社 2F' } } },
+    ])
+  })
+  it('labelError は欄の名前を差し替えられる', () => {
+    expect(labelError('', '機器名')).toBe('機器名を入れてください')
+    expect(labelError('x'.repeat(LABEL_MAX + 1), '機器名')).toBe(`機器名は ${LABEL_MAX} 文字以内にしてください`)
   })
 })
