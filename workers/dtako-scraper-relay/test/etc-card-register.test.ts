@@ -19,6 +19,7 @@ import {
   jstDate,
   jstStamp,
   maskCardNumber,
+  maskUserId,
   parseTollCsv,
   plate4OfVehicleCd,
   resolveCardRegisterMode,
@@ -287,6 +288,14 @@ describe('R2 key / mask', () => {
     expect(maskCardNumber(CARD)).toBe('*23333')
     expect(maskCardNumber('123')).toBe('(不明)')
     expect(maskCardNumber(null)).toBe('(不明)')
+  })
+
+  it('user_id は末尾 4 文字まで', () => {
+    expect(maskUserId('abcdef1234')).toBe('*1234')
+  })
+
+  it('user_id が 4 文字未満なら (不明)', () => {
+    expect(maskUserId('abc')).toBe('(不明)')
   })
 })
 

@@ -369,6 +369,11 @@ export function maskCardNumber(card: string | null): string {
   return s.length >= 5 ? `*${s.slice(-5)}` : "(不明)";
 }
 
+/** ETC アカウントの user_id は末尾 4 文字まで (診断ログに全桁を出さない)。 */
+export function maskUserId(id: string): string {
+  return id.length >= 4 ? `*${id.slice(-4)}` : "(不明)";
+}
+
 // ---------------------------------------------------------------------------
 // 1 件の結末とメール
 // ---------------------------------------------------------------------------
