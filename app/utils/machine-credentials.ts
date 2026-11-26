@@ -1,7 +1,8 @@
 /**
  * 給油データ USB アップローダー (Windows アプリ ohishi-exp/fuel-usb-uploader) が Basic で名乗る
  * 資格情報 (purpose `fuel-utran`) の型・呼び出し・表示用の変換 (Refs yhonda-ohishi/nginx#814)。
- * 複合機の `etc-scan` (ETC コーポレートカード発行明細書のスキャン送信、Refs #1287) も同じ画面で選べる。
+ * 複合機の `etc-scan` (ETC コーポレートカード発行明細書のスキャン送信、Refs #1287) も同じ部品
+ * (`app/components/MachineCredentials.vue`) で扱い、こちらは `/etc-cards` で発行する。
  *
  * 管理 API は auth-worker にあり、画面のブラウザから `{authWorkerUrl}/api/machine-credentials` を
  * 直接 (cross-origin で) 叩く。Bearer は dtako の browser JWT。管理者 (role=admin) 以外は 403。
@@ -16,34 +17,53 @@ import { caughtErrorStatus, describeCaughtError } from '~/utils/api-error'
 export const PURPOSE = 'fuel-utran'
 
 /**
- * 画面で選べる用途 (Refs #1287)。既定は {@link PURPOSE} (`fuel-utran`) で、選ばなければ従来どおり。
- * `etc-scan` は複合機 (ETC コーポレートカード発行明細書のスキャン送信) が名乗る資格情報。
+ * 用途 (Refs #1287)。画面ごとに固定で使う — `fuel-utran` は `/fuel/credentials`、
+ * `etc-scan` (複合機が ETC コーポレートカード発行明細書のスキャンを送るときに名乗る資格情報) は `/etc-cards`。
  * 用途の allowlist の正本は auth-worker の `MACHINE_CRED_PURPOSES`。
  */
 export const PURPOSES = ['fuel-utran', 'etc-scan'] as const
 export type Purpose = (typeof PURPOSES)[number]
 
-/** 用途ごとの表示 (選択肢の名前・発行の説明・password の注意・名前の欄) */
-export const PURPOSE_TEXT: Record<Purpose, { label: string, guide: string, notice: string, nameLabel: string, namePlaceholder: string }> = {
+/** 用途ごとの表示 (部品 `MachineCredentials` が文をそのまま出す。組み立てない) */
+export interface PurposeText {
+  /** 一覧の上の 1 文 (誰が何に使うか) */
+  intro: string
+  /** 発行の欄の上の説明 */
+  guide: string
+  /** 発行・rotate 直後の password の注意 */
+  notice: string
+  /** 名前の欄・表の見出し */
+  nameLabel: string
+  /** 名前の欄の説明 (末尾に文字数の上限を足す) */
+  nameHint: string
+  namePlaceholder: string
+  /** rotate の確認の末尾 */
+  rotateNote: string
+  /** 失効の確認の末尾 */
+  revokeNote: string
+}
+
+export const PURPOSE_TEXT: Record<Purpose, PurposeText> = {
   'fuel-utran': {
-    label: '給油データ USB アップローダー (Windows アプリ)',
+    intro: 'Windows アプリ (給油データ USB アップローダー) が送信に使う username / password です。PC ごとに発行してください。',
     guide: '発行すると username と password が 1 回だけ表示されます。Windows アプリのトレイのアイコンを右クリック →『資格情報を設定』に入れてください',
     notice: 'この表示を閉じると password は二度と見られません。Windows アプリ (給油データ USB アップローダー) の『資格情報を設定』に入れてください',
     nameLabel: 'PC 名',
+    nameHint: 'どの PC 用か分かる名前',
     namePlaceholder: '例: 本社 給油室の PC',
+    rotateNote: 'PC に新しいパスワードを入れ直すまで送信できません。',
+    revokeNote: 'この PC からは送信できなくなります。',
   },
   'etc-scan': {
-    label: 'ETC カード明細書のスキャン (複合機)',
-    guide: '発行すると username と password が 1 回だけ表示されます。複合機の送信先 (WebDAV) の認証情報に入れてください',
+    intro: '複合機が ETC カード明細書のスキャンを送るときに使う username / password です。複合機ごとに発行してください。',
+    guide: '発行すると username と password が 1 回だけ、複合機の設定例と一緒に表示されます。複合機の送信先 (WebDAV) に入れてください',
     notice: 'この表示を閉じると password は二度と見られません。複合機の送信先 (WebDAV) の認証情報に入れてください',
     nameLabel: '機器名',
+    nameHint: 'どの複合機用か分かる名前',
     namePlaceholder: '例: 本社 2F の複合機',
+    rotateNote: '複合機に新しいパスワードを入れ直すまで送信できません。',
+    revokeNote: 'この複合機からは送信できなくなります。',
   },
-}
-
-/** 選択の値を用途にする (知らない値は既定の `fuel-utran`) */
-export function toPurpose(v: unknown): Purpose {
-  return (PURPOSES as readonly unknown[]).includes(v) ? v as Purpose : PURPOSE
 }
 
 /** 名前 (label) の最大長 (auth-worker の MACHINE_CRED_LABEL_MAX と同じ) */
@@ -190,4 +210,56 @@ export function sortCredentials(rows: MachineCredential[]): MachineCredential[] 
     if (a.revoked !== b.revoked) return a.revoked ? 1 : -1
     return b.created_at.localeCompare(a.created_at)
   })
+}
+
+/** 複合機に入れる設定値 */
+export interface DeviceSetup {
+  protocol: string
+  host: string
+  folder: string
+  username: string
+  password: string
+  curl: string
+}
+
+/** auth-worker の機械用の入口 (Basic を照合して dtako の /dav へ中継する、Refs #1287) */
+export const MACHINE_ENTRY = '/m/etc-scan'
+
+/** 複合機のフォルダ。会社は資格情報だけで決まるので、残りのパスは何でもよい */
+export const MACHINE_FOLDER = `${MACHINE_ENTRY}/scan`
+
+/**
+ * 発行直後に出す複合機の設定例と、PC から試す curl (`etc-scan` 用)。
+ * host は auth-worker (本番 https://auth.ippoan.org / staging https://auth-staging.ippoan.org)。
+ *
+ * ohishi-exp/nuxt-leave の `app/utils/machine-credentials.ts` の `deviceSetup` / `deviceSetupRows` と
+ * 同形 (入口が `/m/leave-scan` か `/m/etc-scan` かだけが違う)。共有の置き場が無いので写した。
+ */
+export function deviceSetup(authWorkerUrl: string, cred: IssuedCredential): DeviceSetup {
+  const host = authWorkerUrl.replace(/\/+$/, '')
+  const folder = MACHINE_FOLDER
+  return {
+    protocol: 'WebDAV',
+    host,
+    folder,
+    username: cred.username,
+    password: cred.password,
+    curl: `curl -T test.pdf -u ${cred.username}:${cred.password} ${host}${folder}/test.pdf`,
+  }
+}
+
+/** 設定例を「項目名・値」の行にする (画面はこの順に並べ、値ごとにコピーできる)。nuxt-leave と同形 */
+export function deviceSetupRows(d: DeviceSetup): [string, string][] {
+  return [
+    ['プロトコル', d.protocol],
+    ['ホスト名', d.host],
+    ['フォルダへのパス', d.folder],
+    ['ユーザー名', d.username],
+    ['パスワード', d.password],
+  ]
+}
+
+/** 発行・rotate の直後に設定例を出すか。複合機 (`etc-scan`) だけ — Windows アプリは username / password だけ入れる */
+export function deviceSetupFor(purpose: Purpose, authWorkerUrl: string, cred: IssuedCredential): DeviceSetup | null {
+  return purpose === 'etc-scan' ? deviceSetup(authWorkerUrl, cred) : null
 }
