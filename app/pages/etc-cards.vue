@@ -8,10 +8,13 @@
  *   - 走行待ちの行の「走行日を探し直す」(relay がその車の運行ごとに theearth から zip を取り直して走行日を探す。
  *     202 で受けて後で回すので、結果は再読み込みで見る)
  *   - 行ごとの「登録日」(空なら受信日)。relay はこの日より前の走行を、そのカードの利用日にしない
+ *   - ヘッダの「ETC アカウントを取り直す」(ETC 明細 CSV の取得を cron と同じ道で 1 回走らせ、各アカウントの
+ *     法人/個人の種別を relay に記録し直させる。「今すぐ登録」の担当判定に使われる)
  * カード番号は末尾 5 桁しか受け取らない (API が全桁を返さない)。
  * 下に複合機の資格情報 (purpose `etc-scan`) の発行・一覧を置く (部品 `MachineCredentials`、`/fuel/credentials` と共有)。
  */
 import { currentAccessToken } from '~/utils/api'
+import { describeCaughtError } from '~/utils/api-error'
 import {
   CARD_NUMBER_DIGITS,
   KUBUN,
@@ -175,6 +178,29 @@ async function register(r: EtcCardView) {
   }
 }
 
+// ---- ETC アカウントを取り直す ----
+/** 結果は行ではなくページ上部に出す (どの行の操作でもないため) */
+const recheckNotice = ref<{ ok: boolean, text: string } | null>(null)
+
+async function recheckAccounts() {
+  busy.value = 'recheck'
+  recheckNotice.value = null
+  try {
+    const res = await $fetch<{ total: number, ok: number }>('/api/etc-cards/accounts-recheck', { method: 'POST', body: {}, headers: authHeaders() })
+    recheckNotice.value = {
+      ok: res.ok === res.total,
+      text: `ETC アカウント ${res.total} 件中 ${res.ok} 件で取り直しを受け付けました (ログインは裏で走ります)。`
+        + '1〜2 分おいてから、もう一度「今すぐ登録」を押してください',
+    }
+  }
+  catch (e) {
+    recheckNotice.value = { ok: false, text: `取り直せませんでした: ${describeCaughtError(e, 'もう一度「ETC アカウントを取り直す」を押してください')}` }
+  }
+  finally {
+    busy.value = null
+  }
+}
+
 // ---- 走行日を探し直す ----
 async function rescan(r: EtcCardView) {
   busy.value = `rescan-${r.id}`
@@ -206,6 +232,15 @@ onMounted(load)
     <div class="flex flex-wrap items-center gap-3">
       <h2 class="text-xl font-bold mr-auto">ETC カード登録</h2>
       <UButton to="#machine-credentials" icon="i-lucide-key-round" variant="outline" label="複合機の資格情報" />
+      <UButton
+        icon="i-lucide-user-round-search"
+        variant="outline"
+        label="ETC アカウントを取り直す"
+        :loading="busy === 'recheck'"
+        :disabled="busy !== null"
+        data-testid="accounts-recheck"
+        @click="recheckAccounts"
+      />
       <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="loading" @click="load" />
     </div>
 
@@ -214,6 +249,15 @@ onMounted(load)
       登録日 (空なら受信日) より前の走行は使いません。
       読めなかった項目がある行は「要確認」になります。直して保存すると「走行待ち」になります。
     </p>
+
+    <UAlert
+      v-if="recheckNotice"
+      :color="recheckNotice.ok ? 'success' : 'error'"
+      variant="subtle"
+      :icon="recheckNotice.ok ? 'i-lucide-check' : 'i-lucide-alert-triangle'"
+      :description="recheckNotice.text"
+      data-testid="recheck-notice"
+    />
 
     <UAlert v-if="listError" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="一覧を読めませんでした" :description="listError" />
 

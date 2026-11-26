@@ -78,6 +78,7 @@ import {
   maskUserId,
   ETC_ACCOUNT_TYPE_PATH,
   ETC_ACCOUNT_TYPE_STORAGE_KEY,
+  ETC_LOGIN_PATH_STORAGE_KEY,
   fetchEtcAccountType,
   parseAccountType,
   pickCardRegisterAccount,
@@ -1482,7 +1483,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // この DO (`etc-{user_id}`) が ETC cron のログインで記録した種別 (Refs #1287)。担当アカウントの
     // 判定 (`pickCardRegisterAccount`) が他の DO・index.ts から読む。storage を読むだけ。
     if (url.pathname === ETC_ACCOUNT_TYPE_PATH && request.method === "GET") {
-      return Response.json({ account_type: await this.readOwnEtcAccountType() });
+      const loginPath = await this.ctx.storage.get(ETC_LOGIN_PATH_STORAGE_KEY);
+      return Response.json({
+        account_type: await this.readOwnEtcAccountType(),
+        login_path: typeof loginPath === "string" ? loginPath : null,
+      });
     }
 
     if (request.headers.get("Upgrade") !== "websocket") {
@@ -4139,12 +4144,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
       // 種別を記録する (ETC カード追加登録の担当判定、Refs #1287)。ログインは CSV 取得の 1 回だけ
       await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, result.accountType);
+      await this.ctx.storage.put(ETC_LOGIN_PATH_STORAGE_KEY, result.loginPath);
       console.log(
         JSON.stringify({
           etc_scrape: "account_type_stored",
           user_tail: maskUserId(account.user_id),
           outcome: "success",
           stored: result.accountType,
+          login_path: result.loginPath,
         }),
       );
       const key = etcCsvKey(prefix, account.user_id, now);
@@ -4164,12 +4171,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         // 明細 0 件は正常系 (VPS 版の NoUsageData skip と同じ扱い)。ログインはできたので種別は記録する
         if (err.accountType) {
           await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, err.accountType);
+          await this.ctx.storage.put(ETC_LOGIN_PATH_STORAGE_KEY, err.loginPath);
           console.log(
             JSON.stringify({
               etc_scrape: "account_type_stored",
               user_tail: maskUserId(account.user_id),
               outcome: "no_usage",
               stored: err.accountType,
+              login_path: err.loginPath,
             }),
           );
         }

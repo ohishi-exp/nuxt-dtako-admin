@@ -286,7 +286,7 @@ function page(url: string, htmlBody: string): EtcPage {
 }
 
 function session(url: string, htmlBody: string): EtcSession {
-  return { page: page(url, htmlBody), accountType: 'personal' }
+  return { page: page(url, htmlBody), accountType: 'personal', loginPath: new URL(url).pathname }
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +510,7 @@ describe('etcLogin', () => {
     const jar = createCookieJar()
     const session = await etcLogin(jar, params, fetch, 1000)
     expect(session.accountType).toBe('personal')
+    expect(session.loginPath).toBe('/etc_user_meisai/menu')
     expect(session.page.url).toBe('https://www.etc-meisai.jp/etc_user_meisai/menu')
 
     // ログイン POST: action query に nextfunc、body に credential + hidden p
@@ -561,11 +562,13 @@ describe('etcLogin', () => {
     const { fetch } = recordingFetch([
       html(TOP_HTML),
       html(LOGIN_PAGE_HTML),
-      redirect('/etc_corp_meisai/top'),
+      redirect('/etc_corp_meisai/top?sid=FAKE-SESSION'),
       html(MENU_HTML),
     ])
     const session = await etcLogin(createCookieJar(), params, fetch, 1000)
     expect(session.accountType).toBe('corporate')
+    // Refs #1287: ログイン後の pathname を記録する。クエリ (セッション ID 等が載りうる) は捨てる
+    expect(session.loginPath).toBe('/etc_corp_meisai/top')
   })
 
   it('redirect が REDIRECT_LIMIT を超えたら最後の 3xx で loud fail する', async () => {
@@ -1118,6 +1121,7 @@ describe('scrapeEtcCsv', () => {
     // だったため browser 進捗ログに直接載せる方式に変更)。
     expect(steps).toEqual(['login', 'search', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal')
+    expect(result.loginPath).toBe('/etc_user_meisai/menu')
     expect(result.filename).toBe('meisai_202607.csv')
     expect(result.bytes.byteLength).toBeGreaterThan(0)
   })
@@ -1135,6 +1139,7 @@ describe('scrapeEtcCsv', () => {
     const err = await scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch, undefined, NOW).catch((e) => e)
     expect(err).toBeInstanceOf(EtcMeisaiNoUsageError)
     expect(err.accountType).toBe('corporate')
+    expect(err.loginPath).toBe('/etc_corp_meisai/menu')
   })
 
   it('検索段の 0 件以外の例外はそのまま投げ直す', async () => {
@@ -1184,6 +1189,7 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
     )
     expect(steps).toEqual(['login', 'search', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal') // startUrl が etc_user_meisai
+    expect(result.loginPath).toBe('/etc_user_meisai/menu')
     expect(result.filename).toBe('meisai_202607.csv')
 
     // 最初の GET は startUrl、cookie が載る (login POST は無い = risLoginId を送らない)
@@ -1276,7 +1282,11 @@ ${buttons}</form></body></html>`
   const BACK = `<input type="button" name="back" value="戻る" onclick="submitPage('frm','${REGISTER_URL}')" />`
   const GO = `<input type="button" name="go" value="登録" onclick="submitPage('frm','/etc/R?funccode=1034100000&amp;nextfunc=1034300000')" />`
 
-  const session = (h: string): EtcSession => ({ page: { url: BASE, html: h }, accountType: 'corporate' })
+  const session = (h: string): EtcSession => ({
+    page: { url: BASE, html: h },
+    accountType: 'corporate',
+    loginPath: '/etc_corp_meisai/top',
+  })
 
   it('dry-run: メニューから登録画面 → 「次へ」の URL へ 9 欄を POST して確認画面で止める (checkbox は送らない)', async () => {
     const { fetch, calls } = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(BACK + GO))])

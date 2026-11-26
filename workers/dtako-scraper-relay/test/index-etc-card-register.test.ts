@@ -59,13 +59,17 @@ describe("handleEtcCardRegister (POST /etc-card/register、Refs #1287)", () => {
   });
 
   it.each([
-    ["前のアカウントの種別が未記録", { ...TYPES, "etc-p": null }],
-    ["法人アカウントが無い", { "etc-p": "personal", "etc-reg": "personal", "etc-c2": "personal" }],
-  ])("%s なら 503 (法人アカウントが未確認) で DO の登録口を叩かない", async (_l, types) => {
+    ["前のアカウントの種別が未記録", { ...TYPES, "etc-p": null }, "法人アカウントが未確認 (次の ETC cron で確認される)"],
+    [
+      "法人アカウントが無い",
+      { "etc-p": "personal", "etc-reg": "personal", "etc-c2": "personal" },
+      "法人アカウントが見つかりません (ETC_ACCOUNTS の全アカウントが個人と判定)",
+    ],
+  ])("%s なら 503 で DO の登録口を叩かない (未確認と全員個人は文言を分ける)", async (_l, types, message) => {
     const { env, doFetch } = fakeEnv({}, types);
     const res = await handleEtcCardRegister(post('{"id":3}'), env);
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: "法人アカウントが未確認 (次の ETC cron で確認される)" });
+    expect(await res.json()).toEqual({ error: message });
     expect(doFetch).not.toHaveBeenCalled();
   });
 

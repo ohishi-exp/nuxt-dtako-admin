@@ -472,11 +472,19 @@ export type CardRegisterAccountType = "personal" | "corporate";
 /** 各 `etc-{user_id}` DO が、CSV 取得のログインで分かった種別を自分の storage に置くキー。 */
 export const ETC_ACCOUNT_TYPE_STORAGE_KEY = "etc_account_type";
 
+/** 同じログインで分かったログイン後ページの pathname (クエリは捨てる) を置くキー。種別判定
+ * (`detectAccountType`) が実物で外れていないかを見るための記録 (Refs #1287)。 */
+export const ETC_LOGIN_PATH_STORAGE_KEY = "etc_login_path";
+
 /** 種別を読む DO 内部 route (GET。storage を読むだけで、キューにもログインにも触れない)。 */
 export const ETC_ACCOUNT_TYPE_PATH = "/internal/etc-account-type";
 
 /** 手動口が担当を決められないときの文言 (503)。 */
 export const CARD_REGISTER_UNCONFIRMED_MESSAGE = "法人アカウントが未確認 (次の ETC cron で確認される)";
+
+/** 手動口で、記録済みの全アカウントが個人だったときの文言 (503。`unconfirmed` と分ける)。 */
+export const CARD_REGISTER_NO_CORPORATE_MESSAGE =
+  "法人アカウントが見つかりません (ETC_ACCOUNTS の全アカウントが個人と判定)";
 
 export type CardRegisterAccountPick =
   /** この user_id が担当 */
