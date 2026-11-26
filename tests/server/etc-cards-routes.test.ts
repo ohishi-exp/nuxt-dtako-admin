@@ -35,6 +35,7 @@ import listHandler from '../../server/api/etc-cards/index.get'
 import patchHandler from '../../server/api/etc-cards/[id].patch'
 import regDateHandler from '../../server/api/etc-cards/[id]/registration-date.patch'
 import registerHandler from '../../server/api/etc-cards/[id]/register.post'
+import recheckHandler from '../../server/api/etc-cards/accounts-recheck.post'
 import rescanHandler from '../../server/api/etc-cards/[id]/rescan.post'
 import ocrHandler from '../../server/api/etc-cards/scans/[sha256]/ocr.post'
 import { insertScan, runOcr } from '../../server/utils/etc-scan'
@@ -237,6 +238,42 @@ describe('/api/etc-cards', () => {
     expect((await rejection(call(registerHandler, event({ method: 'POST', params: { id: '1' } })))).statusCode).toBe(404)
     expect((await rejection(call(registerHandler, event({ method: 'POST', params: { id: '0' } })))).statusCode).toBe(400)
     expect(relayFetch).not.toHaveBeenCalled()
+  })
+
+  it('accounts-recheck: relay の POST /kintai-relay/etc-run へ {} を共有秘密付きで送り、件数だけ返す (user_id を返さない)', async () => {
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({ results: [
+      { kind: 'etc', target: 'fakeuser-0001', ok: true, detail: 'HTTP 202: {"user_id":"fakeuser-0001"}' },
+      { kind: 'etc', target: 'fakeuser-0002', ok: false, detail: 'HTTP 500: x' },
+    ] }), { status: 200 }))
+    const res = await call(recheckHandler, event({ method: 'POST' }))
+    expect(res).toEqual({ total: 2, ok: 1 })
+    expect(JSON.stringify(res)).not.toContain('fakeuser')
+    const [url, init] = relayFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://relay.internal/kintai-relay/etc-run')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBe('{}')
+    expect((init.headers as Record<string, string>)['X-Alc-Proxy-Secret']).toBe(SECRET)
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }))
+    expect(await call(recheckHandler, event({ method: 'POST' }))).toEqual({ total: 0, ok: 0 })
+  })
+
+  it('accounts-recheck: relay の失敗は本文を件数と error 文だけに詰め直して status ごと投げる', async () => {
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({ results: [
+      { kind: 'etc', target: 'fakeuser-0001', ok: false, detail: 'HTTP 500: fakeuser-0001' },
+    ] }), { status: 502 }))
+    const all = await rejection(call(recheckHandler, event({ method: 'POST' })))
+    expect(all.statusCode).toBe(502)
+    expect(all.data).toEqual({ total: 1, ok: 0 })
+    expect(all.message).toBe('relay: 1 件中 0 件しか受け付けられませんでした')
+    expect(JSON.stringify(all)).not.toContain('fakeuser')
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({ error: 'ETC_ACCOUNTS が未設定です' }), { status: 404 }))
+    const none = await rejection(call(recheckHandler, event({ method: 'POST' })))
+    expect(none.statusCode).toBe(404)
+    expect(none.message).toBe('relay: ETC_ACCOUNTS が未設定です')
+    relayFetch.mockResolvedValue(new Response('Unauthorized', { status: 401 }))
+    expect((await rejection(call(recheckHandler, event({ method: 'POST' })))).message).toBe('relay: HTTP 401')
+    // binding 未設定 (data を持たない例外) はそのまま
+    expect((await rejection(call(recheckHandler, event({ method: 'POST', env: env({ SCRAPER_RELAY: undefined }) })))).statusCode).toBe(503)
   })
 
   it('rescan: relay の POST /etc-card/rescan へ {id} を共有秘密付きで送り、202 と応答をそのまま返す', async () => {

@@ -72,6 +72,9 @@ export class EtcMeisaiNoUsageError extends EtcMeisaiClientError {
   /** ログイン後に分かったアカウント種別。`scrapeEtcCsv` が載せる — 明細 0 件の月でも
    * 「法人か」を記録できるように (ETC カード追加登録の担当判定、Refs #1287)。 */
   accountType?: EtcAccountType;
+  /** ログイン後ページの pathname (クエリは捨てる)。`accountType` と同じく載せる —
+   * 種別判定が実物で外れていないかを本番で見るため (Refs #1287)。 */
+  loginPath?: string;
   constructor() {
     super("当該月のご利用はありません (明細 0 件)");
     this.name = "EtcMeisaiNoUsageError";
@@ -467,6 +470,8 @@ export type EtcAccountType = "personal" | "corporate";
 export interface EtcSession {
   page: EtcPage;
   accountType: EtcAccountType;
+  /** ログイン後ページの pathname (クエリは捨てる。Refs #1287 — 種別判定の実測用)。 */
+  loginPath: string;
 }
 
 export interface EtcLoginParams {
@@ -529,7 +534,11 @@ export async function etcLogin(
     );
   }
 
-  return { page: afterLogin, accountType: detectAccountType(afterLogin.url) };
+  return {
+    page: afterLogin,
+    accountType: detectAccountType(afterLogin.url),
+    loginPath: new URL(afterLogin.url).pathname,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1087,7 @@ export type EtcProgressCallback = (
 
 export interface EtcScrapeResult extends EtcCsvResult {
   accountType: EtcAccountType;
+  loginPath: string;
 }
 
 /**
@@ -1112,7 +1122,10 @@ export async function scrapeEtcCsv(
   try {
     resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now, onProgress);
   } catch (err) {
-    if (err instanceof EtcMeisaiNoUsageError) err.accountType = session.accountType;
+    if (err instanceof EtcMeisaiNoUsageError) {
+      err.accountType = session.accountType;
+      err.loginPath = session.loginPath;
+    }
     throw err;
   }
 
@@ -1120,7 +1133,7 @@ export async function scrapeEtcCsv(
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
 
   onProgress("done");
-  return { ...csv, accountType: session.accountType };
+  return { ...csv, accountType: session.accountType, loginPath: session.loginPath };
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,7 +1186,11 @@ export async function scrapeEtcFromCookies(
 
   onProgress("login"); // 実際は login 済み cookie で開始 (login POST はしない)
   const startPage = await followToPage(jar, startUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
-  const session: EtcSession = { page: startPage, accountType: detectAccountType(startPage.url) };
+  const session: EtcSession = {
+    page: startPage,
+    accountType: detectAccountType(startPage.url),
+    loginPath: new URL(startPage.url).pathname,
+  };
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
@@ -1183,7 +1200,7 @@ export async function scrapeEtcFromCookies(
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
 
   onProgress("done");
-  return { ...csv, accountType: session.accountType };
+  return { ...csv, accountType: session.accountType, loginPath: session.loginPath };
 }
 
 // ---------------------------------------------------------------------------

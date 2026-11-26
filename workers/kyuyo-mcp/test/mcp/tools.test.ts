@@ -1787,6 +1787,8 @@ describe("ALL_TOOLS", () => {
     // **1 呼び出しで theearth にログインする**ので、同時ログイン制約 (#233) の観点でも
     // read tool と同じ扱いにしない
     run_vehicle_state_sync: "mcp.write",
+    // etc-meisai.jp へ各アカウントでログインし、R2 と DO の storage に書く (Refs #1287)
+    run_etc_scrape: "mcp.write",
   } as const;
 
   it("read-only tool と write tool を取り違えない", () => {

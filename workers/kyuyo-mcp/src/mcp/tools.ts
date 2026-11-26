@@ -2398,6 +2398,56 @@ export const runVehicleStateSyncTool = {
   },
 };
 
+// ── run_etc_scrape ───────────────────────────────────────────────────────────
+
+/** ETC アカウントの user_id を末尾 4 桁だけにする (relay の `maskUserId` と同じ形)。 */
+function maskEtcUserId(id: string): string {
+  return id.length >= 4 ? `*${id.slice(-4)}` : "(不明)";
+}
+
+/**
+ * ETC 明細 CSV の取得を、cron (JST 6,7,8,9 時) を待たずに 1 回走らせる
+ * (Refs ohishi-exp/nuxt-dtako-admin#1287)。
+ *
+ * relay の `POST /kintai-relay/etc-run` を叩くだけ — cron と同じ関数 (`dispatchEtcAccounts`) で
+ * 同じ DO route (`/cron/etc`) へ転送する口 (relay `index.ts` の `handleEtcRun` の doc)。
+ * DO は 202 で受けてキューで回すので、**応答の時点ではログインはまだ終わっていない**。
+ *
+ * ## ★ user_id の全桁を返さない
+ *
+ * relay の応答は `target` と `detail` (DO の本文) に user_id の全桁を持つ。ここでは
+ * `target` を末尾 4 桁に伏せ、`detail` は捨てる。失敗 (全滅の 502 等) も本文を捨てて status だけ返す。
+ */
+export const runEtcScrapeTool = {
+  name: "run_etc_scrape",
+  description:
+    "ETC 明細 CSV の取得を cron (JST 6,7,8,9 時) を待たずに 1 回走らせる。etc-meisai.jp へ " +
+    "ETC_ACCOUNTS の各アカウントで 1 回ずつログインし、法人/個人の種別とログイン後のパスを " +
+    "relay に記録する (ETC カード追加登録の担当判定に使われる)。" +
+    "relay は 202 で受けて裏で回すので、**応答の ok は「受け付けた」までで、ログインの結末ではない**。" +
+    "応答は `{total, ok, results:[{target, ok}]}` (target は user_id の末尾 4 桁)。" +
+    "全アカウントで受け付けに失敗したときだけ relay が 502 を返す。",
+  inputSchema: noArgs,
+  // **write tool。** etc-meisai.jp へログインし、R2 と DO の storage に書く
+  requiresScope: "mcp.write",
+  execute: async (env: Env) => {
+    let res: unknown;
+    try {
+      res = await callRelay(env, "/kintai-relay/etc-run", {});
+    } catch (err) {
+      // 失敗本文は user_id の全桁を含みうるので捨てる (status までを残す)
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(msg.replace(/^(relay: status \d+):[\s\S]*$/, "$1").replace(/^(relay: parse failed):[\s\S]*$/, "$1"));
+    }
+    const results = ((res as { results?: unknown } | null)?.results ?? []) as Array<{ target?: unknown; ok?: unknown }>;
+    const masked = results.map((r) => ({
+      target: typeof r.target === "string" ? maskEtcUserId(r.target) : "(不明)",
+      ok: r.ok === true,
+    }));
+    return { total: masked.length, ok: masked.filter((r) => r.ok).length, results: masked };
+  },
+};
+
 // ── get_vehicle_state_status ─────────────────────────────────────────────────
 
 const getVehicleStateStatusArgs = z
@@ -3931,6 +3981,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runEtcScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getVehicleStateStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,

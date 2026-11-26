@@ -153,9 +153,18 @@ describe("/cron/etc の登録の印", () => {
 describe("GET /internal/etc-account-type", () => {
   it("記録済みの種別を返す。未記録・不正な値は null", async () => {
     const get = () => new Request("https://relay.internal/internal/etc-account-type");
-    expect(await (await makeDo({}, { ownType: "corporate" }).d.fetch(get())).json()).toEqual({ account_type: "corporate" });
-    expect(await (await makeDo({}, { ownType: "weird" }).d.fetch(get())).json()).toEqual({ account_type: null });
-    expect(await (await makeDo().d.fetch(get())).json()).toEqual({ account_type: null });
+    const withPath = makeDo({}, { ownType: "corporate" });
+    withPath.store.set("etc_login_path", "/etc_corp_meisai/top");
+    expect(await (await withPath.d.fetch(get())).json()).toEqual({
+      account_type: "corporate",
+      login_path: "/etc_corp_meisai/top",
+    });
+    expect(await (await makeDo({}, { ownType: "corporate" }).d.fetch(get())).json()).toEqual({
+      account_type: "corporate",
+      login_path: null,
+    });
+    expect(await (await makeDo({}, { ownType: "weird" }).d.fetch(get())).json()).toEqual({ account_type: null, login_path: null });
+    expect(await (await makeDo().d.fetch(get())).json()).toEqual({ account_type: null, login_path: null });
   });
 });
 

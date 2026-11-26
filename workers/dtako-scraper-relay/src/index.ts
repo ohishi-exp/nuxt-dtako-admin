@@ -79,6 +79,7 @@ import { VIEWER_COMPS_PATH, viewerCompIdsForTenant } from "./restraint-viewer-au
 import { respondAnnualReport } from "./min-wage-annual-report";
 import { renderPdf } from "./pdf-render";
 import {
+  CARD_REGISTER_NO_CORPORATE_MESSAGE,
   CARD_REGISTER_OFF_MESSAGE,
   CARD_REGISTER_UNCONFIRMED_MESSAGE,
   resolveCardRegisterMode,
@@ -1806,7 +1807,8 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
       checked,
     }),
   );
-  if (pick.kind !== "found") return fail(503, CARD_REGISTER_UNCONFIRMED_MESSAGE);
+  if (pick.kind === "none") return fail(503, CARD_REGISTER_NO_CORPORATE_MESSAGE);
+  if (pick.kind === "unconfirmed") return fail(503, CARD_REGISTER_UNCONFIRMED_MESSAGE);
 
   const res = await env.RELAY.get(env.RELAY.idFromName(`etc-${pick.userId}`)).fetch(
     "https://relay.internal/internal/etc-card-register",
