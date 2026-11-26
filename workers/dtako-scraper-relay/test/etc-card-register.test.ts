@@ -4,6 +4,7 @@ import {
   buildCardRegisterFields,
   buildRunConfirmEmail,
   cardRegisterConfirmKey,
+  cardRegisterDoneKey,
   cardRegisterErrorKey,
   CardRegisterDataError,
   countNonEtcRows,
@@ -282,8 +283,9 @@ describe('画面の判定 (仮置き)', () => {
 })
 
 describe('R2 key / mask', () => {
-  it('confirm / error の key', () => {
+  it('confirm / done / error の key', () => {
     expect(cardRegisterConfirmKey('etc', 7, NOW)).toBe('etc-card-register/7/20261126090000-confirm.html')
+    expect(cardRegisterDoneKey('etc', 7, NOW)).toBe('etc-card-register/7/20261126090000-done.html')
     expect(cardRegisterErrorKey('etc-staging', 7, NOW)).toBe('etc-staging-errors/card-register/7/20261126090000.html')
   })
 

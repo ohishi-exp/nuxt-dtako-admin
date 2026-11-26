@@ -207,14 +207,29 @@ describe('runCardRegistrations', () => {
     expect(updates[0].params).toEqual(['dry_run_ok', 1, null, NOW.toISOString(), 1])
   })
 
-  it('live: 完了なら registered (R2 には置かない)', async () => {
+  it('live: 完了なら完了画面を R2 の -done.html に置いて registered', async () => {
     const { d, updates, puts } = deps({
       mode: 'live',
-      register: vi.fn(async (): Promise<EtcCardRegisterOutcome> => ({ kind: 'registered', html: 'done' })),
+      register: vi.fn(async (): Promise<EtcCardRegisterOutcome> => ({ kind: 'registered', html: '<p>登録しました</p>' })),
     })
-    expect((await runCardRegistrations(d, { kind: 'cron' })).results[0].kind).toBe('registered')
-    expect(puts).toEqual([])
-    expect(updates[0].params[0]).toBe('registered')
+    const report = await runCardRegistrations(d, { kind: 'cron' })
+    expect(report.results[0]).toMatchObject({ kind: 'registered', detail: undefined })
+    expect(puts).toEqual([{ key: 'etc-card-register/1/20261126090000-done.html', html: '<p>登録しました</p>' }])
+    expect(updates[0].params).toEqual(['registered', 1, null, NOW.toISOString(), 1])
+  })
+
+  it('live: 完了画面の put が throw しても registered のまま、detail に保存失敗が出る', async () => {
+    const { d, updates } = deps({
+      mode: 'live',
+      register: vi.fn(async (): Promise<EtcCardRegisterOutcome> => ({ kind: 'registered', html: 'done' })),
+      putHtml: vi.fn(async () => {
+        throw new Error('R2 down')
+      }),
+    })
+    const report = await runCardRegistrations(d, { kind: 'cron' })
+    const detail = '完了画面の原本を保存できませんでした: R2 down'
+    expect(report.results[0]).toMatchObject({ kind: 'registered', detail })
+    expect(updates[0].params).toEqual(['registered', 1, detail, NOW.toISOString(), 1])
   })
 
   it('弾かれた画面は原本を errors/ に置いて failed', async () => {

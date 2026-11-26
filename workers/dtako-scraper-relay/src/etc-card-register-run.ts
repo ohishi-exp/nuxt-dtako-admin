@@ -26,6 +26,7 @@
 import {
   buildCardRegisterFields,
   cardRegisterConfirmKey,
+  cardRegisterDoneKey,
   cardRegisterErrorKey,
   countNonEtcRows,
   effectiveRegistrationDate,
@@ -399,7 +400,15 @@ async function processRow(deps: CardRegisterRunDeps, row: RegistrationRow): Prom
       await deps.putHtml(cardRegisterConfirmKey(deps.r2Prefix, row.id, deps.now), outcome.html);
       return { kind: "dry_run_ok", runDate, attempted: true };
     }
-    if (outcome.kind === "registered") return { kind: "registered", runDate, attempted: true };
+    if (outcome.kind === "registered") {
+      // etc-meisai.jp 側では登録済み。R2 の失敗で error にすると次の tick で再登録しに行くので、結果は registered のまま。
+      try {
+        await deps.putHtml(cardRegisterDoneKey(deps.r2Prefix, row.id, deps.now), outcome.html);
+        return { kind: "registered", runDate, attempted: true };
+      } catch (err) {
+        return { kind: "registered", runDate, attempted: true, detail: `完了画面の原本を保存できませんでした: ${errorMessage(err)}` };
+      }
+    }
     const key = cardRegisterErrorKey(deps.r2Prefix, row.id, deps.now);
     await deps.putHtml(key, outcome.html);
     return { kind: "failed", runDate, attempted: true, detail: `${outcome.reason} (原本 ${key})` };
