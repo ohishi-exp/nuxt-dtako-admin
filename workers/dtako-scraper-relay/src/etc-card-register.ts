@@ -337,7 +337,8 @@ export function isCardInputPage(html: string): boolean {
   return false;
 }
 
-/** 完了画面の印。**仮置き** — 完了画面の実物はまだ誰も見ていない。最初の live の原本を見て親が確定する。 */
+/** 完了画面の印。**仮置き** — 完了画面の実物はまだ誰も見ていない。最初の live の原本を見て親が確定する。
+ * 完了画面の原本は `cardRegisterDoneKey` (`-done.html`) に残る (2026-11-26 以降)。 */
 export const CARD_REGISTER_DONE_MARKERS = ["登録が完了", "追加登録しました", "登録しました"] as const;
 
 /** 完了画面か。印を含み、かつ入力画面でないこと。 */
@@ -358,6 +359,11 @@ export function extractPageError(html: string): string {
 /** dry-run の確認画面の保存先。 */
 export function cardRegisterConfirmKey(prefix: string, id: number, now: Date): string {
   return `${prefix}-card-register/${id}/${jstStamp(now)}-confirm.html`;
+}
+
+/** live で完了と判定した画面の保存先 (確認画面と同じディレクトリ、接尾辞だけ違う)。 */
+export function cardRegisterDoneKey(prefix: string, id: number, now: Date): string {
+  return `${prefix}-card-register/${id}/${jstStamp(now)}-done.html`;
 }
 
 /** 判定できなかった画面の原本の保存先 (既存の `{prefix}-errors/` の下)。 */
