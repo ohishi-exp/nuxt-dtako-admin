@@ -107,7 +107,23 @@ export interface ScrapeJobRecord {
    * 無い — [`annotateFoldStaleness`] は無ければ `accepted_at` で代用する (精度は
    * 落ちるが、日単位の古さを見るには十分)。 */
   fold_started_at?: string;
+  /** ETC カード追加登録の確認段 (取り込み後に zip の `KUDGSIR.csv` で走行日を確かめる) の結果
+   * (Refs #1287)。**成功も書く** — 失敗はメールで届くが、成功は届かないので、ここが無いと
+   * 「通った」と「動いていない」を見分けられない。`state` は動かさない (取り込みの成否とは別)。
+   * 無人実行 (`/cron/dtako`) の取り込みが成功した回だけ書く。 */
+  etc_confirm_state?: EtcConfirmState;
+  /** `failed` ならエラー文、`skipped` なら飛ばした理由。 */
+  etc_confirm_detail?: string;
+  /** `confirmed` のときだけ。行ごとの結果の件数 (`RunConfirmResult.kind` ごと)。 */
+  etc_confirm_counts?: Record<"found" | "kept" | "none" | "multiple", number>;
+  /** `confirmed` のときだけ。`ETC利用` が "1" でなく数えなかった料金所の行の数。 */
+  etc_confirm_non_etc_rows?: number;
 }
+
+/** ETC カード追加登録の確認段の結果。`confirmed` = 走行日の確認まで通った (行が 0 件でも) /
+ * `failed` = 確認段が落ちた / `no_kudgsir` = zip に料金所 CSV が無かった /
+ * `skipped` = 機能が止まっている環境 (staging・preview、D1 無し)。 */
+export type EtcConfirmState = "confirmed" | "failed" | "no_kudgsir" | "skipped";
 
 /** storage に積む 1 件分。`account` (認証情報) は持たない — drain 時に
  * `compId` から都度解決させる (KV のローテーションを拾える・秘匿情報を
@@ -278,6 +294,50 @@ function clearPreviousFoldAttempt(record: ScrapeJobRecord): ScrapeJobRecord {
     ...rest
   } = record;
   return rest;
+}
+
+/** 確認段の結果だけを表す patch。**`state` を持たない** — 確認段は取り込みの成否を語らない。 */
+export type ScrapeJobEtcConfirmPatch = Required<Pick<ScrapeJobRecord, "etc_confirm_state">> &
+  Partial<Pick<ScrapeJobRecord, "etc_confirm_detail" | "etc_confirm_counts" | "etc_confirm_non_etc_rows">>;
+
+/**
+ * 確認段の結果を既存の `scrape-job:{jobKey}` に重ねた結果を決める pure 関数 (Refs #1287)。
+ * **既存レコードが無ければ書かない** ([`decideFoldRecord`] と同じ理由 — 取り込みの試行が無い
+ * 読取日に、確認段が代わりに記録を名乗らない。再実行の口はその読取日の無人実行が無くても動く)。
+ * **前回の `etc_confirm_*` は捨ててから重ねる** — 成功のあとの失敗で古い件数が残らないように。
+ */
+export function decideEtcConfirmRecord(
+  existing: ScrapeJobRecord | undefined,
+  patch: ScrapeJobEtcConfirmPatch,
+): ScrapeJobRecord | null {
+  if (!existing) return null;
+  const {
+    etc_confirm_state: _state,
+    etc_confirm_detail: _detail,
+    etc_confirm_counts: _counts,
+    etc_confirm_non_etc_rows: _nonEtcRows,
+    ...rest
+  } = existing;
+  return { ...rest, ...patch };
+}
+
+/** [`decideEtcConfirmRecord`] を storage に反映する。観測のための書き込みなので例外を投げない。
+ * 戻り値は [`recordFoldProgress`] と同じ 3 値 (「書かなかった」と「書けなかった」を混ぜない)。 */
+export async function recordEtcConfirm(
+  storage: QueueStorage,
+  jobKey: string,
+  patch: ScrapeJobEtcConfirmPatch,
+): Promise<FoldProgressOutcome> {
+  try {
+    const key = SCRAPE_JOB_KEY_PREFIX + jobKey;
+    const record = decideEtcConfirmRecord(await storage.get<ScrapeJobRecord>(key), patch);
+    if (!record) return "skipped_no_record";
+    await storage.put(key, record);
+    return "written";
+  } catch (err) {
+    console.error(`recordEtcConfirm failed (job=${jobKey}): ${describeUnknownError(err)}`);
+    return "error";
+  }
 }
 
 /** [`recordFoldProgress`] の結果。**呼び出し元は `written` 以外を黙って捨てないこと** —

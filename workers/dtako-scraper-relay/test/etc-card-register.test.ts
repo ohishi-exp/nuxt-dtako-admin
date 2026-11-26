@@ -3,6 +3,7 @@ import {
   buildCardRegisterEmail,
   buildCardRegisterFields,
   buildRunConfirmEmail,
+  countRunConfirmKinds,
   cardRegisterConfirmKey,
   cardRegisterDoneKey,
   cardRegisterErrorKey,
@@ -342,26 +343,66 @@ describe('buildCardRegisterEmail', () => {
 })
 
 describe('buildRunConfirmEmail (確認段)', () => {
-  it('複数一致も失敗も無ければ送らない', () => {
-    expect(buildRunConfirmEmail([{ id: 1, cardNumber: CARD, kind: 'found', runDate: '2026-11-20' }], null, '2026-11-25')).toBeNull()
-  })
+  const HEAD = '【ETC カード追加登録】読取日 2026-11-25 の zip 登録時の走行日の確認'
 
-  it('複数一致と処理の失敗を載せる (カード番号は末尾 5 桁)', () => {
+  it('成功も送る: 件数と走行日を書いた行 (カード番号は末尾 5 桁)、件名は「完了」', () => {
     const mail = buildRunConfirmEmail(
-      [
-        { id: 1, cardNumber: CARD, kind: 'multiple', detail: '車両が複数一致 (車輌CD a, b)' },
-        { id: 2, cardNumber: CARD, kind: 'none' },
-      ],
-      'boom',
+      {
+        state: 'confirmed',
+        results: [
+          { id: 1, cardNumber: CARD, kind: 'found', runDate: '2026-11-20' },
+          { id: 2, cardNumber: CARD, kind: 'kept', runDate: '2026-11-22' },
+          { id: 3, cardNumber: CARD, kind: 'none' },
+        ],
+        nonEtcRows: 4,
+      },
       '2026-11-25',
-    )!
-    expect(mail.subject).toBe('[dtako] ETC カードの走行日の確認で要対応 (読取日 2026-11-25)')
+    )
+    expect(mail.subject).toBe('[dtako] ETC カードの走行日の確認 完了 (読取日 2026-11-25)')
     expect(mail.body.split('\n')).toEqual([
-      '【ETC カード追加登録】読取日 2026-11-25 の zip 登録時の走行日の確認',
-      'id 1 カード *23333: 失敗 — 車両が複数一致 (車輌CD a, b)',
-      '走行日の確認が失敗: boom',
+      HEAD,
+      '走行待ちのカード 3 件: 走行日を書いた 1 / 既に新しい走行日 1 / 走行なし 1 / 車両が複数一致 0',
+      'ETC利用でない料金所の行 4 件は数えていません。',
+      'id 1 カード *23333: 走行日 2026-11-20',
     ])
     expect(mail.body).not.toContain(CARD)
+  })
+
+  it('確かめる行が 0 件の日も送る', () => {
+    const mail = buildRunConfirmEmail({ state: 'confirmed', results: [], nonEtcRows: 0 }, '2026-11-25')
+    expect(mail.subject).toBe('[dtako] ETC カードの走行日の確認 完了 (読取日 2026-11-25)')
+    expect(mail.body).toContain('走行待ちのカード 0 件')
+  })
+
+  it('車両が複数一致があれば件名は「要対応」で、その行を載せる', () => {
+    const mail = buildRunConfirmEmail(
+      {
+        state: 'confirmed',
+        results: [{ id: 1, cardNumber: CARD, kind: 'multiple', detail: '車両が複数一致 (車輌CD a, b)' }],
+        nonEtcRows: 0,
+      },
+      '2026-11-25',
+    )
+    expect(mail.subject).toBe('[dtako] ETC カードの走行日の確認で要対応 (読取日 2026-11-25)')
+    expect(mail.body.split('\n').at(-1)).toBe('id 1 カード *23333: 失敗 — 車両が複数一致 (車輌CD a, b)')
+  })
+
+  it('処理の失敗は「要対応」', () => {
+    const mail = buildRunConfirmEmail({ state: 'failed', error: 'boom' }, '2026-11-25')
+    expect(mail.subject).toBe('[dtako] ETC カードの走行日の確認で要対応 (読取日 2026-11-25)')
+    expect(mail.body.split('\n')).toEqual([HEAD, '走行日の確認が失敗: boom'])
+  })
+
+  it('料金所 CSV が無い日も送る', () => {
+    const mail = buildRunConfirmEmail({ state: 'no_kudgsir' }, '2026-11-25')
+    expect(mail.subject).toBe('[dtako] ETC カードの走行日の確認 料金所 CSV なし (読取日 2026-11-25)')
+    expect(mail.body).toContain('KUDGSIR.csv')
+  })
+})
+
+describe('countRunConfirmKinds', () => {
+  it('0 件の種類も 0 と書く', () => {
+    expect(countRunConfirmKinds([{ id: 1, cardNumber: CARD, kind: 'found' }])).toEqual({ found: 1, kept: 0, none: 0, multiple: 0 })
   })
 })
 

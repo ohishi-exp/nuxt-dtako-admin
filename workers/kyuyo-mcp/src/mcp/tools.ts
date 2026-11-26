@@ -1320,7 +1320,17 @@ export const getDtakoScrapeProgressTool = {
     "⇒ **state と error が矛盾しているので、どちらが真かは記録からは決まらない** — " +
     "error と phase: pre_upload からは「アップロード前に落ちた」と読めるが、state: done と食い違う。" +
     "**この形を見たら記録だけで取り込みの成否を判定せず、alc 側 " +
-    "(get_dtako_scrape_status の unsplit_total 等) で確かめること。**",
+    "(get_dtako_scrape_status の unsplit_total 等) で確かめること。**" +
+    // ── ETC カード追加登録の確認段 (Refs #1287) ─────────────────────────
+    "**etc_confirm_* は取り込みの後に走る ETC カード追加登録の「走行日の確認」の結果** " +
+    "(state は動かさない)。etc_confirm_state は confirmed (確認まで通った。行が 0 件でも) / " +
+    "failed (確認段が落ちた。理由は etc_confirm_detail) / no_kudgsir (zip に料金所 CSV が無い) / " +
+    "skipped (staging・preview など機能を止めている環境。理由は etc_confirm_detail)。" +
+    "confirmed のときだけ etc_confirm_counts (found = 走行日を書いた / kept = 既に新しい走行日 / " +
+    "none = 走行なし / multiple = 車両が複数一致で失敗にした) と etc_confirm_non_etc_rows " +
+    "(ETC利用 が 1 でなく数えなかった料金所の行) が載る。" +
+    "**etc_confirm_* が無い記録は、確認段がまだ記録を書かなかった版で取り込んだ回か、取り込みが失敗した回** " +
+    "(「確認が落ちた」ではない)。failed をやり直すのは run_etc_run_confirm。",
   inputSchema: getDtakoScrapeProgressArgs,
   execute: async (env: Env, args: z.infer<typeof getDtakoScrapeProgressArgs>) => {
     const q = args.comp_id ? `?comp_id=${encodeURIComponent(args.comp_id)}` : "";
@@ -2447,6 +2457,52 @@ export const runEtcScrapeTool = {
     }));
     return { total: masked.length, ok: masked.filter((r) => r.ok).length, results: masked };
   },
+};
+
+// ── run_etc_run_confirm ──────────────────────────────────────────────────────
+
+const runEtcRunConfirmArgs = z
+  .object({
+    reading_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .describe("やり直す**読取日** (YYYY-MM-DD)。日次 cron の取り込みと同じ読取日を渡す"),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * ETC カード追加登録の確認段 (zip 登録時の走行日の確認) を、その読取日についてやり直す
+ * (Refs ohishi-exp/nuxt-dtako-admin#1287)。relay の `POST /kintai-relay/etc-confirm` を叩くだけ —
+ * relay が読取日の zip を theearth から取り直し (自前ログイン)、確認段だけを流す。
+ * **alc への取り込みはしない。** 結果は応答と、進捗 (`get_dtako_scrape_progress`) の
+ * `etc_confirm_*` とメールに出る。
+ */
+export const runEtcRunConfirmTool = {
+  name: "run_etc_run_confirm",
+  description:
+    "ETC カード追加登録の「zip 登録時の走行日の確認」を、指定した読取日についてやり直す " +
+    "(Refs ohishi-exp/nuxt-dtako-admin#1287)。日次 cron の取り込みは通ったが確認だけが落ちた回 " +
+    "(例: 料金所 CSV (KUDGSIR) に ETC利用 の列が無かった) を、theearth 側の設定を直したあとに流し直す口。" +
+    "relay が読取日の csvdata.zip を theearth から取り直し (自前ログイン、theearth の同時ログイン制約で " +
+    "人のセッションを蹴りうる)、走行待ちの ETC カードの走行日 (D1 の run_date) を確かめて書く。" +
+    "**alc への取り込みはしない**。**書き込み tool** (D1 を書き、メールを 1 通送る)。" +
+    "同期で返り、応答は `{ok, comp_id, reading_date, etc_confirm_state, etc_confirm_detail?, " +
+    "etc_confirm_counts?, etc_confirm_non_etc_rows?, theearth_logins, theearth_kicked}`。" +
+    "etc_confirm_state は confirmed (確認まで通った。行が 0 件でも) / failed (確認段が落ちた。理由は " +
+    "etc_confirm_detail) / no_kudgsir (zip に料金所 CSV が無い) / skipped (staging・preview など機能を止めている環境)。" +
+    "etc_confirm_counts は走行待ちのカードの結果の件数 (found = 走行日を書いた / kept = 既に新しい走行日 / " +
+    "none = 走行なし / multiple = 車両が複数一致で失敗にした)。" +
+    "その読取日の日次 cron の記録があれば、get_dtako_scrape_progress の同じ読取日の etc_confirm_* も置き換わる。" +
+    "zip が取れなければ relay が 502 (確認段は流さない)。",
+  inputSchema: runEtcRunConfirmArgs,
+  // **write tool。** D1 の run_date を書き、theearth へログインする
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runEtcRunConfirmArgs>) =>
+    await callRelay(env, "/kintai-relay/etc-confirm", {
+      reading_date: args.reading_date,
+      ...(args.comp_id ? { comp_id: args.comp_id } : {}),
+    }),
 };
 
 // ── get_etc_accounts ─────────────────────────────────────────────────────────
@@ -4008,6 +4064,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runEtcScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runEtcRunConfirmTool as unknown as ToolEntry<z.ZodTypeAny>,
   getEtcAccountsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getVehicleStateStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
