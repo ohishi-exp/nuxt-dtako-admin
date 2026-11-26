@@ -258,15 +258,21 @@ UPSTREAM_CACHE = "on"
 # dashboard の plain 変数 + keep_vars = true** (ETC_ACCOUNTS と同じ作法。[vars] に書くと
 # deploy がその値で上書きし、dashboard で切り替えられなくなる)。
 #
-#   ETC_CARD_REGISTER_USER_ID = 登録に使う ETC_ACCOUNTS の user_id (1 つ)。
-#                               未設定なら cron は登録を回さず、POST /etc-card/register は 503。
-#   ETC_CARD_REGISTER_MODE    = "live" のときだけ確認画面の先 (完了) まで進む。
-#                               未設定・それ以外は dry-run (確認画面で止め、HTML を R2
-#                               `{ETC_R2_PREFIX}-card-register/` に置く)。
+#   ETC_CARD_REGISTER_MODE = "live" のときだけ確認画面の先 (完了) まで進む。
+#                            "off" は登録段も確認段 (zip の走行日) も回さない (staging / preview 用)。
+#                            未設定・それ以外は dry-run (確認画面で止め、HTML を R2
+#                            `{ETC_R2_PREFIX}-card-register/` に置く)。
+#
+# 登録に使うアカウントは var で決めない — ETC_ACCOUNTS の並び順で最初の法人アカウント
+# (各 `etc-{user_id}` DO が ETC cron のログインで種別を記録する。`pickCardRegisterAccount`)。
+# 種別が未記録の間は登録を回さず、POST /etc-card/register は 503。
 #
 # 走行日の確認は DTAKO_CRON の zip 登録の後 (zip の KUDGSIR.csv から run_date を書く)、
 # 登録は ETC_CRON の 21 時 (UTC) の tick だけ (cron 式は増やさない。`isCardRegisterTick`)。
-# staging / preview は D1 を本番と共有するので、どちらにも置かないこと (同じ行を 2 か所から触る)。
+# **staging / preview は [env.*.vars] の ETC_CARD_REGISTER_MODE = "off" で登録と確認を止める** —
+# D1 と ETC_ACCOUNTS (KV) を本番と共有し、staging は ETC_CRON・DTAKO_CRON も持つので、止めないと
+# 本番の行に run_date を書き、同じカードの登録を本番と並んで回す (同じ行を 2 か所から触る)。
+# top-level (本番) には書かない (書くと dashboard で切り替えられなくなる)。
 
 # dtako 日次スクレイプが失敗したことを人へ知らせる LINE WORKS の宛先
 # (SCRAPE_ALERT_TARGET、Refs #967)。**ここには値を書かない — dashboard の plain
@@ -418,6 +424,9 @@ NET780_R2_PREFIX = "net780-staging"
 # staging の日次 cron と viewer の「取り込み」が本番と同じ `kintai/` に書いており、
 # 本番の月タブ・版一覧・`raw/history.jsonl` (追記型の監査証跡) に混ざっていた。
 KINTAI_R2_PREFIX = "kintai-staging"
+# ETC カード追加登録の登録段・走行日の確認段を止める (Refs #1287)。D1 と ETC_ACCOUNTS (KV) を本番と
+# 共有するので、止めないと本番の行に触る (上の top-level の注記参照)。
+ETC_CARD_REGISTER_MODE = "off"
 
 # kintai 系上流応答の DO SQLite キャッシュ (Refs #543 PR-2/PR-3)。
 # **staging だけ on** — 実験台として実機 E2E (hit/miss/強制更新) を確認してから
@@ -507,6 +516,9 @@ NET780_R2_PREFIX = "net780-preview"
 # だけではなく、viewer 経路 `POST /restraint-api/kintai/fetch` (画面の「取り込み」
 # ボタン) も同じ `handleKintaiFetch` を呼ぶ。この route 分岐は env の門を持たない。
 KINTAI_R2_PREFIX = "kintai-preview"
+# ETC カード追加登録の登録段・走行日の確認段を止める (Refs #1287)。D1 と ETC_ACCOUNTS (KV) を本番と
+# 共有するので、止めないと本番の行に触る (上の top-level の注記参照)。
+ETC_CARD_REGISTER_MODE = "off"
 
 # kintai 系上流応答の DO SQLite キャッシュ (Refs #543 PR-2)。既定 off。
 UPSTREAM_CACHE = "off"

@@ -79,6 +79,13 @@ import { VIEWER_COMPS_PATH, viewerCompIdsForTenant } from "./restraint-viewer-au
 import { respondAnnualReport } from "./min-wage-annual-report";
 import { renderPdf } from "./pdf-render";
 import {
+  CARD_REGISTER_OFF_MESSAGE,
+  CARD_REGISTER_UNCONFIRMED_MESSAGE,
+  resolveCardRegisterMode,
+  fetchEtcAccountType,
+  pickCardRegisterAccount,
+} from "./etc-card-register";
+import {
   driverMasterOverallStatus,
   runDriverMasterForComps,
 } from "./driver-master-run";
@@ -92,9 +99,9 @@ export interface RelayWorkerEnv {
    * 消える (Refs #367)。 */
   DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
-  /** ETC カード追加登録に使う ETC_ACCOUNTS の user_id (Refs #1287)。dashboard の plain 変数。
-   * 未設定なら cron は登録を回さず、手動口は 503。 */
-  ETC_CARD_REGISTER_USER_ID?: string;
+  /** `"off"` なら ETC カード追加登録の手動口を 503 にする (staging / preview、Refs #1287)。
+   * 解釈は `resolveCardRegisterMode`。 */
+  ETC_CARD_REGISTER_MODE?: string;
   /** auth-worker への service binding (勤怠では使わない)。 */
   AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding。本番 (top-level) にだけある。
@@ -480,8 +487,6 @@ export default {
               scraperMode: env.SCRAPER_MODE,
               dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
               etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
-              // ETC カード追加登録 (Refs #1287)。21 時 (UTC) の tick だけ cron.ts が使う
-              etcCardRegisterUserId: env.ETC_CARD_REGISTER_USER_ID,
               // KV 読み取りの例外は握らない (`resolveKvConfigRaw` の方針)。伝播させて
               // cron の実行ごと失敗させる — 宛先が確定できないまま古い plain 変数で
               // 日報を送るより、送らずに Observability に出す方を選ぶ。
@@ -1732,9 +1737,11 @@ export async function handleEtcRun(request: Request, env: RelayWorkerEnv): Promi
  * 運行データから走行日を照合し、etc-meisai.jp へカード追加登録する (Refs #1287。既定は dry-run)。
  *
  * 関門は他の `*-run` と同じ `X-Alc-Proxy-Secret` (= `INTERNAL_SHARED_SECRET`) の constant-time
- * 検証 1 つ (front の `server/utils/scraper-relay.ts` が付けるヘッダ)。本体は登録用アカウントの
- * DO (`etc-{ETC_CARD_REGISTER_USER_ID}`) の `/internal/etc-card-register` — cron の登録・
- * CSV 取得と同じキューで直列に走る (同じアカウントへ同時にログインしない)。
+ * 検証 1 つ (front の `server/utils/scraper-relay.ts` が付けるヘッダ)。本体は登録を担当する
+ * アカウント (`ETC_ACCOUNTS` の並び順で最初の法人。cron と同じ `pickCardRegisterAccount`) の
+ * DO (`etc-{user_id}`) の `/internal/etc-card-register` — cron の登録・CSV 取得と同じキューで
+ * 直列に走る (同じアカウントへ同時にログインしない)。種別は各 DO が ETC cron のログインで
+ * 記録した値なので、まだ記録が無ければ 503 (次の ETC cron で確認される)。
  * DO の応答 (status と本文) をそのまま返す。
  */
 export async function handleEtcCardRegister(request: Request, env: RelayWorkerEnv): Promise<Response> {
@@ -1748,9 +1755,7 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
   if (!proxySecret) return fail(503, "kintai-relay not configured");
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
-
-  const userId = env.ETC_CARD_REGISTER_USER_ID;
-  if (!userId) return fail(503, "ETC_CARD_REGISTER_USER_ID が未設定です");
+  if (resolveCardRegisterMode(env.ETC_CARD_REGISTER_MODE) === "off") return fail(503, CARD_REGISTER_OFF_MESSAGE);
 
   let body: unknown;
   try {
@@ -1763,9 +1768,25 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
     return fail(400, "id (正の整数) が必要です");
   }
 
-  const res = await env.RELAY.get(env.RELAY.idFromName(`etc-${userId}`)).fetch(
+  let accounts;
+  try {
+    accounts = parseEtcAccounts(await resolveSecretBinding(env.ETC_ACCOUNTS));
+  } catch (err) {
+    return fail(503, err instanceof Error ? err.message : String(err));
+  }
+  const pick = await pickCardRegisterAccount(
+    accounts.map((a) => a.user_id),
+    (userId) => fetchEtcAccountType(env.RELAY, userId),
+  );
+  if (pick.kind !== "found") return fail(503, CARD_REGISTER_UNCONFIRMED_MESSAGE);
+
+  const res = await env.RELAY.get(env.RELAY.idFromName(`etc-${pick.userId}`)).fetch(
     "https://relay.internal/internal/etc-card-register",
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) },
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, user_id: pick.userId }),
+    },
   );
   return new Response(await res.text(), {
     status: res.status,
