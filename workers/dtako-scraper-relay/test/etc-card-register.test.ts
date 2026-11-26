@@ -7,7 +7,6 @@ import {
   cardRegisterErrorKey,
   CardRegisterDataError,
   countNonEtcRows,
-  countRangeDays,
   dateOfDateTime,
   decodeCsvBytes,
   effectiveRegistrationDate,
@@ -21,10 +20,9 @@ import {
   jstStamp,
   maskCardNumber,
   parseTollCsv,
+  parseTollTable,
   plate4OfVehicleCd,
-  rescanReadingRanges,
   resolveCardRegisterMode,
-  RESCAN_CHUNK_DAYS,
   runSearchWindow,
   splitCsvLine,
   type CardRegisterResult,
@@ -92,31 +90,14 @@ describe('日付 (JST)', () => {
     expect(runSearchWindow(NOW, '2026-11-27')).toEqual({ from: '2026-11-27', to: '2026-11-26' })
   })
 
-  it('rescanReadingRanges: 走行日の範囲 (登録日〜今日) を 7 日ずつ古い順に割る。61 日で切れ、未来の登録日は空', () => {
-    // 登録日が窓の内側: 2026-11-10〜11-26 (17 日) → 7 + 7 + 3
-    const r = rescanReadingRanges(NOW, '2026-11-10')
-    expect(r).toEqual([
-      { startDate: '2026-11-10', endDate: '2026-11-16' },
-      { startDate: '2026-11-17', endDate: '2026-11-23' },
-      { startDate: '2026-11-24', endDate: '2026-11-26' },
+  it('parseTollTable: {headers, rows} を CSV と同じ形に読む (列の順は見出しで引く)', () => {
+    const rows = parseTollTable(['ETC利用', '終了日時', '車輌CD', '運行NO'], [['1', '2026/11/20 01:00:00', '10001234', 'U1'], []])
+    expect(rows).toEqual([
+      { unkoNo: 'U1', vehicleCd: '10001234', endDate: '2026-11-20', etc: '1' },
+      { unkoNo: '', vehicleCd: '', endDate: null, etc: '' },
     ])
-    expect(countRangeDays(r)).toBe(17)
-    // 古い登録日: 61 日前 (2026-09-26) で切れ、今日まで 62 日 → 9 区間
-    const old = rescanReadingRanges(NOW, '2025-01-01')
-    expect(old[0]!.startDate).toBe('2026-09-26')
-    expect(old.at(-1)!.endDate).toBe('2026-11-26')
-    expect(old).toHaveLength(9)
-    expect(countRangeDays(old)).toBe(62)
-    expect(RESCAN_CHUNK_DAYS).toBe(7)
-    // 今日が登録日 → 今日 1 日。月またぎも 1 日ずつ進む
-    expect(rescanReadingRanges(NOW, '2026-11-26')).toEqual([{ startDate: '2026-11-26', endDate: '2026-11-26' }])
-    expect(rescanReadingRanges(new Date('2026-12-02T00:00:00Z'), '2026-11-29', 3)).toEqual([
-      { startDate: '2026-11-29', endDate: '2026-12-01' },
-      { startDate: '2026-12-02', endDate: '2026-12-02' },
-    ])
-    // 未来の登録日 → 空
-    expect(rescanReadingRanges(NOW, '2026-11-27')).toEqual([])
-    expect(countRangeDays([])).toBe(0)
+    expect(parseTollCsv('運行NO,車輌CD,終了日時,ETC利用\nU1,10001234,2026/11/20 01:00:00,1')).toEqual([rows[0]])
+    expect(() => parseTollTable(['運行NO'], [])).toThrow('車輌CD')
   })
 
   it('effectiveRegistrationDate: 入れた登録日、空なら受信日の JST の日付 (UTC 15:00 の境界を含む)', () => {

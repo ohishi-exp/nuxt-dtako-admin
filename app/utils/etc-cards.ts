@@ -270,8 +270,29 @@ export function canRescan(r: Pick<EtcCardView, 'status' | 'plate4'>): boolean {
   return r.status === 'waiting_run' && r.plate4 !== null
 }
 
-/** 「走行日を探し直す」を受け付けたときに行の下へ出す文 (relay は 202 で受けて後で回す) */
-export const RESCAN_ACCEPTED_TEXT = '探し直しを受け付けました。数分後に再読み込みしてください'
+/** relay `POST /etc-card/rescan` の応答 (`workers/dtako-scraper-relay/src/index.ts` の `handleEtcCardRescan`) */
+export interface EtcCardRescanResult {
+  kind: 'found' | 'kept' | 'none' | 'multiple'
+  run_date: string | null
+  /** KUDGSIR を読めた運行の数 */
+  operations: number
+  /** KUDGSIR の無かった運行の数 */
+  skipped: number
+  /** 運行が多く、新しい方だけ読んだ */
+  truncated: boolean
+}
+
+/** 「走行日を探し直す」の結果を行の下に出す 1 文にする */
+export function rescanResultText(r: EtcCardRescanResult): string {
+  const notes = [`運行 ${r.operations} 件を確認`]
+  if (r.skipped > 0) notes.push(`料金所の記録が無い運行 ${r.skipped} 件は飛ばしました`)
+  if (r.truncated) notes.push('運行が多いため新しい方だけ確認しました')
+  const tail = ` (${notes.join('。')})`
+  if (r.kind === 'multiple') return `下 4 桁が同じ車両が複数あるため「失敗」にしました${tail}`
+  if (r.kind === 'found') return `走行日 ${r.run_date} が見つかりました${tail}`
+  if (r.kind === 'kept') return `走行日は ${r.run_date} のままです (これより新しい走行はありません)${tail}`
+  return `見つかりませんでした${tail}`
+}
 
 /** API の失敗を画面の文にする。404 は relay 側の口がまだ無い (未デプロイ) か、行が無い */
 export function etcCardErrorText(e: unknown, retry: string): string {

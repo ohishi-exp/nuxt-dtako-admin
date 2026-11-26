@@ -3,6 +3,9 @@ import {
   CARD_REGISTER_BATCH_LIMIT,
   confirmRunsFromTollCsv,
   findRescanTarget,
+  RESCAN_LIST_PER_PAGE,
+  RESCAN_MAX_OPERATIONS,
+  RescanUpstreamError,
   rescanRunsForRow,
   runCardRegistrations,
   SELECT_RESCAN_TARGET_SQL,
@@ -359,7 +362,7 @@ describe('SELECT は migrations 0021 + 0022 の表で通り、登録日の材料
 })
 
 // ---------------------------------------------------------------------------
-// 走行日を探し直す (手動)
+// 走行日を探し直す (手動。alc の運行の KUDGSIR を読み直す)
 // ---------------------------------------------------------------------------
 
 describe('rescanRunsForRow', () => {
@@ -386,9 +389,25 @@ describe('rescanRunsForRow', () => {
     }
     return { db, calls }
   }
-  const TARGET = { id: 7, card_number: CARD, registration_date: '2026-11-10', received_at: '2026-11-01T00:00:00.000Z', tenant_id: 'tenant-a' }
+  const TARGET = { id: 7, card_number: CARD, plate4: '1234', registration_date: '2026-11-10', received_at: '2026-11-01T00:00:00.000Z', tenant_id: 'tenant-a' }
   const WAITING = [{ id: 7, card_number: CARD, plate4: '1234', run_date: null, registration_date: '2026-11-10', received_at: '2026-11-01T00:00:00.000Z' }]
-  const zipOf = (csv: string | null) => new TextEncoder().encode(csv ?? '').buffer as ArrayBuffer
+  const HEADERS = ['運行NO', '車輌CD', '開始日時', '終了日時', 'ETC利用']
+  const tollJson = (rows: string[][]) => ({ status: 200, text: JSON.stringify({ headers: HEADERS, rows }) })
+  const list = (ops: { unko_no?: unknown, vehicle_cd?: unknown }[], total = ops.length) => ({ status: 200, text: JSON.stringify({ operations: ops, total, page: 1, per_page: 200 }) })
+
+  /** path → 応答。呼ばれた path と tenant を記録する。 */
+  function fakeAlc(routes: Record<string, { status: number, text: string }>) {
+    const calls: { tenant: string, path: string }[] = []
+    const alcGet = vi.fn(async (tenant: string, path: string) => {
+      calls.push({ tenant, path })
+      const key = path.startsWith('/alc-internal-proxy/api/internal/operations?') ? `list:${new URLSearchParams(path.split('?')[1]).get('page')}` : path
+      const r = routes[key]
+      if (!r) throw new Error(`unexpected ${path}`)
+      return r
+    })
+    return { alcGet, calls }
+  }
+  const csvPath = (u: string) => `/alc-internal-proxy/api/internal/operations/${u}/csv/kudgsir`
 
   it('findRescanTarget: id 1 つ、waiting_run で plate4 ありの行を読む。無ければ null', async () => {
     const { db, calls } = routedDb([TARGET], [])
@@ -399,111 +418,123 @@ describe('rescanRunsForRow', () => {
     expect(await findRescanTarget(routedDb(undefined, []).db, 7)).toBeNull()
   })
 
-  it('登録日〜今日の読取日を 7 日ずつ取り直し、KUDGSIR.csv をその行 id だけに絞って確認する (alc へは上げない)', async () => {
+  it('登録日〜今日の読取日の運行を行の tenant で引き、下 4 桁の合う車両の KUDGSIR だけ読んで、行 id で絞って確認する', async () => {
     const { db, calls } = routedDb([TARGET], WAITING)
-    const fetched: unknown[] = []
-    // deps に upload は無い。渡されるのは fetchZip / readTollCsv だけ (alc へ上げる口を持たない)
-    const deps = {
-      db,
-      now: NOW,
-      fetchZip: vi.fn(async (range: { startDate: string; endDate: string }) => {
-        fetched.push(range)
-        if (range.startDate === '2026-11-24') throw new Error('stage2 timeout')
-        return zipOf(range.startDate === '2026-11-17' ? CSV : null)
-      }),
-      readTollCsv: vi.fn(async (zip: ArrayBuffer) => {
-        const text = new TextDecoder().decode(zip)
-        return text === '' ? null : text
-      }),
-    }
-    const report = await rescanRunsForRow(deps, 'tenant-a', 7)
-    expect(Object.keys(deps).sort()).toEqual(['db', 'fetchZip', 'now', 'readTollCsv'])
-    expect(fetched).toEqual([
-      { startDate: '2026-11-10', endDate: '2026-11-16' },
-      { startDate: '2026-11-17', endDate: '2026-11-23' },
-      { startDate: '2026-11-24', endDate: '2026-11-26' },
-    ])
+    const { alcGet, calls: alc } = fakeAlc({
+      'list:1': list([
+        { unko_no: '111', vehicle_cd: '10001234' }, // 下 4 桁が合う
+        { unko_no: '111', vehicle_cd: '10001234' }, // 2 マンのもう 1 行 (読むのは 1 回)
+        { unko_no: '222', vehicle_cd: '10005678' }, // 合わない → 読まない
+        { unko_no: '333', vehicle_cd: null }, // 車両不明 → 読む
+        { unko_no: '444', vehicle_cd: '20001234' }, // 合う、CSV が無い (404)
+        { unko_no: 'X-1', vehicle_cd: '10001234' }, // 数字でない運行 NO → 飛ばす
+      ]),
+      [csvPath('111')]: tollJson([
+        ['111', '10001234', '2026/11/19 23:00:00', '2026/11/20 01:00:00', '1'],
+        ['111', '10001234', '2026/11/19 23:00:00', '2026/11/21 01:00:00', '0'], // ETC でない
+      ]),
+      [csvPath('333')]: tollJson([['333', '10001234', '2026/11/17 10:00:00', '2026/11/17 11:00:00', '1']]),
+      [csvPath('444')]: { status: 404, text: 'Not Found' },
+    })
+    const report = await rescanRunsForRow({ db, now: NOW, alcGet }, 7)
     expect(report).toEqual({
       kind: 'done',
       id: 7,
       cardNumber: CARD,
-      days: 17,
-      runDate: '2026-11-20',
-      chunks: [
-        { startDate: '2026-11-10', endDate: '2026-11-16', status: 'no_kudgsir' },
-        {
-          startDate: '2026-11-17',
-          endDate: '2026-11-23',
-          status: 'confirmed',
-          results: [{ id: 7, cardNumber: CARD, kind: 'found', runDate: '2026-11-20' }],
-        },
-        { startDate: '2026-11-24', endDate: '2026-11-26', status: 'error', error: 'stage2 timeout' },
-      ],
+      from: '2026-11-10',
+      to: '2026-11-26',
+      operations: 2,
+      skipped: 2,
+      truncated: false,
+      result: { id: 7, cardNumber: CARD, kind: 'found', runDate: '2026-11-20' },
     })
+    expect(alc.map((c) => c.tenant)).toEqual(['tenant-a', 'tenant-a', 'tenant-a', 'tenant-a'])
+    const q = new URLSearchParams(alc[0]!.path.split('?')[1])
+    expect(alc[0]!.path.startsWith('/alc-internal-proxy/api/internal/operations?')).toBe(true)
+    expect(Object.fromEntries(q)).toEqual({ date_from: '2026-11-10', date_to: '2026-11-26', page: '1', per_page: String(RESCAN_LIST_PER_PAGE) })
+    expect(alc.slice(1).map((c) => c.path)).toEqual([csvPath('111'), csvPath('333'), csvPath('444')])
     // 確認段は行 id で絞った SQL (tenant, id) — 他の waiting_run の行は読まない
-    const waitingSelects = calls.filter((c) => c.sql === SELECT_WAITING_ONE_SQL)
-    expect(waitingSelects).toEqual([{ sql: SELECT_WAITING_ONE_SQL, params: ['tenant-a', 7] }])
+    expect(calls.filter((c) => c.sql === SELECT_WAITING_ONE_SQL)).toEqual([{ sql: SELECT_WAITING_ONE_SQL, params: ['tenant-a', 7] }])
     expect(SELECT_WAITING_ONE_SQL).toContain('AND r.id = ?')
     expect(calls.some((c) => c.sql === SELECT_WAITING_FOR_TENANT_SQL)).toBe(false)
     // D1 に書くのは run_date / unko_no だけ
     const writes = calls.filter((c) => c.sql.startsWith('UPDATE'))
     expect(writes.map((w) => w.sql)).toEqual(['UPDATE etc_card_registrations SET run_date = ?, unko_no = ?, updated_at = ? WHERE id = ?'])
-    expect(writes[0]!.params).toEqual(['2026-11-20', 'U1', NOW.toISOString(), 7])
+    expect(writes[0]!.params).toEqual(['2026-11-20', '111', NOW.toISOString(), 7])
   })
 
-  it('新しい走行日を持つ区間が後に来れば、それを runDate にする (kept も数える)。古い区間の結果では下げない', async () => {
-    const csvOn = (date: string) => ['運行NO,車輌CD,開始日時,終了日時,ETC利用', `U9,10001234,${date} 10:00:00,${date} 11:00:00,1`].join('\n')
-    let runDate: string | null = null
-    const waiting = () => [{ ...WAITING[0], run_date: runDate }]
-    const calls: string[] = []
-    const db: CardRegisterDb = {
-      prepare: (sql) => ({
-        bind: (...params) => ({
-          all: async <T>() => {
-            calls.push(sql)
-            return { results: (sql === SELECT_RESCAN_TARGET_SQL ? [TARGET] : waiting()) as T[] }
-          },
-          run: async () => {
-            if (sql.includes('SET run_date')) runDate = params[0] as string
-            return {}
-          },
-        }),
-      }),
-    }
-    const csvs: Record<string, string> = { '2026-11-10': csvOn('2026/11/12'), '2026-11-17': csvOn('2026/11/11'), '2026-11-24': csvOn('2026/11/25') }
-    const report = await rescanRunsForRow(
-      { db, now: NOW, fetchZip: async (r) => zipOf(csvs[r.startDate]!), readTollCsv: async (z) => new TextDecoder().decode(z) },
-      'tenant-a',
-      7,
-    )
-    expect(report.kind === 'done' && report.chunks.map((c) => c.results?.[0]?.kind)).toEqual(['found', 'kept', 'found'])
-    expect(report.kind === 'done' && report.runDate).toBe('2026-11-25')
-    expect(runDate).toBe('2026-11-25')
+  it('一覧は total に届くまで全ページ引く。空のページが来たらそこで止める', async () => {
+    const page = (n: number) => Array.from({ length: n }, (_, i) => ({ unko_no: String(9000 + i), vehicle_cd: '10005678' }))
+    const two = fakeAlc({ 'list:1': list(page(RESCAN_LIST_PER_PAGE), 250), 'list:2': list(page(50), 250) })
+    const r = await rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet: two.alcGet }, 7)
+    expect(two.calls.map((c) => new URLSearchParams(c.path.split('?')[1]).get('page'))).toEqual(['1', '2'])
+    expect(r).toMatchObject({ operations: 0, skipped: 0, truncated: false, result: null })
+
+    const empty = fakeAlc({ 'list:1': list([], 999) })
+    await rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet: empty.alcGet }, 7)
+    expect(empty.calls).toHaveLength(1)
+    // 応答に operations / total が無くても 1 ページで終わる
+    const bare = fakeAlc({ 'list:1': { status: 200, text: '{}' } })
+    await rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet: bare.alcGet }, 7)
+    expect(bare.calls).toHaveLength(1)
   })
 
-  it('行が無い・tenant が違えば not_found で theearth を叩かない。未来の登録日は 0 日で終わる', async () => {
-    const fetchZip = vi.fn()
-    const base = { now: NOW, fetchZip, readTollCsv: vi.fn() }
-    expect(await rescanRunsForRow({ ...base, db: routedDb([], []).db }, 'tenant-a', 7)).toEqual({ kind: 'not_found' })
-    expect(await rescanRunsForRow({ ...base, db: routedDb([TARGET], []).db }, 'tenant-b', 7)).toEqual({ kind: 'not_found' })
-    const future = await rescanRunsForRow({ ...base, db: routedDb([{ ...TARGET, registration_date: '2026-11-27' }], []).db }, 'tenant-a', 7)
-    expect(future).toEqual({ kind: 'done', id: 7, cardNumber: CARD, days: 0, chunks: [], runDate: null })
-    expect(fetchZip).not.toHaveBeenCalled()
+  it(`対象の運行が ${RESCAN_MAX_OPERATIONS} 件を超えたら新しい方から上限まで読み、truncated を立てる (次のページは引かない)`, async () => {
+    const ops = Array.from({ length: RESCAN_MAX_OPERATIONS + 1 }, (_, i) => ({ unko_no: String(1000 + i), vehicle_cd: '10001234' }))
+    const routes: Record<string, { status: number, text: string }> = { 'list:1': list(ops, 999) }
+    for (const o of ops) routes[csvPath(o.unko_no)] = tollJson([])
+    const { alcGet, calls } = fakeAlc(routes)
+    const r = await rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet }, 7)
+    expect(r).toMatchObject({ operations: RESCAN_MAX_OPERATIONS, truncated: true, result: null })
+    expect(calls.filter((c) => c.path.includes('?'))).toHaveLength(1)
+    expect(calls.some((c) => c.path === csvPath(String(1000 + RESCAN_MAX_OPERATIONS)))).toBe(false)
   })
 
-  it('区間の失敗は Error でなくても文字列にして残す', async () => {
-    const report = await rescanRunsForRow(
-      {
-        db: routedDb([{ ...TARGET, registration_date: '2026-11-26' }], []).db,
-        now: NOW,
-        fetchZip: async () => {
-          throw 'plain'
-        },
-        readTollCsv: vi.fn(),
-      },
-      'tenant-a',
-      7,
-    )
-    expect(report.kind === 'done' && report.chunks).toEqual([{ startDate: '2026-11-26', endDate: '2026-11-26', status: 'error', error: 'plain' }])
+  it('複数一致は確認段どおり failed にして結果を返す', async () => {
+    const { db, calls } = routedDb([TARGET], WAITING)
+    const { alcGet } = fakeAlc({
+      'list:1': list([{ unko_no: '1', vehicle_cd: '10001234' }, { unko_no: '2', vehicle_cd: '20001234' }]),
+      [csvPath('1')]: tollJson([['1', '10001234', '', '2026/11/20 01:00:00', '1']]),
+      [csvPath('2')]: tollJson([['2', '20001234', '', '2026/11/21 01:00:00', '1']]),
+    })
+    const r = await rescanRunsForRow({ db, now: NOW, alcGet }, 7)
+    expect(r.kind === 'done' && r.result).toMatchObject({ kind: 'multiple' })
+    expect(calls.find((c) => c.sql.startsWith('UPDATE'))!.sql).toContain("status = 'failed'")
+  })
+
+  it('運行 NO が文字列でない運行は飛ばす。読む間に行が走行待ちでなくなっていたら result は null', async () => {
+    const { alcGet } = fakeAlc({
+      'list:1': list([{ unko_no: 42, vehicle_cd: '10001234' }, { unko_no: '1', vehicle_cd: '10001234' }]),
+      [csvPath('1')]: tollJson([['1', '10001234', '', '2026/11/20 01:00:00', '1']]),
+    })
+    const { db, calls } = routedDb([TARGET], []) // 確認段の SELECT は 0 行
+    const r = await rescanRunsForRow({ db, now: NOW, alcGet }, 7)
+    expect(r).toMatchObject({ operations: 1, skipped: 1, result: null })
+    expect(calls.some((c) => c.sql.startsWith('UPDATE'))).toBe(false)
+  })
+
+  it('行が無ければ not_found で alc を叩かない。未来の登録日は運行を引かずに 0 件で終わる', async () => {
+    const alcGet = vi.fn()
+    expect(await rescanRunsForRow({ db: routedDb([], []).db, now: NOW, alcGet }, 7)).toEqual({ kind: 'not_found' })
+    const future = await rescanRunsForRow({ db: routedDb([{ ...TARGET, registration_date: '2026-11-27' }], []).db, now: NOW, alcGet }, 7)
+    expect(future).toEqual({ kind: 'done', id: 7, cardNumber: CARD, from: '2026-11-27', to: '2026-11-26', operations: 0, skipped: 0, truncated: false, result: null })
+    expect(alcGet).not.toHaveBeenCalled()
+  })
+
+  it('一覧・CSV の 404 以外の非 2xx は RescanUpstreamError (D1 に書かない)。CSV の欄が欠けていれば列不足で落ちる', async () => {
+    const listFail = fakeAlc({ 'list:1': { status: 503, text: 'down' } })
+    await expect(rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet: listFail.alcGet }, 7)).rejects.toThrow(RescanUpstreamError)
+    const listRedirect = fakeAlc({ 'list:1': { status: 302, text: '' } })
+    await expect(rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet: listRedirect.alcGet }, 7)).rejects.toThrow('運行の一覧を読めません (302)')
+
+    const { db, calls } = routedDb([TARGET], WAITING)
+    const csvFail = fakeAlc({ 'list:1': list([{ unko_no: '1', vehicle_cd: '10001234' }]), [csvPath('1')]: { status: 500, text: 'x' } })
+    await expect(rescanRunsForRow({ db, now: NOW, alcGet: csvFail.alcGet }, 7)).rejects.toThrow('運行 1 の KUDGSIR を読めません (500)')
+    const csvRedirect = fakeAlc({ 'list:1': list([{ unko_no: '1', vehicle_cd: '10001234' }]), [csvPath('1')]: { status: 199, text: '' } })
+    await expect(rescanRunsForRow({ db, now: NOW, alcGet: csvRedirect.alcGet }, 7)).rejects.toThrow(RescanUpstreamError)
+    expect(calls.some((c) => c.sql.startsWith('UPDATE'))).toBe(false)
+
+    const noCols = fakeAlc({ 'list:1': list([{ unko_no: '1', vehicle_cd: '10001234' }]), [csvPath('1')]: { status: 200, text: '{}' } })
+    await expect(rescanRunsForRow({ db: routedDb([TARGET], WAITING).db, now: NOW, alcGet: noCols.alcGet }, 7)).rejects.toThrow('運行NO')
   })
 })

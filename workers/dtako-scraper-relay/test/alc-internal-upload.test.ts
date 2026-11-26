@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   AlcInternalUploadError,
+  getViaAlcInternalProxy,
   parseAlcUploadResponse,
   recalcPendingViaAlcInternalProxy,
   RECALC_PENDING_MAX_ROUNDS,
@@ -208,5 +209,21 @@ describe('recalcPendingViaAlcInternalProxy', () => {
     const result = await recalcPendingViaAlcInternalProxy(input, fetchImpl)
     expect(result.error).toEqual({ kind: 'parse', status: null })
     expect(result.rounds).toBe(1)
+  })
+})
+
+describe('getViaAlcInternalProxy (Refs #1287 の走行日の探し直し)', () => {
+  it('shared-secret と tenant のヘッダを付けて GET し、非 2xx でも投げずに status と本文を返す', async () => {
+    const seen: { url: string, init?: RequestInit }[] = []
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      seen.push({ url, init })
+      return new Response('Not Found', { status: 404 })
+    }
+    const r = await getViaAlcInternalProxy({ path: '/alc-internal-proxy/api/internal/operations/1/csv/kudgsir', sharedSecret: 's', tenantId: 't' }, fetchImpl)
+    expect(r).toEqual({ status: 404, text: 'Not Found' })
+    expect(seen).toEqual([{
+      url: 'https://auth-worker.internal/alc-internal-proxy/api/internal/operations/1/csv/kudgsir',
+      init: { method: 'GET', headers: { 'X-Alc-Proxy-Secret': 's', 'X-Tenant-ID': 't' } },
+    }])
   })
 })

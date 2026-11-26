@@ -26,20 +26,20 @@
 import {
   buildCardRegisterFields,
   cardRegisterConfirmKey,
-  countRangeDays,
   cardRegisterErrorKey,
   countNonEtcRows,
   effectiveRegistrationDate,
   findRunForPlate,
   isRunDateUsable,
   parseTollCsv,
-  rescanReadingRanges,
+  parseTollTable,
+  plate4OfVehicleCd,
   runSearchWindow,
   type CardRegisterFields,
   type CardRegisterMode,
   type CardRegisterResult,
-  type ReadingDateRange,
   type RunConfirmResult,
+  type TollRow,
 } from "./etc-card-register";
 import type { EtcCardRegisterOutcome } from "./etc-meisai-client";
 
@@ -90,7 +90,16 @@ export async function confirmRunsFromTollCsv(
   csvText: string,
   onlyId?: number,
 ): Promise<RunConfirmReport> {
-  const tolls = parseTollCsv(csvText);
+  return confirmRunsFromTolls(deps, tenantId, parseTollCsv(csvText), onlyId);
+}
+
+/** {@link confirmRunsFromTollCsv} の本体 (読み終えた料金所の行を受ける)。判定はここ 1 か所。 */
+export async function confirmRunsFromTolls(
+  deps: { db: CardRegisterDb; now: Date },
+  tenantId: string,
+  tolls: readonly TollRow[],
+  onlyId?: number,
+): Promise<RunConfirmReport> {
   const updatedAt = deps.now.toISOString();
   const select =
     onlyId === undefined
@@ -137,19 +146,20 @@ export async function confirmRunsFromTollCsv(
 }
 
 // ---------------------------------------------------------------------------
-// 走行日を探し直す (手動。取り込み済みの zip を theearth から取り直す)
+// 走行日を探し直す (手動。alc に取り込み済みの運行の KUDGSIR を読み直す)
 // ---------------------------------------------------------------------------
 
-/** 探し直しの対象の行: id 1 つ、`waiting_run` で plate4 あり。tenant (どの会社の theearth で
- * 取り直すか) と実効の登録日の材料も読む。 */
+/** 探し直しの対象の行: id 1 つ、`waiting_run` で plate4 あり。tenant (どの会社の運行を読むか) と
+ * 実効の登録日の材料も読む。 */
 export const SELECT_RESCAN_TARGET_SQL =
-  "SELECT r.id, r.card_number, r.registration_date, s.received_at, s.tenant_id FROM etc_card_registrations r " +
+  "SELECT r.id, r.card_number, r.plate4, r.registration_date, s.received_at, s.tenant_id FROM etc_card_registrations r " +
   "JOIN etc_card_scans s ON s.sha256 = r.scan_sha256 " +
   "WHERE r.id = ? AND r.status = 'waiting_run' AND r.plate4 IS NOT NULL";
 
 export interface RescanTarget {
   id: number;
   card_number: string | null;
+  plate4: string;
   registration_date: string | null;
   received_at: string;
   tenant_id: string;
@@ -161,19 +171,35 @@ export async function findRescanTarget(db: CardRegisterDb, id: number): Promise<
   return rows[0] ?? null;
 }
 
+/** 1 回に KUDGSIR を読む運行の上限。超えたら新しい (読取日の遅い) 方から上限まで読み、`truncated` を立てる。 */
+export const RESCAN_MAX_OPERATIONS = 200;
+
+/** 運行の一覧の 1 ページの件数 (alc-dtako-worker の `MAX_PER_PAGE`)。 */
+export const RESCAN_LIST_PER_PAGE = 200;
+
+/** alc の 1 運行の KUDGSIR の口が受ける運行 NO (auth-worker の許可が数字 1〜32 桁に絞っている)。 */
+const UNKO_NO_PATH_RE = /^[0-9]{1,32}$/;
+
+/** alc の shared-secret class の口を GET する (`getViaAlcInternalProxy` に tenant と secret を束ねたもの)。 */
+export type AlcGet = (path: string) => Promise<{ status: number; text: string }>;
+
 export interface RescanDeps {
   db: CardRegisterDb;
   now: Date;
-  /** 読取日の範囲の csvdata.zip を theearth から取る (`scrapeViaHttp`)。**alc へは上げない。** */
-  fetchZip(range: ReadingDateRange): Promise<ArrayBuffer>;
-  /** zip の `KUDGSIR.csv` を文字列にする。無ければ null。 */
-  readTollCsv(zip: ArrayBuffer): Promise<string | null>;
+  /** tenant は呼び手が {@link RescanTarget.tenant_id} で束ねる。 */
+  alcGet(tenantId: string, path: string): Promise<{ status: number; text: string }>;
 }
 
-export interface RescanChunk extends ReadingDateRange {
-  status: "confirmed" | "no_kudgsir" | "error";
-  results?: RunConfirmResult[];
-  error?: string;
+export class RescanUpstreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RescanUpstreamError";
+  }
+}
+
+interface OperationListItem {
+  unko_no?: unknown;
+  vehicle_cd?: unknown;
 }
 
 export type RescanReport =
@@ -182,48 +208,95 @@ export type RescanReport =
       kind: "done";
       id: number;
       cardNumber: string | null;
-      /** 取り直した日数 (全区間の合計)。 */
-      days: number;
-      chunks: RescanChunk[];
-      /** 見つかった (書いた / 既にあった) 走行日のいちばん新しいもの。無ければ null。 */
-      runDate: string | null;
+      /** 運行を引いた読取日の範囲 (`runSearchWindow`)。 */
+      from: string;
+      to: string;
+      /** KUDGSIR を読めた運行の数。 */
+      operations: number;
+      /** KUDGSIR が無かった (404) / 運行 NO が数字でなかった運行の数。 */
+      skipped: number;
+      /** 対象の運行が上限 ({@link RESCAN_MAX_OPERATIONS}) を超え、新しい方だけ読んだ。 */
+      truncated: boolean;
+      /** その行の確認の結果 (登録日より後の走行が無い・未来の登録日なら null)。 */
+      result: RunConfirmResult | null;
     };
 
 /**
- * 「走行日を探し直す」本体 (Refs #1287)。カードを登録する前に alc へ取り込み済みの zip は
- * cron の確認段 (`confirmRunsFromTollCsv`) が見ないので、行 1 つについて実効の登録日〜今日の
- * 読取日の zip を theearth から取り直し、`KUDGSIR.csv` を確認段と同じ関数に渡す。
+ * 「走行日を探し直す」本体 (Refs #1287)。カードを登録する前に alc へ取り込み済みの運行は cron の
+ * 確認段 (`confirmRunsFromTollCsv`) が見ないので、行 1 つについて alc の運行を読み直す。
  *
- * - **alc へは上げない** (`deps` に upload を持たない。上げると has_kudgivt をリセットする)
- * - D1 に書くのは `confirmRunsFromTollCsv` が書くもの (run_date / unko_no、複数一致の failed) だけ。行 id で絞る
- * - `tenantId` (呼び手の theearth アカウントの tenant) と行の tenant が違えば `not_found`
- * - 区間 ({@link rescanReadingRanges}) は古い順に直列。1 区間の失敗は記録して次へ進む
+ * 1. `GET /api/internal/operations?date_from&date_to&page&per_page` で、実効の登録日〜今日
+ *    (`runSearchWindow`) の**読取日**の運行を全ページ引く (読取日は運行日と同じか遅い)。
+ *    **plate4 は車輌CD の下 4 桁 (`車輌CD % 10000`) で、一覧の `vehicle_cd` は完全一致の絞り込みなので
+ *    問いには載せない**。一覧の `vehicle_cd` が plate4 に当たる運行 (と `vehicle_cd` の無い運行) だけを残す
+ * 2. 各運行の `GET /api/internal/operations/{運行NO}/csv/kudgsir` (`{headers, rows}`) を読む。404 は飛ばして数える
+ * 3. 集めた料金所の行を確認段と同じ判定 (`confirmRunsFromTolls`) に 1 回で通す。行 id で絞る
  *
- * 呼び手は theearth の同じ会社への同時ログインを避けるため、DO の `enqueueScrape` の中から呼ぶこと。
+ * **alc には何も書かない (GET だけ)**。D1 に書くのは確認段が書くもの (run_date / unko_no、複数一致の failed) だけ。
+ * 一覧・CSV の 404 以外の非 2xx は {@link RescanUpstreamError} で投げる。
  */
-export async function rescanRunsForRow(deps: RescanDeps, tenantId: string, id: number): Promise<RescanReport> {
+export async function rescanRunsForRow(deps: RescanDeps, id: number): Promise<RescanReport> {
   const target = await findRescanTarget(deps.db, id);
-  if (!target || target.tenant_id !== tenantId) return { kind: "not_found" };
-  const ranges = rescanReadingRanges(deps.now, effectiveRegistrationDate(target.registration_date, target.received_at));
-  const chunks: RescanChunk[] = [];
-  let runDate: string | null = null;
-  for (const range of ranges) {
-    try {
-      const csv = await deps.readTollCsv(await deps.fetchZip(range));
-      if (csv === null) {
-        chunks.push({ ...range, status: "no_kudgsir" });
-        continue;
-      }
-      const { results } = await confirmRunsFromTollCsv(deps, tenantId, csv, id);
-      for (const r of results) {
-        if (r.runDate !== undefined && (runDate === null || r.runDate > runDate)) runDate = r.runDate;
-      }
-      chunks.push({ ...range, status: "confirmed", results });
-    } catch (err) {
-      chunks.push({ ...range, status: "error", error: errorMessage(err) });
+  if (!target) return { kind: "not_found" };
+  const window = runSearchWindow(deps.now, effectiveRegistrationDate(target.registration_date, target.received_at));
+  const get: AlcGet = (path) => deps.alcGet(target.tenant_id, path);
+  const base = { kind: "done" as const, id, cardNumber: target.card_number, from: window.from, to: window.to };
+  if (window.from > window.to) return { ...base, operations: 0, skipped: 0, truncated: false, result: null };
+
+  const unkoNos: string[] = [];
+  let truncated = false;
+  for (let page = 1; ; page++) {
+    const q = new URLSearchParams({
+      date_from: window.from,
+      date_to: window.to,
+      page: String(page),
+      per_page: String(RESCAN_LIST_PER_PAGE),
+    });
+    const res = await get(`/alc-internal-proxy/api/internal/operations?${q}`);
+    if (res.status < 200 || res.status >= 300) {
+      throw new RescanUpstreamError(`運行の一覧を読めません (${res.status}): ${res.text.slice(0, 200)}`);
     }
+    const body = JSON.parse(res.text) as { operations?: OperationListItem[]; total?: unknown };
+    const items = body.operations ?? [];
+    for (const op of items) {
+      const unko = typeof op.unko_no === "string" ? op.unko_no : "";
+      const cd = typeof op.vehicle_cd === "string" ? op.vehicle_cd : null;
+      if (cd !== null && plate4OfVehicleCd(cd) !== target.plate4) continue;
+      if (unkoNos.includes(unko)) continue; // 2 マン運行は crew_role ごとに行がある
+      if (unkoNos.length >= RESCAN_MAX_OPERATIONS) {
+        truncated = true;
+        break;
+      }
+      unkoNos.push(unko);
+    }
+    const total = typeof body.total === "number" ? body.total : 0;
+    if (truncated || items.length === 0 || page * RESCAN_LIST_PER_PAGE >= total) break;
   }
-  return { kind: "done", id, cardNumber: target.card_number, days: countRangeDays(ranges), chunks, runDate };
+
+  const tolls: TollRow[] = [];
+  let operations = 0;
+  let skipped = 0;
+  for (const unko of unkoNos) {
+    if (!UNKO_NO_PATH_RE.test(unko)) {
+      skipped++;
+      continue;
+    }
+    const res = await get(`/alc-internal-proxy/api/internal/operations/${unko}/csv/kudgsir`);
+    if (res.status === 404) {
+      skipped++;
+      continue;
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new RescanUpstreamError(`運行 ${unko} の KUDGSIR を読めません (${res.status}): ${res.text.slice(0, 200)}`);
+    }
+    const table = JSON.parse(res.text) as { headers?: string[]; rows?: string[][] };
+    tolls.push(...parseTollTable(table.headers ?? [], table.rows ?? []));
+    operations++;
+  }
+
+  const result =
+    tolls.length === 0 ? null : ((await confirmRunsFromTolls(deps, target.tenant_id, tolls, id)).results[0] ?? null);
+  return { ...base, operations, skipped, truncated, result };
 }
 
 // ---------------------------------------------------------------------------
