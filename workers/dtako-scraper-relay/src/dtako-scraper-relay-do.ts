@@ -75,6 +75,7 @@ import {
   CARD_REGISTER_OFF_MESSAGE,
   decodeCsvBytes,
   maskCardNumber,
+  maskUserId,
   ETC_ACCOUNT_TYPE_PATH,
   ETC_ACCOUNT_TYPE_STORAGE_KEY,
   fetchEtcAccountType,
@@ -3957,14 +3958,32 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     const own = await this.readOwnEtcAccountType();
     const accounts = own === "corporate" ? await this.resolveEtcAccounts() : [];
+    // 診断ログ用: 読んだ順の種別 (user_id は末尾 4 文字だけ)
+    const checked: { idx: number; user_tail: string; type: string | null }[] = [];
     const pick = await pickCardRegisterAccount(
       accounts.map((a) => a.user_id),
-      (userId) =>
-        userId === account.user_id ? Promise.resolve(own) : fetchEtcAccountType(this.env.RELAY, userId),
+      async (userId) => {
+        const idx = checked.length;
+        try {
+          const type = userId === account.user_id ? own : await fetchEtcAccountType(this.env.RELAY, userId);
+          checked.push({ idx, user_tail: maskUserId(userId), type });
+          return type;
+        } catch (err) {
+          checked.push({ idx, user_tail: maskUserId(userId), type: "error" });
+          throw err;
+        }
+      },
     );
     if (pick.kind !== "found" || pick.userId !== account.user_id) {
       console.log(
-        JSON.stringify({ cron: "etc-card-register", status: "skipped", user_id: account.user_id, own_type: own, pick }),
+        JSON.stringify({
+          cron: "etc-card-register",
+          status: "skipped",
+          user_id: account.user_id,
+          own_type: own,
+          pick,
+          checked,
+        }),
       );
       return;
     }
@@ -4120,6 +4139,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
       // 種別を記録する (ETC カード追加登録の担当判定、Refs #1287)。ログインは CSV 取得の 1 回だけ
       await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, result.accountType);
+      console.log(
+        JSON.stringify({
+          etc_scrape: "account_type_stored",
+          user_tail: maskUserId(account.user_id),
+          outcome: "success",
+          stored: result.accountType,
+        }),
+      );
       const key = etcCsvKey(prefix, account.user_id, now);
       await bucket.put(key, result.bytes, {
         httpMetadata: { contentType: "text/csv; charset=shift_jis" },
@@ -4135,7 +4162,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof EtcMeisaiNoUsageError) {
         // 明細 0 件は正常系 (VPS 版の NoUsageData skip と同じ扱い)。ログインはできたので種別は記録する
-        if (err.accountType) await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, err.accountType);
+        if (err.accountType) {
+          await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, err.accountType);
+          console.log(
+            JSON.stringify({
+              etc_scrape: "account_type_stored",
+              user_tail: maskUserId(account.user_id),
+              outcome: "no_usage",
+              stored: err.accountType,
+            }),
+          );
+        }
         return { status: "skipped", message: err.message };
       }
       // CSV でない応答は原因調査用に R2 の errors/ 配下へ保存する (「黙って200」対策の

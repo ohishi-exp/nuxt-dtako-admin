@@ -83,6 +83,7 @@ import {
   CARD_REGISTER_UNCONFIRMED_MESSAGE,
   resolveCardRegisterMode,
   fetchEtcAccountType,
+  maskUserId,
   pickCardRegisterAccount,
 } from "./etc-card-register";
 import { findRescanTarget, type CardRegisterDb } from "./etc-card-register-run";
@@ -1780,9 +1781,30 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
   } catch (err) {
     return fail(503, err instanceof Error ? err.message : String(err));
   }
+  // 診断ログ用: 読んだ順の種別 (user_id は末尾 4 文字だけ)
+  const checked: { idx: number; user_tail: string; type: string | null }[] = [];
   const pick = await pickCardRegisterAccount(
     accounts.map((a) => a.user_id),
-    (userId) => fetchEtcAccountType(env.RELAY, userId),
+    async (userId) => {
+      const idx = checked.length;
+      try {
+        const type = await fetchEtcAccountType(env.RELAY, userId);
+        checked.push({ idx, user_tail: maskUserId(userId), type });
+        return type;
+      } catch (err) {
+        checked.push({ idx, user_tail: maskUserId(userId), type: "error" });
+        throw err;
+      }
+    },
+  );
+  console.log(
+    JSON.stringify({
+      route: "etc-card-register",
+      pick_kind: pick.kind,
+      pick_user_tail: "userId" in pick ? maskUserId(pick.userId) : null,
+      accounts: accounts.length,
+      checked,
+    }),
   );
   if (pick.kind !== "found") return fail(503, CARD_REGISTER_UNCONFIRMED_MESSAGE);
 
