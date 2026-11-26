@@ -13,7 +13,7 @@
  *
  * | 結末 | status | run_date / unko_no | attempts | last_error |
  * |---|---|---|---|---|
- * | 走行日が範囲外になった (`expired`) | 変えない | **消す** (次の zip で確認し直す) | 触らない | 触らない |
+ * | 走行日が範囲 (登録日を含む) から外れた (`expired`) | 変えない | **消す** (次の zip で確認し直す) | 触らない | 触らない |
  * | 確認画面まで (`dry_run_ok`) | `dry_run_ok` | 触らない | +1 | NULL |
  * | 完了 (`registered`) | `registered` | 触らない | +1 | NULL |
  * | 登録しない / 弾かれた (`failed`) | `failed` | 触らない | 送ったときだけ +1 | 理由 |
@@ -28,6 +28,7 @@ import {
   cardRegisterConfirmKey,
   cardRegisterErrorKey,
   countNonEtcRows,
+  effectiveRegistrationDate,
   findRunForPlate,
   isRunDateUsable,
   parseTollCsv,
@@ -54,9 +55,10 @@ export interface CardRegisterDb {
 // ---------------------------------------------------------------------------
 
 /** 確認段で見る行: `waiting_run` で、明細書を受けた会社 (`etc_card_scans.tenant_id`) が
- * その zip のアカウントの tenant と一致するもの。 */
+ * その zip のアカウントの tenant と一致するもの。実効の登録日を作るため `registration_date` と
+ * scan の `received_at` も持ってくる。 */
 export const SELECT_WAITING_FOR_TENANT_SQL =
-  "SELECT r.id, r.card_number, r.plate4, r.run_date FROM etc_card_registrations r " +
+  "SELECT r.id, r.card_number, r.plate4, r.run_date, r.registration_date, s.received_at FROM etc_card_registrations r " +
   "JOIN etc_card_scans s ON s.sha256 = r.scan_sha256 " +
   "WHERE r.status = 'waiting_run' AND r.plate4 IS NOT NULL AND s.tenant_id = ? ORDER BY r.id";
 
@@ -68,9 +70,9 @@ export interface RunConfirmReport {
 
 /**
  * zip の `KUDGSIR.csv` (文字列にしたもの) から、`tenantId` の `waiting_run` の行の走行日を確認する。
- * - 範囲内の ETC 走行があり、`run_date` が空かそれより古ければ `run_date` / `unko_no` を書く
+ * - 範囲 (行ごとの実効の登録日〜。`runSearchWindow`) 内の ETC 走行があり、`run_date` が空かそれより古ければ `run_date` / `unko_no` を書く
  * - plate4 に一致する車輌CD が 2 種類以上あれば `failed` + 「車両が複数一致」
- * - 何も無ければ触らない
+ * - 何も無ければ触らない (登録日より前の走行しか無い行も。走行待ちのまま)
  */
 export async function confirmRunsFromTollCsv(
   deps: { db: CardRegisterDb; now: Date },
@@ -78,18 +80,25 @@ export async function confirmRunsFromTollCsv(
   csvText: string,
 ): Promise<RunConfirmReport> {
   const tolls = parseTollCsv(csvText);
-  const window = runSearchWindow(deps.now);
   const updatedAt = deps.now.toISOString();
   const rows =
     (
       await deps.db
         .prepare(SELECT_WAITING_FOR_TENANT_SQL)
         .bind(tenantId)
-        .all<{ id: number; card_number: string | null; plate4: string; run_date: string | null }>()
+        .all<{
+          id: number;
+          card_number: string | null;
+          plate4: string;
+          run_date: string | null;
+          registration_date: string | null;
+          received_at: string;
+        }>()
     ).results ?? [];
 
   const results: RunConfirmResult[] = [];
   for (const row of rows) {
+    const window = runSearchWindow(deps.now, effectiveRegistrationDate(row.registration_date, row.received_at));
     const run = findRunForPlate(tolls, row.plate4, window);
     const base = { id: row.id, cardNumber: row.card_number };
     if (run.kind === "multiple") {
@@ -141,6 +150,8 @@ interface RegistrationRow {
   plate4: string | null;
   obu_number: string | null;
   run_date: string | null;
+  registration_date: string | null;
+  received_at: string;
 }
 
 /** 拾う status。cron は live のとき `dry_run_ok` も (dry-run で確認まで通した行を本登録する)。
@@ -150,7 +161,7 @@ export function targetStatuses(target: CardRegisterTarget, mode: CardRegisterMod
   return mode === "live" ? ["waiting_run", "dry_run_ok"] : ["waiting_run"];
 }
 
-/** 対象の行を読む SQL と bind 値。cron は `run_date` のある行だけ。手動は id で引き、
+/** 対象の行を読む SQL と bind 値。scan を JOIN して実効の登録日の材料も読む。cron は `run_date` のある行だけ。手動は id で引き、
  * `run_date` が無ければ呼び手が 409 にする (`conflict`)。 */
 export function selectRegistrationsQuery(
   target: CardRegisterTarget,
@@ -158,18 +169,19 @@ export function selectRegistrationsQuery(
 ): { sql: string; params: unknown[] } {
   const statuses = targetStatuses(target, mode);
   const params: unknown[] = [...statuses];
-  let where = `status IN (${statuses.map(() => "?").join(", ")})`;
+  let where = `r.status IN (${statuses.map(() => "?").join(", ")})`;
   if (target.kind === "one") {
-    where += " AND id = ?";
+    where += " AND r.id = ?";
     params.push(target.id);
   } else {
-    where += " AND run_date IS NOT NULL";
+    where += " AND r.run_date IS NOT NULL";
   }
   params.push(CARD_REGISTER_BATCH_LIMIT);
   return {
     sql:
-      "SELECT id, card_number, plate4, obu_number, run_date FROM etc_card_registrations " +
-      `WHERE ${where} ORDER BY id LIMIT ?`,
+      "SELECT r.id, r.card_number, r.plate4, r.obu_number, r.run_date, r.registration_date, s.received_at " +
+      "FROM etc_card_registrations r JOIN etc_card_scans s ON s.sha256 = r.scan_sha256 " +
+      `WHERE ${where} ORDER BY r.id LIMIT ?`,
     params,
   };
 }
@@ -190,7 +202,7 @@ type RowOutcome = Omit<CardRegisterResult, "id" | "cardNumber"> & { attempted?: 
 
 async function processRow(deps: CardRegisterRunDeps, row: RegistrationRow): Promise<RowOutcome> {
   const runDate = row.run_date as string;
-  if (!isRunDateUsable(runDate, deps.now)) return { kind: "expired", runDate };
+  if (!isRunDateUsable(runDate, deps.now, effectiveRegistrationDate(row.registration_date, row.received_at))) return { kind: "expired", runDate };
   const built = buildCardRegisterFields(
     { cardNumber: row.card_number, obuNumber: row.obu_number, plate4: row.plate4, runDate },
     deps.now,

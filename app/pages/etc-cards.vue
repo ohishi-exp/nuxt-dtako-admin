@@ -5,6 +5,7 @@
  *   - 要確認 (4 項目のどれかが読めなかった行) を手で直して保存 (揃えば「走行待ち」へ)
  *   - OCR に失敗した scan の「再 OCR」
  *   - 行ごとの「今すぐ登録」(relay へ転送。走行日の照合と etc-meisai.jp への登録は relay の担当)
+ *   - 行ごとの「登録日」(空なら受信日)。relay はこの日より前の走行を、そのカードの利用日にしない
  * カード番号は末尾 5 桁しか受け取らない (API が全桁を返さない)。
  * 下に複合機の資格情報 (purpose `etc-scan`) の発行・一覧を置く (部品 `MachineCredentials`、`/fuel/credentials` と共有)。
  */
@@ -20,6 +21,7 @@ import {
   etcCardErrorText,
   formatBytes,
   maskedCard,
+  receivedDate,
   type EtcCardStatus,
   type EtcCardView,
   type EtcCardsResponse,
@@ -47,6 +49,9 @@ function authHeaders(): Record<string, string> {
   return t ? { Authorization: `Bearer ${t}` } : {}
 }
 
+/** 行ごとの登録日の入力欄 (id → 入力中の文字列)。読み込みのたびに保存済みの値で作り直す */
+const regDraft = ref<Record<number, string>>({})
+
 async function load() {
   loading.value = true
   listError.value = null
@@ -54,6 +59,7 @@ async function load() {
     const res = await $fetch<EtcCardsResponse>('/api/etc-cards', { headers: authHeaders() })
     rows.value = res.registrations
     failedScans.value = res.failed_scans
+    regDraft.value = Object.fromEntries(res.registrations.map(r => [r.id, r.registration_date ?? '']))
   }
   catch (e) {
     rows.value = []
@@ -94,6 +100,34 @@ async function saveEdit() {
     // 400 の本文 (`data.error`) は入力の何が違うかの文
     const msg = (e as { data?: { data?: { error?: unknown } } })?.data?.data?.error
     editError.value = typeof msg === 'string' ? msg : etcCardErrorText(e, 'もう一度「保存」を押してください')
+  }
+  finally {
+    busy.value = null
+  }
+}
+
+// ---- 登録日 ----
+function regDateChanged(r: EtcCardView): boolean {
+  return (regDraft.value[r.id] ?? '').trim() !== (r.registration_date ?? '')
+}
+
+async function saveRegDate(r: EtcCardView) {
+  busy.value = `regdate-${r.id}`
+  try {
+    const after = await $fetch<EtcCardView>(`/api/etc-cards/${r.id}/registration-date`, {
+      method: 'PATCH',
+      body: { registration_date: (regDraft.value[r.id] ?? '').trim() || null },
+      headers: authHeaders(),
+    })
+    notes.value[`row-${r.id}`] = {
+      ok: true,
+      text: `登録日を ${after.registration_date ?? `空 (受信日 ${receivedDate(after.received_at)})`} にしました。走行日は探し直します (${STATUS_LABEL[after.status]})`,
+    }
+    await load()
+  }
+  catch (e) {
+    const msg = (e as { data?: { data?: { error?: unknown } } })?.data?.data?.error
+    notes.value[`row-${r.id}`] = { ok: false, text: `登録日を保存できませんでした: ${typeof msg === 'string' ? msg : etcCardErrorText(e, 'もう一度「保存」を押してください')}` }
   }
   finally {
     busy.value = null
@@ -158,6 +192,7 @@ onMounted(load)
 
     <p class="text-sm text-muted">
       複合機でスキャンした「ETC コーポレートカード発行明細書」から読んだカードです。カードで初めて走行した日が運行データに出たら、etc-meisai.jp へ登録します。
+      登録日 (空なら受信日) より前の走行は使いません。
       読めなかった項目がある行は「要確認」になります。直して保存すると「走行待ち」になります。
     </p>
 
@@ -216,6 +251,7 @@ onMounted(load)
         <thead>
           <tr>
             <th>状態</th><th>区分</th><th>カード番号</th><th>車両番号</th><th>下 4 桁</th><th>車載器番号</th>
+            <th>受信日</th><th>登録日</th>
             <th>走行日</th><th>運行 NO</th><th>試行</th><th>最後の誤り</th><th>受付</th><th />
           </tr>
         </thead>
@@ -228,6 +264,27 @@ onMounted(load)
               <td>{{ r.vehicle_number ?? '(未読)' }}</td>
               <td class="font-mono">{{ r.plate4 ?? '-' }}</td>
               <td class="font-mono">{{ r.obu_number ?? '(未読)' }}</td>
+              <td>{{ receivedDate(r.received_at) }}</td>
+              <td class="whitespace-nowrap" data-testid="registration-date">
+                <UInput
+                  v-model="regDraft[r.id]"
+                  size="xs"
+                  class="w-28 font-mono"
+                  :placeholder="receivedDate(r.received_at)"
+                  :disabled="r.status === 'registered' || busy !== null"
+                  autocomplete="off"
+                />
+                <UButton
+                  v-if="regDateChanged(r)"
+                  size="xs"
+                  variant="outline"
+                  label="保存"
+                  class="ml-1"
+                  :loading="busy === `regdate-${r.id}`"
+                  :disabled="busy !== null"
+                  @click="saveRegDate(r)"
+                />
+              </td>
               <td>{{ r.run_date ?? '-' }}</td>
               <td class="font-mono">{{ r.unko_no ?? '-' }}</td>
               <td>{{ r.attempts }}</td>
@@ -247,11 +304,11 @@ onMounted(load)
               </td>
             </tr>
             <tr v-if="notes[`row-${r.id}`]">
-              <td colspan="12" :class="notes[`row-${r.id}`]!.ok ? 'text-success' : 'text-error'">{{ notes[`row-${r.id}`]!.text }}</td>
+              <td colspan="14" :class="notes[`row-${r.id}`]!.ok ? 'text-success' : 'text-error'">{{ notes[`row-${r.id}`]!.text }}</td>
             </tr>
           </template>
           <tr v-if="shown.length === 0 && !listError && !loading">
-            <td colspan="12" class="text-center text-muted">{{ rows.length === 0 ? 'まだスキャンされたカードはありません' : 'この状態の行はありません' }}</td>
+            <td colspan="14" class="text-center text-muted">{{ rows.length === 0 ? 'まだスキャンされたカードはありません' : 'この状態の行はありません' }}</td>
           </tr>
         </tbody>
       </table>

@@ -6,8 +6,8 @@
  *
  * 1. **確認 = dtako の zip 登録時** (`DTAKO_CRON`)。alc へ上げた csvdata.zip の `KUDGSIR.csv`
  *    (料金所) を読み、`waiting_run` の行のナンバー下 4 桁 (`plate4`) に一致する車両
- *    (`車輌CD % 10000`) の ETC 走行の **終了日時の日付**のうち、範囲 (61 日前〜今日、かつ今年) で
- *    最も新しい日を `run_date` に書く
+ *    (`車輌CD % 10000`) の ETC 走行の **終了日時の日付**のうち、範囲 (61 日前〜今日、かつ今年、
+ *    かつカード行の登録日 (空なら明細書の受信日) 以降) で最も新しい日を `run_date` に書く
  * 2. **登録 = ETC cron の 21 時 (UTC) の tick**。`run_date` のある行について、もう一度範囲を
  *    確かめてから etc-meisai.jp の「カードの追加登録」へ カード番号・走行日・車載器管理番号・
  *    ナンバー下 4 桁を入れて確認画面まで進める (`live` のときだけ完了まで)
@@ -81,12 +81,31 @@ export interface RunSearchWindow {
   to: string;
 }
 
-/** 走行日を探す範囲。`今日 - 61 日` と `今年の 1/1` の遅い方〜今日 (JST)。 */
-export function runSearchWindow(now: Date): RunSearchWindow {
+/**
+ * カード行の**実効の登録日** (`YYYY-MM-DD`、JST)。画面で入れた `registration_date` があればそれ、
+ * 無ければ明細書を受けた時刻 (`etc_card_scans.received_at`、UTC の ISO8601) の JST の日付。
+ *
+ * **この日より前の走行は、そのカードの利用日にしない** — カードを受け取る前の走行は
+ * 古いカードで走った分なので、新しいカードの利用日として登録すると etc-meisai.jp の照合が
+ * 別のカードの記録に当たる (発行明細書に発行日は書かれていないので、受けた日で代える)。
+ *
+ * front (`app/utils/etc-cards.ts` の `effectiveRegistrationDate`) にも同じ関数がある
+ * (front は relay を import できない)。入出力は両方のテストで同じ値に固定している。
+ */
+export function effectiveRegistrationDate(registrationDate: string | null, receivedAt: string): string {
+  return registrationDate ?? jstDate(new Date(receivedAt));
+}
+
+/**
+ * 走行日を探す範囲。`今日 - 61 日`・`今年の 1/1`・**`registrationDate` (実効の登録日)** の
+ * いちばん遅い日〜今日 (JST)。登録日が今日より後なら `from > to` (= 何も拾わない)。
+ */
+export function runSearchWindow(now: Date, registrationDate: string): RunSearchWindow {
   const to = jstDate(now);
   const lookback = jstDate(new Date(now.getTime() - RUN_LOOKBACK_DAYS * DAY_MS));
   const yearStart = `${to.slice(0, 4)}-01-01`;
-  return { from: lookback > yearStart ? lookback : yearStart, to };
+  const from = [lookback, yearStart, registrationDate].reduce((a, b) => (b > a ? b : a));
+  return { from, to };
 }
 
 /** `YYYYMMDDHHMMSS` (JST)。R2 key の時刻部分。 */
@@ -225,10 +244,11 @@ export function findRunForPlate(rows: readonly TollRow[], plate4: string, window
   return best ? { kind: "found", ...best } : { kind: "none" };
 }
 
-/** 登録の直前の再確認: 走行日がまだ「61 日前〜今日、かつ今年」に入っているか。 */
-export function isRunDateUsable(runDate: string | null, now: Date): boolean {
+/** 登録の直前の再確認: 走行日がまだ {@link runSearchWindow} (61 日前・今年・登録日〜今日) に入っているか。
+ * 確認段と同じ窓を使う (確認の後に登録日を後ろへ直された行も、ここで外れる)。 */
+export function isRunDateUsable(runDate: string | null, now: Date, registrationDate: string): boolean {
   if (!runDate || !/^\d{4}-\d{2}-\d{2}$/.test(runDate)) return false;
-  const w = runSearchWindow(now);
+  const w = runSearchWindow(now, registrationDate);
   return runDate >= w.from && runDate <= w.to;
 }
 

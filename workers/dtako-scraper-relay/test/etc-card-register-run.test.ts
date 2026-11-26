@@ -54,7 +54,15 @@ const CSV = [
 ].join('\r\n')
 
 describe('confirmRunsFromTollCsv', () => {
-  const wrow = (id: number, plate4: string, run_date: string | null = null) => ({ id, card_number: CARD, plate4, run_date })
+  // 登録日は窓に効かない古い日 (受信日も同じ)。登録日の効き目は下の it で個別に見る
+  const wrow = (id: number, plate4: string, run_date: string | null = null) => ({
+    id,
+    card_number: CARD,
+    plate4,
+    run_date,
+    registration_date: null,
+    received_at: '2025-01-01T00:00:00.000Z',
+  })
 
   it('tenant の waiting_run の行ごとに: 書く / 古くない run_date は残す / 走行なし / 複数一致は failed', async () => {
     const { db, selects, updates } = fakeDb([
@@ -88,6 +96,23 @@ describe('confirmRunsFromTollCsv', () => {
     expect(updates[2].sql).toContain("status = 'failed'")
   })
 
+  it('行ごとの実効の登録日より前の走行は拾わない (登録日 / 空なら受信日の JST 日付)。走行待ちのまま', async () => {
+    const { db, updates } = fakeDb([
+      { ...wrow(1, '1234'), registration_date: '2026-11-21' }, // 11-20 の走行は登録日より前 → none
+      { ...wrow(2, '1234'), registration_date: '2026-11-20' }, // 当日は拾う
+      { ...wrow(3, '1234'), received_at: '2026-11-20T15:00:00.000Z' }, // JST 11-21 受信 → none
+      { ...wrow(4, '1234'), received_at: '2026-11-20T14:59:59.999Z' }, // JST 11-20 受信 → 拾う
+    ])
+    const report = await confirmRunsFromTollCsv({ db, now: NOW }, 'tenant-a', CSV)
+    expect(report.results.map((r) => [r.id, r.kind, r.runDate ?? null])).toEqual([
+      [1, 'none', null],
+      [2, 'found', '2026-11-20'],
+      [3, 'none', null],
+      [4, 'found', '2026-11-20'],
+    ])
+    expect(updates.map((u) => u.params[3])).toEqual([2, 4])
+  })
+
   it('対象の行が無ければ何も書かない (results が無い D1 応答も)', async () => {
     const { db, updates } = fakeDb(undefined)
     expect(await confirmRunsFromTollCsv({ db, now: NOW }, 't', CSV)).toEqual({ results: [], nonEtcRows: 1 })
@@ -111,6 +136,8 @@ interface Row {
   plate4: string | null
   obu_number: string | null
   run_date: string | null
+  registration_date: string | null
+  received_at: string
 }
 
 const row = (over: Partial<Row> = {}): Row => ({
@@ -119,6 +146,8 @@ const row = (over: Partial<Row> = {}): Row => ({
   plate4: '1234',
   obu_number: OBU,
   run_date: '2026-11-21',
+  registration_date: null,
+  received_at: '2026-11-01T00:00:00.000Z',
   ...over,
 })
 
@@ -148,10 +177,10 @@ describe('targetStatuses / selectRegistrationsQuery', () => {
 
   it('cron は run_date のある行だけ、手動は id で引く (run_date は呼び手が見る)', () => {
     const cron = selectRegistrationsQuery({ kind: 'cron' }, 'dry_run')
-    expect(cron.sql).toContain('status IN (?) AND run_date IS NOT NULL')
+    expect(cron.sql).toContain('r.status IN (?) AND r.run_date IS NOT NULL')
     expect(cron.params).toEqual(['waiting_run', CARD_REGISTER_BATCH_LIMIT])
     const one = selectRegistrationsQuery({ kind: 'one', id: 9 }, 'live')
-    expect(one.sql).toContain('status IN (?, ?, ?) AND id = ?')
+    expect(one.sql).toContain('r.status IN (?, ?, ?) AND r.id = ?')
     expect(one.sql).not.toContain('run_date IS NOT NULL')
     expect(one.params).toEqual(['waiting_run', 'dry_run_ok', 'failed', 9, CARD_REGISTER_BATCH_LIMIT])
   })
@@ -216,6 +245,22 @@ describe('runCardRegistrations', () => {
     expect(updates[0].sql).not.toContain('status')
   })
 
+  it('登録の直前の再確認も実効の登録日を下限にする: 登録日 / 受信日より前の run_date は expired (送らない)', async () => {
+    for (const over of [
+      { registration_date: '2026-11-22' },
+      { received_at: '2026-11-21T15:00:00.000Z' }, // JST 11-22 受信
+    ]) {
+      const { d, updates } = deps({ rows: [row(over)] })
+      const report = await runCardRegistrations(d, { kind: 'cron' })
+      expect(report.results[0]).toMatchObject({ kind: 'expired', runDate: '2026-11-21' })
+      expect(d.register).not.toHaveBeenCalled()
+      expect(updates[0].sql).toContain('run_date = NULL, unko_no = NULL')
+    }
+    // 登録日の当日の run_date は通る
+    const ok = deps({ rows: [row({ registration_date: '2026-11-21' })] })
+    expect((await runCardRegistrations(ok.d, { kind: 'cron' })).results[0].kind).toBe('dry_run_ok')
+  })
+
   it('フォームの値が組めない (車載器番号の桁違い等) → failed、送らない', async () => {
     const { d, updates } = deps({ rows: [row({ obu_number: '123' })] })
     const report = await runCardRegistrations(d, { kind: 'cron' })
@@ -238,5 +283,73 @@ describe('runCardRegistrations', () => {
     const { d } = deps()
     const { db } = fakeDb(undefined)
     expect(await runCardRegistrations({ ...d, db }, { kind: 'cron' })).toEqual({ notFound: false, conflict: false, results: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2 本の SELECT を実物の SQLite (migrations 0021 + 0022) で流す
+// ---------------------------------------------------------------------------
+
+/**
+ * 上の fake D1 は SQL を文字列でしか見ないので、列名の誤り (0022 の `registration_date` / scan の
+ * `received_at` の JOIN) はここで実物に当てて確かめる。
+ */
+describe('SELECT は migrations 0021 + 0022 の表で通り、登録日の材料を返す', () => {
+  async function openDb(): Promise<{ db: CardRegisterDb; exec: (sql: string, ...p: unknown[]) => void }> {
+    interface Stmt {
+      all(...p: unknown[]): unknown[]
+      run(...p: unknown[]): unknown
+    }
+    const { DatabaseSync } = (await import(/* @vite-ignore */ 'node' + ':sqlite')) as {
+      DatabaseSync: new (p: string) => { exec(sql: string): void; prepare(sql: string): Stmt }
+    }
+    const fs = (await import(/* @vite-ignore */ 'node' + ':fs')) as { readFileSync: (p: string, enc: string) => string }
+    const raw = new DatabaseSync(':memory:')
+    for (const name of ['0021_create_etc_card_registrations.sql', '0022_etc_card_registration_date.sql']) {
+      raw.exec(fs.readFileSync(`../../migrations/${name}`, 'utf8'))
+    }
+    const db: CardRegisterDb = {
+      prepare: (sql) => ({
+        bind: (...p) => ({
+          all: async <T>() => ({ results: raw.prepare(sql).all(...p).map((r) => ({ ...(r as object) })) as T[] }),
+          run: async () => raw.prepare(sql).run(...p),
+        }),
+      }),
+    }
+    return { db, exec: (sql, ...p) => void raw.prepare(sql).run(...p) }
+  }
+
+  it('確認段・登録段とも registration_date (既存行は NULL) と scan の received_at を読む', async () => {
+    const { db, exec } = await openDb()
+    exec(
+      "INSERT INTO etc_card_scans (sha256, pdf, bytes, tenant_id, received_at, ocr_status) VALUES ('s1', x'00', 1, 'tenant-a', '2026-11-20T15:00:00.000Z', 'ok')",
+    )
+    const ins =
+      'INSERT INTO etc_card_registrations (scan_sha256, kubun, card_number, plate4, obu_number, status, run_date, created_at, updated_at) ' +
+      "VALUES ('s1', '新規', ?, '1234', ?, 'waiting_run', ?, 't', 't')"
+    exec(ins, CARD, OBU, null)
+    exec(ins, '0000111122224444', OBU, '2026-11-21')
+    exec("UPDATE etc_card_registrations SET registration_date = '2026-11-22' WHERE id = 2")
+
+    const waiting = (await db.prepare(SELECT_WAITING_FOR_TENANT_SQL).bind('tenant-a').all<Record<string, unknown>>()).results
+    expect(waiting?.map((r) => [r.id, r.registration_date, r.received_at])).toEqual([
+      [1, null, '2026-11-20T15:00:00.000Z'],
+      [2, '2026-11-22', '2026-11-20T15:00:00.000Z'],
+    ])
+
+    const q = selectRegistrationsQuery({ kind: 'cron' }, 'dry_run')
+    const regs = (await db.prepare(q.sql).bind(...q.params).all<Record<string, unknown>>()).results
+    expect(regs?.map((r) => [r.id, r.run_date, r.registration_date, r.received_at])).toEqual([
+      [2, '2026-11-21', '2026-11-22', '2026-11-20T15:00:00.000Z'],
+    ])
+
+    // 通しで: 行 2 は run_date (11-21) が登録日 (11-22) より前なので expired → run_date を消す
+    const report = await runCardRegistrations(
+      { db, now: NOW, mode: 'dry_run', r2Prefix: 'etc', register: vi.fn(), putHtml: vi.fn() },
+      { kind: 'cron' },
+    )
+    expect(report.results.map((r) => [r.id, r.kind])).toEqual([[2, 'expired']])
+    const after = (await db.prepare('SELECT run_date, unko_no FROM etc_card_registrations WHERE id = 2').bind().all<Record<string, unknown>>()).results
+    expect(after).toEqual([{ run_date: null, unko_no: null }])
   })
 })

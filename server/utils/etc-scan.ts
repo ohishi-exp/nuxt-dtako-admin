@@ -20,6 +20,7 @@ import {
   isEmptyFields,
   normalizeFields,
   plate4Of,
+  statusAfterRegistrationDateChange,
   type EtcCardFields,
   type EtcCardStatus,
   type EtcCardView,
@@ -155,6 +156,9 @@ export interface RegistrationRow extends EtcCardFields {
   status: EtcCardStatus
   run_date: string | null
   unko_no: string | null
+  registration_date: string | null
+  /** JOIN した scan の `received_at` */
+  received_at: string
   attempts: number
   last_error: string | null
   created_at: string
@@ -174,6 +178,8 @@ export function toView(r: RegistrationRow): EtcCardView {
     status: r.status,
     run_date: r.run_date,
     unko_no: r.unko_no,
+    registration_date: r.registration_date,
+    received_at: r.received_at,
     attempts: r.attempts,
     last_error: r.last_error,
     created_at: r.created_at,
@@ -182,7 +188,7 @@ export function toView(r: RegistrationRow): EtcCardView {
 }
 
 const REG_COLUMNS = `r.id, r.scan_sha256, r.kubun, r.card_number, r.vehicle_number, r.plate4, r.obu_number, r.status,
-  r.run_date, r.unko_no, r.attempts, r.last_error, r.created_at, r.updated_at`
+  r.run_date, r.unko_no, r.registration_date, s.received_at, r.attempts, r.last_error, r.created_at, r.updated_at`
 
 /** テナントのカード行 (新しい順) と OCR に失敗した scan */
 export async function listForTenant(db: D1DatabaseLite, tenantId: string): Promise<{ registrations: EtcCardView[], failed_scans: EtcScanView[] }> {
@@ -217,6 +223,19 @@ export async function updateRegistrationFields(db: D1DatabaseLite, id: number, f
       SET kubun = ?, card_number = ?, vehicle_number = ?, plate4 = ?, obu_number = ?, status = ?, updated_at = ?
       WHERE id = ?`)
     .bind(f.kubun, f.card_number, f.vehicle_number, plate4Of(f.vehicle_number), f.obu_number, initialStatus(f), now, id)
+    .run()
+}
+
+/**
+ * 登録日の保存。走行日の下限が変わるので、確認済みの `run_date` / `unko_no` は消して探し直させ、
+ * status は {@link statusAfterRegistrationDateChange} で戻す (古い走行日で登録されないように)。
+ */
+export async function updateRegistrationDate(db: D1DatabaseLite, id: number, date: string | null, status: EtcCardStatus, now: string): Promise<void> {
+  await db
+    .prepare(`UPDATE etc_card_registrations
+      SET registration_date = ?, run_date = NULL, unko_no = NULL, status = ?, updated_at = ?
+      WHERE id = ?`)
+    .bind(date, statusAfterRegistrationDateChange(status), now, id)
     .run()
 }
 

@@ -33,6 +33,7 @@ vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 import davHandler from '../../server/routes/dav/[...path]'
 import listHandler from '../../server/api/etc-cards/index.get'
 import patchHandler from '../../server/api/etc-cards/[id].patch'
+import regDateHandler from '../../server/api/etc-cards/[id]/registration-date.patch'
 import registerHandler from '../../server/api/etc-cards/[id]/register.post'
 import ocrHandler from '../../server/api/etc-cards/scans/[sha256]/ocr.post'
 import { insertScan, runOcr } from '../../server/utils/etc-scan'
@@ -181,6 +182,37 @@ describe('/api/etc-cards', () => {
   it('PATCH: 既にあるカード番号にすると 409', async () => {
     const dup = await rejection(call(patchHandler, event({ method: 'PATCH', params: { id: '2' }, body: { card_number: ROW_OK.card_number } })))
     expect(dup.statusCode).toBe(409)
+  })
+
+  it('登録日: 入れると run_date / unko_no を消し、dry_run_ok / failed は waiting_run に戻す。受信日も返す', async () => {
+    for (const status of ['dry_run_ok', 'failed', 'waiting_run']) {
+      db.exec("UPDATE etc_card_registrations SET status = ?, run_date = '2026-11-01', unko_no = 'U1' WHERE id = 1", status)
+      const res = await call(regDateHandler, event({ method: 'PATCH', params: { id: '1' }, body: { registration_date: '2026-11-10' } }))
+      expect(res).toMatchObject({ id: 1, registration_date: '2026-11-10', received_at: 'r', run_date: null, unko_no: null, status: 'waiting_run' })
+      db.exec('UPDATE etc_card_registrations SET registration_date = NULL WHERE id = 1')
+    }
+    // 要確認の行にも入れられる (status は要確認のまま)。null / 空文字で消せる
+    expect(await call(regDateHandler, event({ method: 'PATCH', params: { id: '2' }, body: { registration_date: '2026-11-10' } }))).toMatchObject({ status: 'needs_review', registration_date: '2026-11-10' })
+    expect(await call(regDateHandler, event({ method: 'PATCH', params: { id: '2' }, body: { registration_date: '' } }))).toMatchObject({ registration_date: null })
+  })
+
+  it('登録日: 同じ値なら何も書かない (run_date は残る)', async () => {
+    db.exec("UPDATE etc_card_registrations SET status = 'dry_run_ok', registration_date = '2026-11-10', run_date = '2026-11-12', unko_no = 'U1' WHERE id = 1")
+    const res = await call(regDateHandler, event({ method: 'PATCH', params: { id: '1' }, body: { registration_date: '2026-11-10' } }))
+    expect(res).toMatchObject({ status: 'dry_run_ok', run_date: '2026-11-12', unko_no: 'U1' })
+  })
+
+  it('登録日: 登録済みは 409、日付の誤りは 400 で理由を data に、他テナント・無い行は 404、id の誤りは 400', async () => {
+    db.exec("UPDATE etc_card_registrations SET status = 'registered' WHERE id = 1")
+    expect((await rejection(call(regDateHandler, event({ method: 'PATCH', params: { id: '1' }, body: { registration_date: null } })))).statusCode).toBe(409)
+    const bad = await rejection(call(regDateHandler, event({ method: 'PATCH', params: { id: '2' }, body: { registration_date: '2026-02-30' } })))
+    expect(bad.statusCode).toBe(400)
+    expect(bad.data).toEqual({ error: '登録日は YYYY-MM-DD の日付です' })
+    expect((await rejection(call(regDateHandler, event({ method: 'PATCH', params: { id: '2' }, body: undefined })))).statusCode).toBe(400)
+    expect((await rejection(call(regDateHandler, event({ method: 'PATCH', params: { id: '99' }, body: { registration_date: null } })))).statusCode).toBe(404)
+    expect((await rejection(call(regDateHandler, event({ method: 'PATCH', params: { id: 'x' }, body: {} })))).statusCode).toBe(400)
+    requireAuthMock.mockResolvedValue({ role: 'admin', tenant_id: 't2' })
+    expect((await rejection(call(regDateHandler, event({ method: 'PATCH', params: { id: '2' }, body: { registration_date: null } })))).statusCode).toBe(404)
   })
 
   it('register: relay の POST /etc-card/register へ {id} を共有秘密付きで送り、応答をそのまま返す', async () => {
