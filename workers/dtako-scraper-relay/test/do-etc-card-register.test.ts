@@ -299,7 +299,7 @@ describe("confirmEtcRunsFromZip (確認段の配線)", () => {
   it("zip の KUDGSIR.csv から tenant の行の run_date を書く", async () => {
     vi.useFakeTimers({ now: new Date("2026-11-26T00:00:00Z"), toFake: ["Date"] });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null }]);
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
     const { d } = makeDo({ DTAKO_DB: db });
     await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE);
     vi.useRealTimers();
@@ -320,7 +320,7 @@ describe("confirmEtcRunsFromZip (確認段の配線)", () => {
   it("ETC_CARD_REGISTER_MODE=off (staging / preview) は D1 を読まずに skip (ログだけ、メールしない)", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const sent: unknown[] = [];
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null }]);
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
     const { d } = makeDo({
       DTAKO_DB: db,
       ETC_CARD_REGISTER_MODE: "off",
@@ -354,7 +354,7 @@ describe("confirmEtcRunsFromZip (確認段の配線)", () => {
     expect(err.mock.calls.flat().join("\n")).toContain("EOCD");
 
     const multi = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\nU1,10001234,2026/11/20 01:00:00,1\nU2,20001234,2026/11/20 01:00:00,1\n");
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null }]);
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
     await makeDo({ DTAKO_DB: db, ...mailEnv }).d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", multi), RANGE);
     expect(calls[1]!.sql).toContain("status = 'failed'");
     expect(sent).toHaveLength(2); // 壊れた zip・複数一致で 1 通ずつ
@@ -385,7 +385,7 @@ describe("runEtcCardRegister の配線 (登録段)", () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     const puts: { key: string; body: unknown }[] = [];
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", obu_number: OBU, run_date: "2026-11-20" }]);
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", obu_number: OBU, run_date: "2026-11-20", registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
     const { d } = makeDo({
       DTAKO_DB: db,
       DTAKO_R2: { put: async (key: string, body: unknown) => void puts.push({ key, body }) },

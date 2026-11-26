@@ -4,6 +4,7 @@ import {
   canRegister,
   cardLast5,
   countByStatus,
+  effectiveRegistrationDate,
   etcCardErrorText,
   formatBytes,
   halfwidth,
@@ -13,7 +14,10 @@ import {
   normalizeDigits,
   normalizeFields,
   normalizeKubun,
+  parseRegistrationDateInput,
   plate4Of,
+  receivedDate,
+  statusAfterRegistrationDateChange,
   type EtcCardFields,
 } from '~/utils/etc-cards'
 
@@ -154,5 +158,46 @@ describe('etcCardErrorText', () => {
   })
   it('それ以外は共通の文 (retry を含む)', () => {
     expect(etcCardErrorText(err(500), 'もう一度押してください')).toContain('もう一度押してください')
+  })
+})
+
+/**
+ * 実効の登録日の入出力。**relay の `workers/dtako-scraper-relay/test/etc-card-register.test.ts` にも同じ表がある**
+ * — 両方の `effectiveRegistrationDate` が同じ値を返すことをこの表で固定する (片方だけ直したら落ちる)。
+ */
+const EFFECTIVE_REG_CASES: [string | null, string, string][] = [
+  ['2026-11-01', '2026-11-20T03:00:00.000Z', '2026-11-01'], // 入れた登録日が勝つ
+  [null, '2026-11-20T03:00:00.000Z', '2026-11-20'], // 空なら受信日 (JST)
+  [null, '2026-11-20T14:59:59.999Z', '2026-11-20'], // JST 23:59
+  [null, '2026-11-20T15:00:00.000Z', '2026-11-21'], // UTC 15:00 以降は JST の翌日
+]
+
+describe('登録日', () => {
+  it('effectiveRegistrationDate: 入れた登録日、空なら受信日の JST の日付 (relay と同じ表)', () => {
+    for (const [reg, received, want] of EFFECTIVE_REG_CASES) {
+      expect(effectiveRegistrationDate(reg, received)).toBe(want)
+    }
+    expect(receivedDate('2026-11-20T15:00:00.000Z')).toBe('2026-11-21')
+  })
+
+  it('parseRegistrationDateInput: 実在する YYYY-MM-DD と null / 空文字だけ通す', () => {
+    expect(parseRegistrationDateInput({ registration_date: '2026-11-10' })).toEqual({ ok: true, value: '2026-11-10' })
+    expect(parseRegistrationDateInput({ registration_date: '2028-02-29' })).toEqual({ ok: true, value: '2028-02-29' })
+    expect(parseRegistrationDateInput({ registration_date: null })).toEqual({ ok: true, value: null })
+    expect(parseRegistrationDateInput({ registration_date: '' })).toEqual({ ok: true, value: null })
+    const bad = { ok: false, error: '登録日は YYYY-MM-DD の日付です' }
+    for (const v of ['2026-02-30', '2026-13-01', '2026/11/10', '2026-11-1', 20261110, true]) {
+      expect(parseRegistrationDateInput({ registration_date: v })).toEqual(bad)
+    }
+    for (const input of [null, 'x', {}, { other: 1 }]) {
+      expect(parseRegistrationDateInput(input)).toEqual({ ok: false, error: '入力の形が違います' })
+    }
+  })
+
+  it('statusAfterRegistrationDateChange: dry_run_ok / failed は waiting_run に戻し、他はそのまま', () => {
+    expect(statusAfterRegistrationDateChange('dry_run_ok')).toBe('waiting_run')
+    expect(statusAfterRegistrationDateChange('failed')).toBe('waiting_run')
+    expect(statusAfterRegistrationDateChange('waiting_run')).toBe('waiting_run')
+    expect(statusAfterRegistrationDateChange('needs_review')).toBe('needs_review')
   })
 })

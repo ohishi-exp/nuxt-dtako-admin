@@ -10,6 +10,7 @@
  * OCR 側で正規化済みでも、ここで同じ規則をもう一度かける (手入力と同じ関門を通すため)。
  */
 import { caughtErrorStatus, describeCaughtError } from '~/utils/api-error'
+import { formatIssuedDate } from '~/utils/machine-credentials'
 
 export const KUBUN = ['新規', '追加', '再発行'] as const
 export type Kubun = (typeof KUBUN)[number]
@@ -164,6 +165,10 @@ export interface EtcCardView {
   status: EtcCardStatus
   run_date: string | null
   unko_no: string | null
+  /** 画面で入れた登録日 (`YYYY-MM-DD`、JST) or null。null なら {@link received_at} の日付で代える */
+  registration_date: string | null
+  /** 明細書 (scan) を受けた時刻 (`etc_card_scans.received_at`、UTC の ISO8601) */
+  received_at: string
   attempts: number
   last_error: string | null
   created_at: string
@@ -207,6 +212,52 @@ export function countByStatus(rows: readonly { status: string }[]): Record<EtcCa
     if ((STATUSES as readonly string[]).includes(r.status)) out[r.status as EtcCardStatus] += 1
   }
   return out
+}
+
+/** ISO8601 (UTC) の時刻の JST の日付 `YYYY-MM-DD` (画面の「受信日」)。 */
+export function receivedDate(receivedAt: string): string {
+  return formatIssuedDate(receivedAt)
+}
+
+/**
+ * カード行の**実効の登録日**: 入れた `registration_date`、空なら受信日 (JST)。relay はこの日より前の
+ * 走行を、そのカードの利用日にしない (カードを受け取る前の走行は古いカードで走った分のため)。
+ *
+ * relay (`workers/dtako-scraper-relay/src/etc-card-register.ts`) の同名関数と同じ規則
+ * (front は relay を import できない)。入出力は両方のテストで同じ表に固定している。
+ */
+export function effectiveRegistrationDate(registrationDate: string | null, receivedAt: string): string {
+  return registrationDate ?? receivedDate(receivedAt)
+}
+
+export type RegistrationDateInput =
+  | { ok: true, value: string | null }
+  | { ok: false, error: string }
+
+/**
+ * `PATCH /api/etc-cards/[id]/registration-date` の本文 `{registration_date}` を読む。
+ * `YYYY-MM-DD` の実在する日付か、`null` / 空文字 (= 受信日に戻す) だけ通す。
+ */
+export function parseRegistrationDateInput(input: unknown): RegistrationDateInput {
+  if (!input || typeof input !== 'object' || !('registration_date' in input)) {
+    return { ok: false, error: '入力の形が違います' }
+  }
+  const v = (input as Record<string, unknown>).registration_date
+  if (v === null || v === '') return { ok: true, value: null }
+  // 月 13 は Date が NaN、2/30 は 3/2 に繰り上がるので、読み戻して同じ文字列かで実在を確かめる
+  const t = typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? Date.parse(`${v}T00:00:00Z`) : Number.NaN
+  if (Number.isNaN(t) || new Date(t).toISOString().slice(0, 10) !== v) {
+    return { ok: false, error: '登録日は YYYY-MM-DD の日付です' }
+  }
+  return { ok: true, value: v as string }
+}
+
+/**
+ * 登録日を変えたあとの status。`dry_run_ok` / `failed` は `waiting_run` に戻す (古い走行日で
+ * 確認・登録したものを、新しい下限で探し直すため)。他はそのまま。`registered` は呼び手が 409 にする。
+ */
+export function statusAfterRegistrationDateChange(status: EtcCardStatus): EtcCardStatus {
+  return status === 'dry_run_ok' || status === 'failed' ? 'waiting_run' : status
 }
 
 /** 「今すぐ登録」を出す行か (要確認と登録済みには出さない) */

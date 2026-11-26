@@ -1,5 +1,5 @@
 /**
- * ETC カード (Refs #1287) のテスト用 D1。**実物の SQLite (`node:sqlite`) に migration 0021 を当てたもの**に、
+ * ETC カード (Refs #1287) のテスト用 D1。**実物の SQLite (`node:sqlite`) に migration 0021・0022 を当てたもの**に、
  * `server/utils/etc-scan.ts` が使う D1 の面 (`prepare().bind().first/all/run`、run の `meta.changes`) だけ被せる。
  * 部分 UNIQUE index と `INSERT OR IGNORE` の効き方は実物で走らせないと分からないため、文字列照合の fake にしない
  * (`workers/dtako-scraper-relay/test/helpers/litigation-d1.ts` と同じ考え方)。
@@ -64,7 +64,9 @@ export class EtcScanD1 {
 export async function openEtcScanD1(): Promise<EtcScanD1> {
   const { DatabaseSync } = await import(/* @vite-ignore */ 'node' + ':sqlite') as { DatabaseSync: new (p: string) => SqliteDatabase }
   const db = new DatabaseSync(':memory:')
-  db.exec(readFileSync(resolve(import.meta.dirname!, '../../migrations/0021_create_etc_card_registrations.sql'), 'utf8'))
+  for (const name of ['0021_create_etc_card_registrations.sql', '0022_etc_card_registration_date.sql']) {
+    db.exec(readFileSync(resolve(import.meta.dirname!, `../../migrations/${name}`), 'utf8'))
+  }
   return new EtcScanD1(db)
 }
 

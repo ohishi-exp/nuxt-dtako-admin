@@ -9,6 +9,7 @@ import {
   countNonEtcRows,
   dateOfDateTime,
   decodeCsvBytes,
+  effectiveRegistrationDate,
   extractPageError,
   findRunForPlate,
   isCardInputPage,
@@ -36,6 +37,19 @@ const OBU = '9999988888888777777'
 
 // 2026-11-26 09:00 JST
 const NOW = new Date('2026-11-26T00:00:00Z')
+/** 窓に効かない (61 日前・今年 1/1 より古い) 登録日。登録日以外の下限を見るテストで使う。 */
+const OLD_REG = '2025-01-01'
+
+/**
+ * 実効の登録日の入出力。**front の `tests/utils/etc-cards.test.ts` にも同じ表がある** — 両方の
+ * `effectiveRegistrationDate` が同じ値を返すことをこの表で固定する (片方だけ直したら落ちる)。
+ */
+const EFFECTIVE_REG_CASES: [string | null, string, string][] = [
+  ['2026-11-01', '2026-11-20T03:00:00.000Z', '2026-11-01'], // 入れた登録日が勝つ
+  [null, '2026-11-20T03:00:00.000Z', '2026-11-20'], // 空なら受信日 (JST)
+  [null, '2026-11-20T14:59:59.999Z', '2026-11-20'], // JST 23:59
+  [null, '2026-11-20T15:00:00.000Z', '2026-11-21'], // UTC 15:00 以降は JST の翌日
+]
 
 describe('resolveCardRegisterMode / isCardRegisterTick', () => {
   it('"live" と完全一致のときだけ live、他は dry-run', () => {
@@ -60,11 +74,25 @@ describe('日付 (JST)', () => {
   })
 
   it('範囲は 61 日前〜今日', () => {
-    expect(runSearchWindow(NOW)).toEqual({ from: '2026-09-26', to: '2026-11-26' })
+    expect(runSearchWindow(NOW, OLD_REG)).toEqual({ from: '2026-09-26', to: '2026-11-26' })
   })
 
   it('年初は今年の 1/1 で切る (利用年は今年しか選べない)', () => {
-    expect(runSearchWindow(new Date('2026-02-10T00:00:00Z'))).toEqual({ from: '2026-01-01', to: '2026-02-10' })
+    expect(runSearchWindow(new Date('2026-02-10T00:00:00Z'), OLD_REG)).toEqual({ from: '2026-01-01', to: '2026-02-10' })
+  })
+
+  it('登録日が 61 日前・今年 1/1 より後なら登録日が下限。前なら効かない', () => {
+    expect(runSearchWindow(NOW, '2026-11-10')).toEqual({ from: '2026-11-10', to: '2026-11-26' })
+    expect(runSearchWindow(NOW, '2026-09-01')).toEqual({ from: '2026-09-26', to: '2026-11-26' }) // 61 日前が勝つ
+    expect(runSearchWindow(new Date('2026-02-10T00:00:00Z'), '2025-12-20')).toEqual({ from: '2026-01-01', to: '2026-02-10' })
+    // 今日より後の登録日 → from > to (何も拾わない)
+    expect(runSearchWindow(NOW, '2026-11-27')).toEqual({ from: '2026-11-27', to: '2026-11-26' })
+  })
+
+  it('effectiveRegistrationDate: 入れた登録日、空なら受信日の JST の日付 (UTC 15:00 の境界を含む)', () => {
+    for (const [reg, received, want] of EFFECTIVE_REG_CASES) {
+      expect(effectiveRegistrationDate(reg, received)).toBe(want)
+    }
   })
 
   it('dateOfDateTime は / と - の両方を読み、読めなければ null', () => {
@@ -122,6 +150,7 @@ describe('splitCsvLine / parseTollCsv', () => {
 })
 
 describe('findRunForPlate / countNonEtcRows / isRunDateUsable', () => {
+  // ★ W は runSearchWindow(NOW, OLD_REG) と同じ。登録日の効き目は下の it で窓を作り直して見る
   const W = { from: '2026-09-26', to: '2026-11-26' }
   const r = (unkoNo: string, vehicleCd: string, endDate: string | null, etc = '1') => ({ unkoNo, vehicleCd, endDate, etc })
 
@@ -153,13 +182,38 @@ describe('findRunForPlate / countNonEtcRows / isRunDateUsable', () => {
     })
   })
 
+  it('登録日より前の走行だけ → none / 登録日以降に走行あり → その日 (登録日の当日を含む)', () => {
+    const rows = [r('U1', '10001234', '2026-11-08'), r('U2', '10001234', '2026-11-09')]
+    expect(findRunForPlate(rows, '1234', runSearchWindow(NOW, '2026-11-10'))).toEqual({ kind: 'none' })
+    expect(findRunForPlate([...rows, r('U3', '10001234', '2026-11-12')], '1234', runSearchWindow(NOW, '2026-11-10'))).toEqual({
+      kind: 'found',
+      runDate: '2026-11-12',
+      unkoNo: 'U3',
+    })
+    expect(findRunForPlate(rows, '1234', runSearchWindow(NOW, '2026-11-09'))).toMatchObject({ runDate: '2026-11-09' })
+  })
+
+  it('登録日が空 → 受信日の JST の日付が下限 (UTC 15:00 の受信は翌日扱い)', () => {
+    const rows = [r('U1', '10001234', '2026-11-20')]
+    const at = (received: string) => runSearchWindow(NOW, effectiveRegistrationDate(null, received))
+    expect(findRunForPlate(rows, '1234', at('2026-11-20T14:59:59.999Z'))).toMatchObject({ runDate: '2026-11-20' })
+    expect(findRunForPlate(rows, '1234', at('2026-11-20T15:00:00.000Z'))).toEqual({ kind: 'none' })
+  })
+
   it('isRunDateUsable: 範囲内 (今年) だけ true', () => {
-    expect(isRunDateUsable('2026-11-20', NOW)).toBe(true)
-    expect(isRunDateUsable('2026-09-25', NOW)).toBe(false)
-    expect(isRunDateUsable('2026-11-27', NOW)).toBe(false)
-    expect(isRunDateUsable(null, NOW)).toBe(false)
-    expect(isRunDateUsable('2026/11/20', NOW)).toBe(false)
-    expect(isRunDateUsable('2025-12-31', new Date('2026-01-05T00:00:00Z'))).toBe(false)
+    expect(isRunDateUsable('2026-11-20', NOW, OLD_REG)).toBe(true)
+    expect(isRunDateUsable('2026-09-25', NOW, OLD_REG)).toBe(false)
+    expect(isRunDateUsable('2026-11-27', NOW, OLD_REG)).toBe(false)
+    expect(isRunDateUsable(null, NOW, OLD_REG)).toBe(false)
+    expect(isRunDateUsable('2026/11/20', NOW, OLD_REG)).toBe(false)
+    expect(isRunDateUsable('2025-12-31', new Date('2026-01-05T00:00:00Z'), OLD_REG)).toBe(false)
+  })
+
+  it('isRunDateUsable: 確認段と同じ窓 — 登録日より前の走行日は false、61 日前より古い登録日なら 61 日前が下限', () => {
+    expect(isRunDateUsable('2026-11-09', NOW, '2026-11-10')).toBe(false)
+    expect(isRunDateUsable('2026-11-10', NOW, '2026-11-10')).toBe(true)
+    expect(isRunDateUsable('2026-09-25', NOW, '2026-09-01')).toBe(false)
+    expect(isRunDateUsable('2026-09-26', NOW, '2026-09-01')).toBe(true)
   })
 })
 
