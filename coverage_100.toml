@@ -1396,7 +1396,7 @@ branches = true
 path = "app/utils/daily-report-fuel-pick.ts"
 branches = true
 
-# 給油データ USB アップローダーの資格情報 (purpose fuel-utran) の純粋ロジック (Refs yhonda-ohishi/nginx#814)。
+# 機械用の資格情報 (purpose fuel-utran / etc-scan) の純粋ロジックと複合機の設定例 (Refs yhonda-ohishi/nginx#814, #1287)。部品 MachineCredentials.vue は UI なので載せない。
 [[files]]
 path = "app/utils/machine-credentials.ts"
 branches = true

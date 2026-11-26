@@ -3,12 +3,12 @@ import { caughtErrorStatus } from '~/utils/api-error'
 import { PURPOSE, createMachineCredentialApi, type Fetcher, type MachineCredentialApi, type Purpose } from '~/utils/machine-credentials'
 
 /**
- * 給油データ USB アップローダー用の資格情報 (purpose `fuel-utran`) の管理 API
+ * 機械用の資格情報 (purpose `fuel-utran` / `etc-scan`) の管理 API
  * (Refs yhonda-ohishi/nginx#814)。auth-worker を**直接** (cross-origin で) 叩く —
  * `/api/proxy` は alc 向けで auth-worker の管理 API を通らない。
  * Bearer は dtako の browser JWT。401 (ログイン切れ) は認証状態を捨てて /login へ戻す
  * (`app/app.vue` の onUnauthorized と同じ扱い)。
- * `purpose` は呼ぶたびに読む (画面の用途の選択に追従する、Refs #1287)。省略時は `fuel-utran`。
+ * `purpose` は呼ぶたびに読む (部品 `MachineCredentials` の props、Refs #1287)。省略時は `fuel-utran`。
  */
 export function useMachineCredentialApi(purpose: () => Purpose = () => PURPOSE): MachineCredentialApi {
   const { token, clearAuth } = useAuth()

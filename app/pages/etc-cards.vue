@@ -6,6 +6,7 @@
  *   - OCR に失敗した scan の「再 OCR」
  *   - 行ごとの「今すぐ登録」(relay へ転送。走行日の照合と etc-meisai.jp への登録は relay の担当)
  * カード番号は末尾 5 桁しか受け取らない (API が全桁を返さない)。
+ * 下に複合機の資格情報 (purpose `etc-scan`) の発行・一覧を置く (部品 `MachineCredentials`、`/fuel/credentials` と共有)。
  */
 import { currentAccessToken } from '~/utils/api'
 import {
@@ -151,7 +152,7 @@ onMounted(load)
   <div class="space-y-4">
     <div class="flex flex-wrap items-center gap-3">
       <h2 class="text-xl font-bold mr-auto">ETC カード登録</h2>
-      <UButton to="/fuel/credentials" icon="i-lucide-key-round" variant="outline" label="複合機の資格情報" />
+      <UButton to="#machine-credentials" icon="i-lucide-key-round" variant="outline" label="複合機の資格情報" />
       <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="loading" @click="load" />
     </div>
 
@@ -287,6 +288,12 @@ onMounted(load)
         </div>
       </template>
     </UModal>
+
+    <!-- 複合機がスキャンを送るときの資格情報 (purpose etc-scan)。給油の画面ではなくここで発行する -->
+    <section id="machine-credentials" class="space-y-2 pt-4 border-t border-default">
+      <h3 class="font-bold">複合機の資格情報</h3>
+      <MachineCredentials purpose="etc-scan" />
+    </section>
   </div>
 </template>
 

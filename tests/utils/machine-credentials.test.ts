@@ -6,7 +6,10 @@ import {
   PURPOSES,
   PURPOSE_TEXT,
   createMachineCredentialApi,
-  toPurpose,
+  deviceSetup,
+  deviceSetupFor,
+  deviceSetupRows,
+  MACHINE_FOLDER,
   ISSUE_GUIDE,
   credentialErrorText,
   errorCodeText,
@@ -213,25 +216,30 @@ describe('sortCredentials', () => {
   })
 })
 
-describe('用途の選択 (Refs #1287)', () => {
-  it('選べるのは fuel-utran と etc-scan、既定は fuel-utran', () => {
+describe('用途ごとの文 (Refs #1287)', () => {
+  it('用途は fuel-utran と etc-scan', () => {
     expect(PURPOSES).toEqual(['fuel-utran', 'etc-scan'])
-    expect(toPurpose('etc-scan')).toBe('etc-scan')
-    expect(toPurpose('fuel-utran')).toBe('fuel-utran')
-    // 知らない値・空は既定に戻す (leave-scan をこの画面から発行させない)
-    expect(toPurpose('leave-scan')).toBe('fuel-utran')
-    expect(toPurpose(undefined)).toBe('fuel-utran')
   })
-  it('既定の文は従来の定数と同じ (fuel-utran の画面の文言は変えない)', () => {
-    expect(PURPOSE_TEXT['fuel-utran'].notice).toBe(ONE_TIME_NOTICE)
-    expect(PURPOSE_TEXT['fuel-utran'].guide).toBe(ISSUE_GUIDE)
-    expect(PURPOSE_TEXT['fuel-utran'].nameLabel).toBe('PC 名')
+  it('fuel-utran の文は #1287 以前の /fuel/credentials と同じ', () => {
+    const t = PURPOSE_TEXT['fuel-utran']
+    expect(t.notice).toBe(ONE_TIME_NOTICE)
+    expect(t.guide).toBe(ISSUE_GUIDE)
+    expect(t.intro).toBe('Windows アプリ (給油データ USB アップローダー) が送信に使う username / password です。PC ごとに発行してください。')
+    expect(t.nameLabel).toBe('PC 名')
+    expect(t.nameHint).toBe('どの PC 用か分かる名前')
+    expect(t.namePlaceholder).toBe('例: 本社 給油室の PC')
+    expect(t.rotateNote).toBe('PC に新しいパスワードを入れ直すまで送信できません。')
+    expect(t.revokeNote).toBe('この PC からは送信できなくなります。')
   })
-  it('etc-scan の文は複合機を案内し、Windows アプリを案内しない', () => {
+  it('etc-scan の文は複合機を案内し、Windows アプリ・PC を案内しない', () => {
     const t = PURPOSE_TEXT['etc-scan']
+    const all = Object.values(t).join('')
     expect(t.guide).toContain('複合機')
-    expect(t.notice).toContain('複合機')
-    expect(`${t.guide}${t.notice}`).not.toContain('Windows')
+    expect(t.notice).toContain('WebDAV')
+    expect(t.rotateNote).toContain('複合機')
+    expect(t.revokeNote).toContain('複合機')
+    expect(all).not.toContain('Windows')
+    expect(all).not.toContain('PC')
     expect(t.nameLabel).toBe('機器名')
   })
   it('purpose を渡すと list / issue がその用途で呼ぶ', async () => {
@@ -248,5 +256,33 @@ describe('用途の選択 (Refs #1287)', () => {
   it('labelError は欄の名前を差し替えられる', () => {
     expect(labelError('', '機器名')).toBe('機器名を入れてください')
     expect(labelError('x'.repeat(LABEL_MAX + 1), '機器名')).toBe(`機器名は ${LABEL_MAX} 文字以内にしてください`)
+  })
+})
+
+describe('deviceSetup (複合機の設定例、Refs #1287)', () => {
+  const cred = { username: 'mc_abc', password: 'p@ss' }
+  it('WebDAV・auth-worker のホスト (末尾 / を落とす)・/m/etc-scan/scan・curl', () => {
+    expect(MACHINE_FOLDER).toBe('/m/etc-scan/scan')
+    expect(deviceSetup('https://auth.ippoan.org/', cred)).toEqual({
+      protocol: 'WebDAV',
+      host: 'https://auth.ippoan.org',
+      folder: '/m/etc-scan/scan',
+      username: 'mc_abc',
+      password: 'p@ss',
+      curl: 'curl -T test.pdf -u mc_abc:p@ss https://auth.ippoan.org/m/etc-scan/scan/test.pdf', // gitleaks:allow (テスト用のダミー値)
+    })
+  })
+  it('行はプロトコル・ホスト名・フォルダ・ユーザー名・パスワードの順 (curl は行に入れない)', () => {
+    expect(deviceSetupRows(deviceSetup('https://auth-staging.ippoan.org', cred))).toEqual([
+      ['プロトコル', 'WebDAV'],
+      ['ホスト名', 'https://auth-staging.ippoan.org'],
+      ['フォルダへのパス', '/m/etc-scan/scan'],
+      ['ユーザー名', 'mc_abc'],
+      ['パスワード', 'p@ss'],
+    ])
+  })
+  it('設定例を出すのは etc-scan だけ (fuel-utran は Windows アプリに username / password を入れるだけ)', () => {
+    expect(deviceSetupFor('etc-scan', 'https://auth.ippoan.org', cred)).toEqual(deviceSetup('https://auth.ippoan.org', cred))
+    expect(deviceSetupFor('fuel-utran', 'https://auth.ippoan.org', cred)).toBeNull()
   })
 })
