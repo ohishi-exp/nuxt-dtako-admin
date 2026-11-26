@@ -149,7 +149,7 @@ onMounted(load)
     </UFormField>
 
     <p class="text-sm text-muted">
-      {{ text.label }} が送信に使う username / password です。{{ purpose === 'etc-scan' ? '機器' : 'PC' }}ごとに発行してください。
+      {{ text.label }} が送信に使う username / password です。{{ purpose === 'etc-scan' ? '機器' : 'PC ' }}ごとに発行してください。
     </p>
 
     <UAlert v-if="listError" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="資格情報の一覧を読めませんでした" :description="listError" />

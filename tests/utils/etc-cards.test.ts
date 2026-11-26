@@ -5,6 +5,7 @@ import {
   cardLast5,
   countByStatus,
   etcCardErrorText,
+  formatBytes,
   halfwidth,
   initialStatus,
   isEmptyFields,
@@ -126,6 +127,11 @@ describe('表示', () => {
     expect(cardLast5(null)).toBeNull()
     expect(maskedCard('00010')).toBe('…00010')
     expect(maskedCard(null)).toBe('(未読)')
+  })
+  it('大きさは 1KB 未満を 0 KB にしない', () => {
+    expect(formatBytes(26)).toBe('26 B')
+    expect(formatBytes(1536)).toBe('2 KB')
+    expect(formatBytes(1.5 * 1024 * 1024)).toBe('1.5 MB')
   })
   it('status ごとの件数 (0 件も並べ、知らない status は数えない)', () => {
     expect(countByStatus([{ status: 'needs_review' }, { status: 'needs_review' }, { status: 'registered' }, { status: 'bogus' }]))

@@ -17,6 +17,7 @@ import {
   canRegister,
   countByStatus,
   etcCardErrorText,
+  formatBytes,
   maskedCard,
   type EtcCardStatus,
   type EtcCardView,
@@ -31,6 +32,8 @@ const loading = ref(false)
 const listError = ref<string | null>(null)
 /** 行・scan ごとの操作の結果 (成功も失敗も、その行の下に出す) */
 const notes = ref<Record<string, { ok: boolean, text: string }>>({})
+/** 再 OCR の結果。読めた scan は一覧から消えるので、行ではなく表の上に出す */
+const scanNotice = ref<{ ok: boolean, text: string } | null>(null)
 const busy = ref<string | null>(null)
 const filter = ref<EtcCardStatus | 'all'>('all')
 const KUBUN_ITEMS: string[] = [...KUBUN]
@@ -99,16 +102,18 @@ async function saveEdit() {
 // ---- 再 OCR ----
 async function reOcr(s: EtcScanView) {
   busy.value = `scan-${s.sha256}`
+  scanNotice.value = null
   try {
     const res = await $fetch<{ ok: boolean, row_count?: number, inserted?: number, error?: string }>(
       `/api/etc-cards/scans/${s.sha256}/ocr`, { method: 'POST', headers: authHeaders() })
-    notes.value[`scan-${s.sha256}`] = res.ok
-      ? { ok: true, text: `読めました: ${res.row_count} 行 (新しく足したのは ${res.inserted} 行)` }
-      : { ok: false, text: `また読めませんでした (${res.error})` }
-    if (res.ok) await load()
+    const label = `${formatIssuedDate(s.received_at)} の ${s.sha256.slice(0, 12)}`
+    scanNotice.value = res.ok
+      ? { ok: true, text: `${label} を読めました: ${res.row_count} 行 (新しく足したのは ${res.inserted} 行。同じカード番号が既にある行は足していません)` }
+      : { ok: false, text: `${label} はまた読めませんでした (${res.error})` }
+    await load()
   }
   catch (e) {
-    notes.value[`scan-${s.sha256}`] = { ok: false, text: etcCardErrorText(e, 'もう一度「再 OCR」を押してください') }
+    scanNotice.value = { ok: false, text: etcCardErrorText(e, 'もう一度「再 OCR」を押してください') }
   }
   finally {
     busy.value = null
@@ -175,6 +180,15 @@ onMounted(load)
       />
     </div>
 
+    <UAlert
+      v-if="scanNotice"
+      :color="scanNotice.ok ? 'success' : 'error'"
+      variant="subtle"
+      :icon="scanNotice.ok ? 'i-lucide-check' : 'i-lucide-alert-triangle'"
+      :description="scanNotice.text"
+      data-testid="scan-notice"
+    />
+
     <!-- OCR に失敗した scan -->
     <div v-if="failedScans.length > 0" class="space-y-2">
       <h3 class="font-bold">読めなかったスキャン ({{ failedScans.length }} 件)</h3>
@@ -183,17 +197,12 @@ onMounted(load)
           <tr><th>受信</th><th>大きさ</th><th>理由</th><th /></tr>
         </thead>
         <tbody>
-          <template v-for="s in failedScans" :key="s.sha256">
-            <tr>
-              <td>{{ formatIssuedDate(s.received_at) }} <span class="text-dimmed font-mono">{{ s.sha256.slice(0, 12) }}</span></td>
-              <td>{{ Math.round(s.bytes / 1024) }} KB</td>
-              <td>{{ s.ocr_error ?? '-' }}</td>
-              <td><UButton size="xs" variant="outline" label="再 OCR" :loading="busy === `scan-${s.sha256}`" :disabled="busy !== null" @click="reOcr(s)" /></td>
-            </tr>
-            <tr v-if="notes[`scan-${s.sha256}`]">
-              <td colspan="4" :class="notes[`scan-${s.sha256}`]!.ok ? 'text-success' : 'text-error'">{{ notes[`scan-${s.sha256}`]!.text }}</td>
-            </tr>
-          </template>
+          <tr v-for="s in failedScans" :key="s.sha256">
+            <td>{{ formatIssuedDate(s.received_at) }} <span class="text-dimmed font-mono">{{ s.sha256.slice(0, 12) }}</span></td>
+            <td>{{ formatBytes(s.bytes) }}</td>
+            <td>{{ s.ocr_error ?? '-' }}</td>
+            <td><UButton size="xs" variant="outline" label="再 OCR" :loading="busy === `scan-${s.sha256}`" :disabled="busy !== null" @click="reOcr(s)" /></td>
+          </tr>
         </tbody>
       </table>
     </div>

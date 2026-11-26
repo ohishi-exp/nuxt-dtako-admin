@@ -193,6 +193,13 @@ export function maskedCard(last5: string | null): string {
   return last5 === null ? '(未読)' : `…${last5}`
 }
 
+/** scan の大きさ。1KB 未満を「0 KB」に丸めない */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
 /** status ごとの件数 (0 件の status も 0 で並べる) */
 export function countByStatus(rows: readonly { status: string }[]): Record<EtcCardStatus, number> {
   const out = Object.fromEntries(STATUSES.map(s => [s, 0])) as Record<EtcCardStatus, number>
