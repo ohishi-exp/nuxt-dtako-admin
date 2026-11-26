@@ -7,6 +7,7 @@ import {
   cardRegisterErrorKey,
   CardRegisterDataError,
   countNonEtcRows,
+  countRangeDays,
   dateOfDateTime,
   decodeCsvBytes,
   effectiveRegistrationDate,
@@ -21,7 +22,9 @@ import {
   maskCardNumber,
   parseTollCsv,
   plate4OfVehicleCd,
+  rescanReadingRanges,
   resolveCardRegisterMode,
+  RESCAN_CHUNK_DAYS,
   runSearchWindow,
   splitCsvLine,
   type CardRegisterResult,
@@ -87,6 +90,33 @@ describe('日付 (JST)', () => {
     expect(runSearchWindow(new Date('2026-02-10T00:00:00Z'), '2025-12-20')).toEqual({ from: '2026-01-01', to: '2026-02-10' })
     // 今日より後の登録日 → from > to (何も拾わない)
     expect(runSearchWindow(NOW, '2026-11-27')).toEqual({ from: '2026-11-27', to: '2026-11-26' })
+  })
+
+  it('rescanReadingRanges: 走行日の範囲 (登録日〜今日) を 7 日ずつ古い順に割る。61 日で切れ、未来の登録日は空', () => {
+    // 登録日が窓の内側: 2026-11-10〜11-26 (17 日) → 7 + 7 + 3
+    const r = rescanReadingRanges(NOW, '2026-11-10')
+    expect(r).toEqual([
+      { startDate: '2026-11-10', endDate: '2026-11-16' },
+      { startDate: '2026-11-17', endDate: '2026-11-23' },
+      { startDate: '2026-11-24', endDate: '2026-11-26' },
+    ])
+    expect(countRangeDays(r)).toBe(17)
+    // 古い登録日: 61 日前 (2026-09-26) で切れ、今日まで 62 日 → 9 区間
+    const old = rescanReadingRanges(NOW, '2025-01-01')
+    expect(old[0]!.startDate).toBe('2026-09-26')
+    expect(old.at(-1)!.endDate).toBe('2026-11-26')
+    expect(old).toHaveLength(9)
+    expect(countRangeDays(old)).toBe(62)
+    expect(RESCAN_CHUNK_DAYS).toBe(7)
+    // 今日が登録日 → 今日 1 日。月またぎも 1 日ずつ進む
+    expect(rescanReadingRanges(NOW, '2026-11-26')).toEqual([{ startDate: '2026-11-26', endDate: '2026-11-26' }])
+    expect(rescanReadingRanges(new Date('2026-12-02T00:00:00Z'), '2026-11-29', 3)).toEqual([
+      { startDate: '2026-11-29', endDate: '2026-12-01' },
+      { startDate: '2026-12-02', endDate: '2026-12-02' },
+    ])
+    // 未来の登録日 → 空
+    expect(rescanReadingRanges(NOW, '2026-11-27')).toEqual([])
+    expect(countRangeDays([])).toBe(0)
   })
 
   it('effectiveRegistrationDate: 入れた登録日、空なら受信日の JST の日付 (UTC 15:00 の境界を含む)', () => {

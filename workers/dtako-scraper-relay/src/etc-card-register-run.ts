@@ -26,16 +26,19 @@
 import {
   buildCardRegisterFields,
   cardRegisterConfirmKey,
+  countRangeDays,
   cardRegisterErrorKey,
   countNonEtcRows,
   effectiveRegistrationDate,
   findRunForPlate,
   isRunDateUsable,
   parseTollCsv,
+  rescanReadingRanges,
   runSearchWindow,
   type CardRegisterFields,
   type CardRegisterMode,
   type CardRegisterResult,
+  type ReadingDateRange,
   type RunConfirmResult,
 } from "./etc-card-register";
 import type { EtcCardRegisterOutcome } from "./etc-meisai-client";
@@ -57,10 +60,15 @@ export interface CardRegisterDb {
 /** 確認段で見る行: `waiting_run` で、明細書を受けた会社 (`etc_card_scans.tenant_id`) が
  * その zip のアカウントの tenant と一致するもの。実効の登録日を作るため `registration_date` と
  * scan の `received_at` も持ってくる。 */
-export const SELECT_WAITING_FOR_TENANT_SQL =
+const SELECT_WAITING_BASE_SQL =
   "SELECT r.id, r.card_number, r.plate4, r.run_date, r.registration_date, s.received_at FROM etc_card_registrations r " +
   "JOIN etc_card_scans s ON s.sha256 = r.scan_sha256 " +
-  "WHERE r.status = 'waiting_run' AND r.plate4 IS NOT NULL AND s.tenant_id = ? ORDER BY r.id";
+  "WHERE r.status = 'waiting_run' AND r.plate4 IS NOT NULL AND s.tenant_id = ?";
+
+export const SELECT_WAITING_FOR_TENANT_SQL = `${SELECT_WAITING_BASE_SQL} ORDER BY r.id`;
+
+/** 「走行日を探し直す」用: 上と同じ条件で、行 id 1 つに絞る (他の waiting_run の行は触らない)。 */
+export const SELECT_WAITING_ONE_SQL = `${SELECT_WAITING_BASE_SQL} AND r.id = ? ORDER BY r.id`;
 
 export interface RunConfirmReport {
   results: RunConfirmResult[];
@@ -73,19 +81,24 @@ export interface RunConfirmReport {
  * - 範囲 (行ごとの実効の登録日〜。`runSearchWindow`) 内の ETC 走行があり、`run_date` が空かそれより古ければ `run_date` / `unko_no` を書く
  * - plate4 に一致する車輌CD が 2 種類以上あれば `failed` + 「車両が複数一致」
  * - 何も無ければ触らない (登録日より前の走行しか無い行も。走行待ちのまま)
+ *
+ * `onlyId` を渡すとその 1 行だけを見る (「走行日を探し直す」。tenant の他の行は触らない)。
  */
 export async function confirmRunsFromTollCsv(
   deps: { db: CardRegisterDb; now: Date },
   tenantId: string,
   csvText: string,
+  onlyId?: number,
 ): Promise<RunConfirmReport> {
   const tolls = parseTollCsv(csvText);
   const updatedAt = deps.now.toISOString();
+  const select =
+    onlyId === undefined
+      ? deps.db.prepare(SELECT_WAITING_FOR_TENANT_SQL).bind(tenantId)
+      : deps.db.prepare(SELECT_WAITING_ONE_SQL).bind(tenantId, onlyId);
   const rows =
     (
-      await deps.db
-        .prepare(SELECT_WAITING_FOR_TENANT_SQL)
-        .bind(tenantId)
+      await select
         .all<{
           id: number;
           card_number: string | null;
@@ -121,6 +134,96 @@ export async function confirmRunsFromTollCsv(
     }
   }
   return { results, nonEtcRows: countNonEtcRows(tolls) };
+}
+
+// ---------------------------------------------------------------------------
+// 走行日を探し直す (手動。取り込み済みの zip を theearth から取り直す)
+// ---------------------------------------------------------------------------
+
+/** 探し直しの対象の行: id 1 つ、`waiting_run` で plate4 あり。tenant (どの会社の theearth で
+ * 取り直すか) と実効の登録日の材料も読む。 */
+export const SELECT_RESCAN_TARGET_SQL =
+  "SELECT r.id, r.card_number, r.registration_date, s.received_at, s.tenant_id FROM etc_card_registrations r " +
+  "JOIN etc_card_scans s ON s.sha256 = r.scan_sha256 " +
+  "WHERE r.id = ? AND r.status = 'waiting_run' AND r.plate4 IS NOT NULL";
+
+export interface RescanTarget {
+  id: number;
+  card_number: string | null;
+  registration_date: string | null;
+  received_at: string;
+  tenant_id: string;
+}
+
+/** 探し直せる行を読む。無い (id 違い・走行待ちでない・下 4 桁が無い) なら null。 */
+export async function findRescanTarget(db: CardRegisterDb, id: number): Promise<RescanTarget | null> {
+  const rows = (await db.prepare(SELECT_RESCAN_TARGET_SQL).bind(id).all<RescanTarget>()).results ?? [];
+  return rows[0] ?? null;
+}
+
+export interface RescanDeps {
+  db: CardRegisterDb;
+  now: Date;
+  /** 読取日の範囲の csvdata.zip を theearth から取る (`scrapeViaHttp`)。**alc へは上げない。** */
+  fetchZip(range: ReadingDateRange): Promise<ArrayBuffer>;
+  /** zip の `KUDGSIR.csv` を文字列にする。無ければ null。 */
+  readTollCsv(zip: ArrayBuffer): Promise<string | null>;
+}
+
+export interface RescanChunk extends ReadingDateRange {
+  status: "confirmed" | "no_kudgsir" | "error";
+  results?: RunConfirmResult[];
+  error?: string;
+}
+
+export type RescanReport =
+  | { kind: "not_found" }
+  | {
+      kind: "done";
+      id: number;
+      cardNumber: string | null;
+      /** 取り直した日数 (全区間の合計)。 */
+      days: number;
+      chunks: RescanChunk[];
+      /** 見つかった (書いた / 既にあった) 走行日のいちばん新しいもの。無ければ null。 */
+      runDate: string | null;
+    };
+
+/**
+ * 「走行日を探し直す」本体 (Refs #1287)。カードを登録する前に alc へ取り込み済みの zip は
+ * cron の確認段 (`confirmRunsFromTollCsv`) が見ないので、行 1 つについて実効の登録日〜今日の
+ * 読取日の zip を theearth から取り直し、`KUDGSIR.csv` を確認段と同じ関数に渡す。
+ *
+ * - **alc へは上げない** (`deps` に upload を持たない。上げると has_kudgivt をリセットする)
+ * - D1 に書くのは `confirmRunsFromTollCsv` が書くもの (run_date / unko_no、複数一致の failed) だけ。行 id で絞る
+ * - `tenantId` (呼び手の theearth アカウントの tenant) と行の tenant が違えば `not_found`
+ * - 区間 ({@link rescanReadingRanges}) は古い順に直列。1 区間の失敗は記録して次へ進む
+ *
+ * 呼び手は theearth の同じ会社への同時ログインを避けるため、DO の `enqueueScrape` の中から呼ぶこと。
+ */
+export async function rescanRunsForRow(deps: RescanDeps, tenantId: string, id: number): Promise<RescanReport> {
+  const target = await findRescanTarget(deps.db, id);
+  if (!target || target.tenant_id !== tenantId) return { kind: "not_found" };
+  const ranges = rescanReadingRanges(deps.now, effectiveRegistrationDate(target.registration_date, target.received_at));
+  const chunks: RescanChunk[] = [];
+  let runDate: string | null = null;
+  for (const range of ranges) {
+    try {
+      const csv = await deps.readTollCsv(await deps.fetchZip(range));
+      if (csv === null) {
+        chunks.push({ ...range, status: "no_kudgsir" });
+        continue;
+      }
+      const { results } = await confirmRunsFromTollCsv(deps, tenantId, csv, id);
+      for (const r of results) {
+        if (r.runDate !== undefined && (runDate === null || r.runDate > runDate)) runDate = r.runDate;
+      }
+      chunks.push({ ...range, status: "confirmed", results });
+    } catch (err) {
+      chunks.push({ ...range, status: "error", error: errorMessage(err) });
+    }
+  }
+  return { kind: "done", id, cardNumber: target.card_number, days: countRangeDays(ranges), chunks, runDate };
 }
 
 // ---------------------------------------------------------------------------

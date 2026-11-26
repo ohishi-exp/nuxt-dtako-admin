@@ -108,6 +108,52 @@ export function runSearchWindow(now: Date, registrationDate: string): RunSearchW
   return { from, to };
 }
 
+/** 「走行日を探し直す」で theearth へ 1 回に頼む読取日の日数。
+ * theearth の zip 生成 (stage2) は 1 日ぶんでも 90 秒を超えることがあり、timeout は
+ * 150 秒 (`theearth-client.ts` の `DEFAULT_EXPORT_TIMEOUT_MS`)。62 日を 1 回で頼むと
+ * timeout に当たる見込みが高いので、7 日ずつに割って直列に取る (最大 9 回)。 */
+export const RESCAN_CHUNK_DAYS = 7;
+
+/** 読取日の範囲 (`YYYY-MM-DD`、両端を含む)。`scrapeViaHttp` の `startDate` / `endDate` にそのまま渡す。 */
+export interface ReadingDateRange {
+  startDate: string;
+  endDate: string;
+}
+
+function addDays(ymd: string, days: number): string {
+  return new Date(Date.parse(`${ymd}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * 「走行日を探し直す」(Refs #1287) で theearth から取り直す**読取日**の範囲を、
+ * {@link RESCAN_CHUNK_DAYS} 日ずつに割って古い順に返す。
+ *
+ * 範囲は {@link runSearchWindow} と同じ (`今日 - 61 日`・今年の 1/1・実効の登録日の遅い方〜今日)。
+ * 読取日は運行日と同じか遅いので、走行日の範囲の始まりから読取日を探せば取りこぼさない。
+ * 終わりは今日 (読取日が運行日より遅れても拾えるように)。登録日が未来なら空。
+ */
+export function rescanReadingRanges(
+  now: Date,
+  registrationDate: string,
+  chunkDays: number = RESCAN_CHUNK_DAYS,
+): ReadingDateRange[] {
+  const w = runSearchWindow(now, registrationDate);
+  const out: ReadingDateRange[] = [];
+  let start = w.from;
+  while (start <= w.to) {
+    const last = addDays(start, chunkDays - 1);
+    const endDate = last < w.to ? last : w.to;
+    out.push({ startDate: start, endDate });
+    start = addDays(endDate, 1);
+  }
+  return out;
+}
+
+/** 範囲の日数の合計 (ログに出す)。 */
+export function countRangeDays(ranges: readonly ReadingDateRange[]): number {
+  return ranges.reduce((n, r) => n + (Date.parse(r.endDate) - Date.parse(r.startDate)) / DAY_MS + 1, 0);
+}
+
 /** `YYYYMMDDHHMMSS` (JST)。R2 key の時刻部分。 */
 export function jstStamp(now: Date): string {
   return new Date(now.getTime() + JST_OFFSET_MS).toISOString().slice(0, 19).replace(/[-T:]/g, "");

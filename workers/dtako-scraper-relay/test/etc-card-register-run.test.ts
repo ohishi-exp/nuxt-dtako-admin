@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   CARD_REGISTER_BATCH_LIMIT,
   confirmRunsFromTollCsv,
+  findRescanTarget,
+  rescanRunsForRow,
   runCardRegistrations,
+  SELECT_RESCAN_TARGET_SQL,
   SELECT_WAITING_FOR_TENANT_SQL,
+  SELECT_WAITING_ONE_SQL,
   selectRegistrationsQuery,
   targetStatuses,
   type CardRegisterDb,
@@ -351,5 +355,155 @@ describe('SELECT は migrations 0021 + 0022 の表で通り、登録日の材料
     expect(report.results.map((r) => [r.id, r.kind])).toEqual([[2, 'expired']])
     const after = (await db.prepare('SELECT run_date, unko_no FROM etc_card_registrations WHERE id = 2').bind().all<Record<string, unknown>>()).results
     expect(after).toEqual([{ run_date: null, unko_no: null }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 走行日を探し直す (手動)
+// ---------------------------------------------------------------------------
+
+describe('rescanRunsForRow', () => {
+  /** SQL ごとに返す行を変える D1。 */
+  function routedDb(target: unknown[] | undefined, waiting: unknown[]) {
+    const calls: { sql: string; params: unknown[] }[] = []
+    const db: CardRegisterDb = {
+      prepare(sql: string) {
+        return {
+          bind(...params: unknown[]) {
+            return {
+              async all<T>() {
+                calls.push({ sql, params })
+                return { results: (sql === SELECT_RESCAN_TARGET_SQL ? target : waiting) as T[] | undefined }
+              },
+              async run() {
+                calls.push({ sql, params })
+                return {}
+              },
+            }
+          },
+        }
+      },
+    }
+    return { db, calls }
+  }
+  const TARGET = { id: 7, card_number: CARD, registration_date: '2026-11-10', received_at: '2026-11-01T00:00:00.000Z', tenant_id: 'tenant-a' }
+  const WAITING = [{ id: 7, card_number: CARD, plate4: '1234', run_date: null, registration_date: '2026-11-10', received_at: '2026-11-01T00:00:00.000Z' }]
+  const zipOf = (csv: string | null) => new TextEncoder().encode(csv ?? '').buffer as ArrayBuffer
+
+  it('findRescanTarget: id 1 つ、waiting_run で plate4 ありの行を読む。無ければ null', async () => {
+    const { db, calls } = routedDb([TARGET], [])
+    expect(await findRescanTarget(db, 7)).toEqual(TARGET)
+    expect(calls).toEqual([{ sql: SELECT_RESCAN_TARGET_SQL, params: [7] }])
+    expect(SELECT_RESCAN_TARGET_SQL).toContain("r.status = 'waiting_run'")
+    expect(SELECT_RESCAN_TARGET_SQL).toContain('r.plate4 IS NOT NULL')
+    expect(await findRescanTarget(routedDb(undefined, []).db, 7)).toBeNull()
+  })
+
+  it('登録日〜今日の読取日を 7 日ずつ取り直し、KUDGSIR.csv をその行 id だけに絞って確認する (alc へは上げない)', async () => {
+    const { db, calls } = routedDb([TARGET], WAITING)
+    const fetched: unknown[] = []
+    // deps に upload は無い。渡されるのは fetchZip / readTollCsv だけ (alc へ上げる口を持たない)
+    const deps = {
+      db,
+      now: NOW,
+      fetchZip: vi.fn(async (range: { startDate: string; endDate: string }) => {
+        fetched.push(range)
+        if (range.startDate === '2026-11-24') throw new Error('stage2 timeout')
+        return zipOf(range.startDate === '2026-11-17' ? CSV : null)
+      }),
+      readTollCsv: vi.fn(async (zip: ArrayBuffer) => {
+        const text = new TextDecoder().decode(zip)
+        return text === '' ? null : text
+      }),
+    }
+    const report = await rescanRunsForRow(deps, 'tenant-a', 7)
+    expect(Object.keys(deps).sort()).toEqual(['db', 'fetchZip', 'now', 'readTollCsv'])
+    expect(fetched).toEqual([
+      { startDate: '2026-11-10', endDate: '2026-11-16' },
+      { startDate: '2026-11-17', endDate: '2026-11-23' },
+      { startDate: '2026-11-24', endDate: '2026-11-26' },
+    ])
+    expect(report).toEqual({
+      kind: 'done',
+      id: 7,
+      cardNumber: CARD,
+      days: 17,
+      runDate: '2026-11-20',
+      chunks: [
+        { startDate: '2026-11-10', endDate: '2026-11-16', status: 'no_kudgsir' },
+        {
+          startDate: '2026-11-17',
+          endDate: '2026-11-23',
+          status: 'confirmed',
+          results: [{ id: 7, cardNumber: CARD, kind: 'found', runDate: '2026-11-20' }],
+        },
+        { startDate: '2026-11-24', endDate: '2026-11-26', status: 'error', error: 'stage2 timeout' },
+      ],
+    })
+    // 確認段は行 id で絞った SQL (tenant, id) — 他の waiting_run の行は読まない
+    const waitingSelects = calls.filter((c) => c.sql === SELECT_WAITING_ONE_SQL)
+    expect(waitingSelects).toEqual([{ sql: SELECT_WAITING_ONE_SQL, params: ['tenant-a', 7] }])
+    expect(SELECT_WAITING_ONE_SQL).toContain('AND r.id = ?')
+    expect(calls.some((c) => c.sql === SELECT_WAITING_FOR_TENANT_SQL)).toBe(false)
+    // D1 に書くのは run_date / unko_no だけ
+    const writes = calls.filter((c) => c.sql.startsWith('UPDATE'))
+    expect(writes.map((w) => w.sql)).toEqual(['UPDATE etc_card_registrations SET run_date = ?, unko_no = ?, updated_at = ? WHERE id = ?'])
+    expect(writes[0]!.params).toEqual(['2026-11-20', 'U1', NOW.toISOString(), 7])
+  })
+
+  it('新しい走行日を持つ区間が後に来れば、それを runDate にする (kept も数える)。古い区間の結果では下げない', async () => {
+    const csvOn = (date: string) => ['運行NO,車輌CD,開始日時,終了日時,ETC利用', `U9,10001234,${date} 10:00:00,${date} 11:00:00,1`].join('\n')
+    let runDate: string | null = null
+    const waiting = () => [{ ...WAITING[0], run_date: runDate }]
+    const calls: string[] = []
+    const db: CardRegisterDb = {
+      prepare: (sql) => ({
+        bind: (...params) => ({
+          all: async <T>() => {
+            calls.push(sql)
+            return { results: (sql === SELECT_RESCAN_TARGET_SQL ? [TARGET] : waiting()) as T[] }
+          },
+          run: async () => {
+            if (sql.includes('SET run_date')) runDate = params[0] as string
+            return {}
+          },
+        }),
+      }),
+    }
+    const csvs: Record<string, string> = { '2026-11-10': csvOn('2026/11/12'), '2026-11-17': csvOn('2026/11/11'), '2026-11-24': csvOn('2026/11/25') }
+    const report = await rescanRunsForRow(
+      { db, now: NOW, fetchZip: async (r) => zipOf(csvs[r.startDate]!), readTollCsv: async (z) => new TextDecoder().decode(z) },
+      'tenant-a',
+      7,
+    )
+    expect(report.kind === 'done' && report.chunks.map((c) => c.results?.[0]?.kind)).toEqual(['found', 'kept', 'found'])
+    expect(report.kind === 'done' && report.runDate).toBe('2026-11-25')
+    expect(runDate).toBe('2026-11-25')
+  })
+
+  it('行が無い・tenant が違えば not_found で theearth を叩かない。未来の登録日は 0 日で終わる', async () => {
+    const fetchZip = vi.fn()
+    const base = { now: NOW, fetchZip, readTollCsv: vi.fn() }
+    expect(await rescanRunsForRow({ ...base, db: routedDb([], []).db }, 'tenant-a', 7)).toEqual({ kind: 'not_found' })
+    expect(await rescanRunsForRow({ ...base, db: routedDb([TARGET], []).db }, 'tenant-b', 7)).toEqual({ kind: 'not_found' })
+    const future = await rescanRunsForRow({ ...base, db: routedDb([{ ...TARGET, registration_date: '2026-11-27' }], []).db }, 'tenant-a', 7)
+    expect(future).toEqual({ kind: 'done', id: 7, cardNumber: CARD, days: 0, chunks: [], runDate: null })
+    expect(fetchZip).not.toHaveBeenCalled()
+  })
+
+  it('区間の失敗は Error でなくても文字列にして残す', async () => {
+    const report = await rescanRunsForRow(
+      {
+        db: routedDb([{ ...TARGET, registration_date: '2026-11-26' }], []).db,
+        now: NOW,
+        fetchZip: async () => {
+          throw 'plain'
+        },
+        readTollCsv: vi.fn(),
+      },
+      'tenant-a',
+      7,
+    )
+    expect(report.kind === 'done' && report.chunks).toEqual([{ startDate: '2026-11-26', endDate: '2026-11-26', status: 'error', error: 'plain' }])
   })
 })

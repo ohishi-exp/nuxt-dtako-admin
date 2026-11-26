@@ -85,6 +85,7 @@ import {
   fetchEtcAccountType,
   pickCardRegisterAccount,
 } from "./etc-card-register";
+import { findRescanTarget, type CardRegisterDb } from "./etc-card-register-run";
 import {
   driverMasterOverallStatus,
   runDriverMasterForComps,
@@ -414,6 +415,11 @@ export default {
     if (url.pathname === "/etc-card/register" && request.method === "POST") {
       // ETC カード追加登録の「今すぐ登録」(Refs #1287)。front の画面から service binding 越し
       return handleEtcCardRegister(request, env);
+    }
+
+    if (url.pathname === "/etc-card/rescan" && request.method === "POST") {
+      // ETC カードの「走行日を探し直す」(Refs #1287)。front の画面から service binding 越し
+      return handleEtcCardRescan(request, env);
     }
 
     if (url.pathname === "/ws/scraper") {
@@ -1790,6 +1796,78 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
   );
   return new Response(await res.text(), {
     status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /etc-card/rescan` — body `{"id": number}`。ETC カード 1 行 (`waiting_run` で下 4 桁あり) の
+ * 走行日を、取り込み済みの運行 zip を theearth から読取日の範囲で取り直して探す (Refs #1287)。
+ * cron の確認段は取り込み**直後**の zip しか見ないので、カードを登録する前に取り込んだ日は
+ * これで拾い直す。**alc へは上げない** (DO の `runEtcCardRescan`)。
+ *
+ * 関門は `/etc-card/register` と同じ `X-Alc-Proxy-Secret` の constant-time 検証 1 つ。
+ * theearth へは**行の会社** (`etc_card_scans.tenant_id`) のアカウントで入るので、担当は
+ * ETC_ACCOUNTS ではなく `DTAKO_ACCOUNTS` の逆引き (`viewerCompIdsForTenant`) で決め、その会社の
+ * DO (`scraper-comp-{comp_id}`、dtako の取り込みと同じキュー) へ `{id, comp_id}` だけを渡す
+ * (tenant は運ばない。DO が comp_id から引いた tenant と行の tenant を照合し直す)。
+ * DO は 202 で受けて後で回す。1 社でも受ければ 202、どこも受けなければ最後の DO の応答を返す。
+ */
+export async function handleEtcCardRescan(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  const fail = (status: number, error: string) => json(status, { error });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+  if (resolveCardRegisterMode(env.ETC_CARD_REGISTER_MODE) === "off") return fail(503, CARD_REGISTER_OFF_MESSAGE);
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return fail(400, "JSON body が必要です");
+  }
+  const id = (body as { id?: unknown } | null)?.id;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+    return fail(400, "id (正の整数) が必要です");
+  }
+  if (!env.DTAKO_DB) return fail(503, "DTAKO_DB が未設定です");
+
+  const target = await findRescanTarget(env.DTAKO_DB as unknown as CardRegisterDb, id);
+  if (!target) return fail(404, "探し直せる行がありません (id 違い、または走行待ちでない・下 4 桁が無い)");
+
+  let compIds: string[];
+  try {
+    const raw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+    compIds = [...viewerCompIdsForTenant(parseDtakoAccounts(raw), target.tenant_id)];
+  } catch (err) {
+    return fail(503, err instanceof Error ? err.message : String(err));
+  }
+  if (compIds.length === 0) return fail(404, "この行の会社の theearth アカウントがありません (DTAKO_ACCOUNTS)");
+
+  const accepted: string[] = [];
+  let last: { status: number; text: string } = { status: 502, text: "" };
+  for (const compId of compIds) {
+    const res = await env.RELAY.get(env.RELAY.idFromName(`scraper-comp-${compId}`)).fetch(
+      "https://relay.internal/internal/etc-card-rescan",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, comp_id: compId }),
+      },
+    );
+    last = { status: res.status, text: await res.text() };
+    if (res.status === 202) accepted.push(compId);
+  }
+  if (accepted.length > 0) return json(202, { accepted: true, id, comp_ids: accepted });
+  return new Response(last.text, {
+    status: last.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }
