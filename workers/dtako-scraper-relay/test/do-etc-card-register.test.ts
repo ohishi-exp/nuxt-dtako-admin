@@ -22,6 +22,7 @@ import { PromiseQueue } from "../src/promise-queue";
  */
 type Priv = {
   fetch(req: Request): Promise<Response>;
+  confirmEtcRunsFromZip: (account: unknown, zip: ArrayBuffer, range: { startDate: string; endDate: string }) => Promise<void>;
   env: Record<string, unknown>;
   ctx: { waitUntil(p: Promise<unknown>): void };
   scrapeQueue: PromiseQueue;
@@ -113,6 +114,14 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
     }
   });
 
+  it("走行日が未確認なら 409", async () => {
+    const { d } = makeDo();
+    d.runEtcCardRegister = async () => ({ notFound: false, conflict: true, results: [] });
+    const res = await d.fetch(post("/internal/etc-card-register", { id: 1 }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "走行日が未確認 (次の zip 登録で確認される)" });
+  });
+
   it("対象が無ければ 404、あれば結果 (カード番号は末尾 5 桁)、例外は 500", async () => {
     const { d } = makeDo();
     d.runEtcCardRegister = async () => ({ notFound: true, results: [] });
@@ -120,6 +129,7 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
 
     d.runEtcCardRegister = async (_a, target) => ({
       notFound: false,
+      conflict: false,
       results: [
         { id: (target as { id: number }).id, cardNumber: "0000111122223333", kind: "dry_run_ok" },
         { id: 2, cardNumber: null, kind: "failed" },
@@ -138,28 +148,118 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
   });
 });
 
-describe("runEtcCardRegister の配線", () => {
-  const CARD = "0000111122223333";
-  const OBU = "9999988888888777777";
+const CARD = "0000111122223333";
+const OBU = "9999988888888777777";
 
-  function fakeD1(rows: unknown[]) {
-    const updates: unknown[][] = [];
-    return {
-      updates,
-      db: {
-        prepare: (_sql: string) => ({
-          bind: (...params: unknown[]) => ({
-            all: async () => ({ results: rows }),
-            run: async () => {
-              updates.push(params);
-              return {};
-            },
-          }),
+function fakeD1(rows: unknown[]) {
+  const calls: { sql: string; params: unknown[] }[] = [];
+  return {
+    calls,
+    db: {
+      prepare: (sql: string) => ({
+        bind: (...params: unknown[]) => ({
+          all: async () => {
+            calls.push({ sql, params });
+            return { results: rows };
+          },
+          run: async () => {
+            calls.push({ sql, params });
+            return {};
+          },
         }),
-      },
-    };
-  }
+      }),
+    },
+  };
+}
 
+/** method 0 (stored) だけの最小の zip。CRC は読まないので 0。 */
+function storedZip(name: string, data: Uint8Array): ArrayBuffer {
+  const n = new TextEncoder().encode(name);
+  const lh = new DataView(new ArrayBuffer(30));
+  lh.setUint32(0, 0x04034b50, true);
+  lh.setUint32(18, data.length, true);
+  lh.setUint32(22, data.length, true);
+  lh.setUint16(26, n.length, true);
+  const ch = new DataView(new ArrayBuffer(46));
+  ch.setUint32(0, 0x02014b50, true);
+  ch.setUint32(20, data.length, true);
+  ch.setUint32(24, data.length, true);
+  ch.setUint16(28, n.length, true);
+  const cdOffset = 30 + n.length + data.length;
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, 1, true);
+  eocd.setUint16(10, 1, true);
+  eocd.setUint32(12, 46 + n.length, true);
+  eocd.setUint32(16, cdOffset, true);
+  const parts = [new Uint8Array(lh.buffer), n, data, new Uint8Array(ch.buffer), n, new Uint8Array(eocd.buffer)];
+  const out = new Uint8Array(parts.reduce((k, p) => k + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out.buffer;
+}
+
+describe("confirmEtcRunsFromZip (確認段の配線)", () => {
+  const ACCOUNT = { comp_id: "c1", tenant_id: "tenant-a", user_name: "u", user_pass: "p" };
+  const RANGE = { startDate: "2026-11-25", endDate: "2026-11-25" };
+  // Shift_JIS の CSV (「運行NO,車輌CD,終了日時,ETC利用」の見出し) を組むのは手間なので、UTF-8 で渡す。
+  // Shift_JIS の判定は etc-card-register.test.ts の decodeCsvBytes が固定している。
+  const CSV = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\r\nU1,10001234,2026/11/20 01:00:00,1\r\n");
+
+  it("zip の KUDGSIR.csv から tenant の行の run_date を書く", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-26T00:00:00Z"), toFake: ["Date"] });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null }]);
+    const { d } = makeDo({ DTAKO_DB: db });
+    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE);
+    vi.useRealTimers();
+    expect(calls[0]!.params).toEqual(["tenant-a"]);
+    expect(calls[1]!.params.slice(0, 2)).toEqual(["2026-11-20", "U1"]);
+    expect(log.mock.calls.flat().join("\n")).toContain('"status":"confirmed"');
+  });
+
+  it("DTAKO_DB が無い環境は skip (ログだけ、メールしない)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const sent: unknown[] = [];
+    const { d } = makeDo({ DTAKO_DB: undefined, ALERT_EMAIL: { send: async (m: unknown) => void sent.push(m) } });
+    await d.confirmEtcRunsFromZip(ACCOUNT, new ArrayBuffer(4), RANGE);
+    expect(log.mock.calls.flat().join("\n")).toContain("DTAKO_DB 未設定");
+    expect(sent).toEqual([]);
+  });
+
+  it("KUDGSIR.csv が無い日はログ 1 行で終わる (D1 を読まない)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, calls } = fakeD1([]);
+    const { d } = makeDo({ DTAKO_DB: db });
+    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGURI.csv", CSV), RANGE);
+    expect(calls).toEqual([]);
+    expect(log.mock.calls.flat().join("\n")).toContain("no_kudgsir");
+  });
+
+  it("失敗 (壊れた zip / 複数一致) は throw せずログとメールへ", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const sent: string[] = [];
+    const mailEnv = {
+      DTAKO_CONFIG_KV: { get: async () => JSON.stringify({ from: "relay@example.com", to: "ops@example.com" }) },
+      ALERT_EMAIL: { send: async (m: unknown) => void sent.push(JSON.stringify(m)) },
+    };
+    const broken = makeDo({ DTAKO_DB: fakeD1([]).db, ...mailEnv }).d;
+    await expect(broken.confirmEtcRunsFromZip(ACCOUNT, new ArrayBuffer(4), RANGE)).resolves.toBeUndefined();
+    expect(err.mock.calls.flat().join("\n")).toContain("EOCD");
+
+    const multi = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\nU1,10001234,2026/11/20 01:00:00,1\nU2,20001234,2026/11/20 01:00:00,1\n");
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null }]);
+    await makeDo({ DTAKO_DB: db, ...mailEnv }).d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", multi), RANGE);
+    expect(calls[1]!.sql).toContain("status = 'failed'");
+    expect(sent).toHaveLength(2); // 壊れた zip・複数一致で 1 通ずつ
+  });
+});
+
+describe("runEtcCardRegister の配線 (登録段)", () => {
   function etcSiteFetch() {
     const top = `<a href="/etc/R?funccode=1013000000&amp;nextfunc=1013000000">ログイン</a>`;
     const login = `<form action="/etc/R?funccode=1013000000"><input type="hidden" name="p" value="lp" /><input name="risLoginId" /><input type="password" name="risPassword" /></form>`;
@@ -176,86 +276,32 @@ describe("runEtcCardRegister の配線", () => {
     return { f, calls };
   }
 
-  it("alc を GET で読み (404 の運行は飛ばす)、ログインして確認画面まで進め、R2 と D1 に書く", async () => {
+  it("run_date の行をログインして確認画面まで進め (既定 dry-run)、R2 と D1 に書く", async () => {
     vi.useFakeTimers({ now: new Date("2026-11-26T00:00:00Z"), toFake: ["Date"] });
     const { f: siteFetch, calls: siteCalls } = etcSiteFetch();
     vi.stubGlobal("fetch", siteFetch);
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-
-    const alcCalls: { url: string; method?: string; tenant: string | null }[] = [];
-    const AUTH_WORKER = {
-      fetch: async (url: string, init: RequestInit) => {
-        alcCalls.push({ url, method: init.method, tenant: (init.headers as Record<string, string>)["X-Tenant-ID"] });
-        if (url.includes("/api/internal/operations")) {
-          return Response.json({
-            operations: [
-              { unko_no: "U1", vehicle_cd: "10001234", reading_date: "2026-11-21" },
-              { unko_no: "U0", vehicle_cd: "10001234", reading_date: "2026-11-20" },
-            ],
-            total: 2,
-            page: 1,
-            per_page: 200,
-          });
-        }
-        if (url.includes("/U1/")) return new Response("nf", { status: 404 });
-        return Response.json({ headers: ["終了日時", "ETC利用"], rows: [["2026/11/20 08:00:00", "1"]] });
-      },
-    };
     const puts: { key: string; body: unknown }[] = [];
-    const { db, updates } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", obu_number: OBU, tenant_id: "tenant-a" }]);
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", obu_number: OBU, run_date: "2026-11-20" }]);
     const { d } = makeDo({
       DTAKO_DB: db,
       DTAKO_R2: { put: async (key: string, body: unknown) => void puts.push({ key, body }) },
-      INTERNAL_SHARED_SECRET: "s",
-      AUTH_WORKER,
     });
 
     const report = await d.runEtcCardRegister({ user_id: "etc-reg", password: "pw-reg" }, { kind: "cron" });
     vi.useRealTimers();
 
     expect(report).toMatchObject({ results: [{ id: 3, kind: "dry_run_ok", runDate: "2026-11-20" }] });
-    expect(alcCalls.map((c) => [c.url.replace(/\?.*/, ""), c.method, c.tenant])).toEqual([
-      ["https://auth-worker.internal/alc-internal-proxy/api/internal/operations", "GET", "tenant-a"],
-      ["https://auth-worker.internal/alc-internal-proxy/api/operations/U1/csv/tolls", "GET", "tenant-a"],
-      ["https://auth-worker.internal/alc-internal-proxy/api/operations/U0/csv/tolls", "GET", "tenant-a"],
-    ]);
-    // 既定は dry-run: 確認画面 (nextfunc 1034100000) で止まり、その先へは送らない
     expect(siteCalls.at(-1)).toContain("nextfunc=1034100000");
     expect(siteCalls).toHaveLength(4);
     expect(puts).toEqual([{ key: "etc-card-register/3/20261126090000-confirm.html", body: "<p>確認</p>" }]);
-    expect(updates[0]?.slice(0, 3)).toEqual(["dry_run_ok", "2026-11-20", "U0"]);
+    expect(calls[1]!.params[0]).toBe("dry_run_ok");
   });
 
-  it("alc の 404 以外の失敗は error (status は変えない)、ログインもしない", async () => {
-    const siteFetch = vi.fn();
-    vi.stubGlobal("fetch", siteFetch);
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const { db, updates } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", obu_number: OBU, tenant_id: "t" }]);
-    const { d } = makeDo({
-      DTAKO_DB: db,
-      DTAKO_R2: { put: vi.fn() },
-      INTERNAL_SHARED_SECRET: "s",
-      AUTH_WORKER: {
-        fetch: async (url: string) =>
-          url.includes("/api/internal/operations")
-            ? Response.json({ operations: [{ unko_no: "U1", vehicle_cd: "1234", reading_date: "2026-11-21" }], total: 1 })
-            : new Response('{"error":"forbidden"}', { status: 403 }),
-      },
-    });
-    const report = (await d.runEtcCardRegister({ user_id: "etc-reg", password: "x" }, { kind: "cron" })) as {
-      results: { kind: string; detail: string }[];
-    };
-    expect(report.results[0]!.kind).toBe("error");
-    expect(report.results[0]!.detail).toContain("403");
-    expect(siteFetch).not.toHaveBeenCalled();
-    expect(updates[0]).toHaveLength(4); // attempts / last_error / updated_at / id だけ
-  });
-
-  it("DTAKO_DB / R2 / secret が欠けていれば throw (何も読まない)", async () => {
-    for (const env of [{ DTAKO_DB: undefined }, { DTAKO_R2: undefined }, { INTERNAL_SHARED_SECRET: undefined }]) {
-      const { d } = makeDo({ DTAKO_DB: fakeD1([]).db, INTERNAL_SHARED_SECRET: "s", AUTH_WORKER: { fetch: vi.fn() }, ...env });
+  it("DTAKO_DB / R2 が欠けていれば throw", async () => {
+    for (const env of [{ DTAKO_DB: undefined }, { DTAKO_R2: undefined }]) {
+      const { d } = makeDo({ DTAKO_DB: fakeD1([]).db, ...env });
       await expect(d.runEtcCardRegister({ user_id: "etc-reg", password: "x" }, { kind: "cron" })).rejects.toThrow(
         "ETC カード登録を回せません",
       );

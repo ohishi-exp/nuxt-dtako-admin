@@ -4,7 +4,6 @@ import {
   parseAlcUploadResponse,
   recalcPendingViaAlcInternalProxy,
   RECALC_PENDING_MAX_ROUNDS,
-  sendViaAlcInternalProxy,
   uploadDtakoZipViaAlcInternalProxy,
   type FetchLike,
 } from '../src/alc-internal-upload'
@@ -209,35 +208,5 @@ describe('recalcPendingViaAlcInternalProxy', () => {
     const result = await recalcPendingViaAlcInternalProxy(input, fetchImpl)
     expect(result.error).toEqual({ kind: 'parse', status: null })
     expect(result.rounds).toBe(1)
-  })
-})
-
-describe('sendViaAlcInternalProxy (GET の読み取り口、Refs #1287)', () => {
-  it('method GET + search: body と Content-Type を付けず、secret と tenant は付ける', async () => {
-    let capturedUrl = ''
-    let capturedInit: RequestInit | undefined
-    const fetchImpl: FetchLike = (async (url: RequestInfo | URL, init?: RequestInit) => {
-      capturedUrl = String(url)
-      capturedInit = init
-      return new Response('{"operations":[]}', { status: 200 })
-    }) as FetchLike
-    const body = await sendViaAlcInternalProxy(
-      { path: '/alc-internal-proxy/api/internal/operations', method: 'GET', search: '?page=1', sharedSecret: 's', tenantId: 't' },
-      fetchImpl,
-    )
-    expect(body).toBe('{"operations":[]}')
-    expect(capturedUrl).toBe('https://auth-worker.internal/alc-internal-proxy/api/internal/operations?page=1')
-    expect(capturedInit?.method).toBe('GET')
-    expect(capturedInit?.body).toBeUndefined()
-    expect(capturedInit?.headers).toEqual({ 'X-Alc-Proxy-Secret': 's', 'X-Tenant-ID': 't' })
-  })
-
-  it('非 2xx は status 付きで throw (404 を呼び手が見分けられる)', async () => {
-    const err = await sendViaAlcInternalProxy(
-      { path: '/alc-internal-proxy/api/operations/U/csv/tolls', method: 'GET', sharedSecret: 's', tenantId: 't' },
-      sequenceFetch([new Response('nf', { status: 404 })]),
-    ).catch((e: unknown) => e)
-    expect(err).toBeInstanceOf(AlcInternalUploadError)
-    expect((err as AlcInternalUploadError).status).toBe(404)
   })
 })

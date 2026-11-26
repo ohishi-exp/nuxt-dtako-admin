@@ -74,22 +74,17 @@ export interface AlcInternalProxyRequest {
   sharedSecret: string;
   /** **caller が名乗る tenant。** shared-secret class では必須 — 省略できる形にしない。 */
   tenantId: string;
-  /** 既定 `POST`。`GET` は読み取りの口 (`/api/internal/operations` 等) 用で、body を付けない。 */
-  method?: "GET" | "POST";
-  /** `GET` では省く。 */
-  contentType?: string;
-  /** `?a=1` 形式の query (先頭の `?` を含む)。 */
-  search?: string;
-  /** `GET` では省く。バイト列でも `ReadableStream` でもよい (DVR の `.vdf` は DO で読み切らずに渡す。
+  contentType: string;
+  /** バイト列でも `ReadableStream` でもよい (DVR の `.vdf` は DO で読み切らずに渡す。
    * ただし **forward 先の auth-worker が 1 度 `arrayBuffer()` でバッファする**ので、
    * end-to-end のストリーミングにはならない — `dvr-ingest.ts` の
    * `DvrFileIngestInput.body` 参照)。 */
-  body?: BodyInit;
+  body: BodyInit;
 }
 
 /**
- * `AUTH_WORKER` service binding 経由で shared-secret class の口へ POST (読み取りの口は GET) し、
- * 応答本文を返す。**非 2xx は本文付き loud fail** — 「送ったつもり」を作らない。
+ * `AUTH_WORKER` service binding 経由で shared-secret class の口へ POST し、応答本文を
+ * 返す。**非 2xx は本文付き loud fail** — 「送ったつもり」を作らない。
  *
  * ## ★ なぜ `lineworks-notify.ts` をここへ畳まないか (再検討しないで済むよう残す)
  *
@@ -104,14 +99,13 @@ export async function sendViaAlcInternalProxy(
   req: AlcInternalProxyRequest,
   fetchImpl: FetchLike,
 ): Promise<string> {
-  const headers: Record<string, string> = {
-    "X-Alc-Proxy-Secret": req.sharedSecret,
-    "X-Tenant-ID": req.tenantId,
-  };
-  if (req.contentType) headers["Content-Type"] = req.contentType;
-  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${req.path}${req.search ?? ""}`, {
-    method: req.method ?? "POST",
-    headers,
+  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${req.path}`, {
+    method: "POST",
+    headers: {
+      "X-Alc-Proxy-Secret": req.sharedSecret,
+      "X-Tenant-ID": req.tenantId,
+      "Content-Type": req.contentType,
+    },
     body: req.body,
   });
 

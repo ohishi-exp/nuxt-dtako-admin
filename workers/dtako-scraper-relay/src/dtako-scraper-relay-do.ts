@@ -50,10 +50,8 @@ import {
   type TheearthEvidence,
 } from "./theearth-client";
 import {
-  AlcInternalUploadError,
   parseAlcUploadResponse,
   recalcPendingViaAlcInternalProxy,
-  sendViaAlcInternalProxy,
   uploadDtakoZipViaAlcInternalProxy,
   type AlcUploadOutcome,
   type RecalcPendingResult,
@@ -69,8 +67,16 @@ import {
   type EtcSession,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
-import { buildCardRegisterEmail, resolveCardRegisterMode } from "./etc-card-register";
 import {
+  buildCardRegisterEmail,
+  buildRunConfirmEmail,
+  decodeCsvBytes,
+  resolveCardRegisterMode,
+  type RunConfirmResult,
+} from "./etc-card-register";
+import { readZipFile } from "./zip-entry";
+import {
+  confirmRunsFromTollCsv,
   runCardRegistrations,
   type CardRegisterDb,
   type CardRegisterReport,
@@ -1789,6 +1795,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           ? { kind: "split_failed", splitFailed: outcome.splitFailed }
           : { kind: "success" },
       );
+      // ETC カード追加登録の確認段 (Refs #1287)。取り込みは上で記録済み。この呼び出しは
+      // 例外を外へ出さない (`confirmEtcRunsFromZip` の doc) — 取り込みの結果を道連れにしない。
+      await this.confirmEtcRunsFromZip(account, zip, range);
       // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
       // 何をしようと、上の記録は変わらない (条件3: fold 失敗が取り込みを道連れ
       // にしない)。cron 経路は元々 ctx.waitUntil の中なので、ここで await して
@@ -3805,6 +3814,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (report.notFound) {
         return Response.json({ error: "対象の行がありません (id 違い、または登録できる状態でない)" }, { status: 404 });
       }
+      if (report.conflict) {
+        return Response.json({ error: "走行日が未確認 (次の zip 登録で確認される)" }, { status: 409 });
+      }
       // カード番号は末尾 5 桁まで (メールと同じ)
       return Response.json({
         results: report.results.map((r) => ({ ...r, cardNumber: r.cardNumber ? `*${r.cardNumber.slice(-5)}` : null })),
@@ -3815,10 +3827,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * ETC カード追加登録を 1 回回す (Refs #1287)。**`enqueueScrape` の中から呼ぶこと。**
-   * 判定と D1 の書き方は `etc-card-register-run.ts`。ここは配線だけ:
-   * alc は auth-worker の `/alc-internal-proxy` (shared-secret class) 経由、
-   * etc-meisai.jp へのログインは要るときに 1 回だけ、結果は取り込み失敗と同じ宛先へメール。
+   * ETC カード追加登録の登録段を 1 回回す (Refs #1287)。**`enqueueScrape` の中から呼ぶこと。**
+   * 対象は確認段 (`confirmEtcRunsFromZip`) が `run_date` を書いた行。判定と D1 の書き方は
+   * `etc-card-register-run.ts`。ここは配線だけ: etc-meisai.jp へのログインは要るときに 1 回、
+   * 結果は取り込み失敗と同じ宛先へメール。
    */
   private async runEtcCardRegister(
     account: EtcAccountEntry,
@@ -3826,15 +3838,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<CardRegisterReport> {
     const db = this.env.DTAKO_DB;
     const bucket = this.env.DTAKO_R2;
-    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
-    if (!db || !bucket || !sharedSecret) {
-      throw new Error("DTAKO_DB / DTAKO_R2 / INTERNAL_SHARED_SECRET のどれかが未設定のため ETC カード登録を回せません");
+    if (!db || !bucket) {
+      throw new Error("DTAKO_DB / DTAKO_R2 のどちらかが未設定のため ETC カード登録を回せません");
     }
     const now = new Date();
     const mode = resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE);
-    const authFetch = this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER);
-    const alcGet = (tenantId: string, path: string, search = "") =>
-      sendViaAlcInternalProxy({ path, method: "GET", search, sharedSecret, tenantId }, authFetch);
     const jar = createCookieJar();
     let session: EtcSession | null = null;
 
@@ -3844,16 +3852,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         now,
         mode,
         r2Prefix: this.env.ETC_R2_PREFIX || "etc",
-        getOperations: (tenantId, search) => alcGet(tenantId, "/alc-internal-proxy/api/internal/operations", search),
-        getTolls: async (tenantId, unkoNo) => {
-          try {
-            return await alcGet(tenantId, `/alc-internal-proxy/api/operations/${encodeURIComponent(unkoNo)}/csv/tolls`);
-          } catch (err) {
-            // CSV が無い運行 (料金所を通っていない等) は 404。それ以外は落とす
-            if (err instanceof AlcInternalUploadError && err.status === 404) return null;
-            throw err;
-          }
-        },
         register: async (fields) => {
           session ??= await etcLogin(jar, { userId: account.user_id, password: account.password });
           return registerEtcCard(jar, session, fields, mode);
@@ -3888,6 +3886,56 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error("DtakoScraperRelayDO: ETC_ACCOUNTS parse error:", describeUnknownError(err));
       return null;
     }
+  }
+
+  /**
+   * ETC カード追加登録の**確認段** (Refs #1287)。dtako の cron が alc へ zip を登録した**後**に、
+   * 手元の zip の `KUDGSIR.csv` から `waiting_run` の行の走行日を確かめて `run_date` を書く
+   * (`confirmRunsFromTollCsv`)。対象は zip のアカウントの tenant の行だけ。
+   *
+   * **ここで何が起きても取り込み (upload) の結果は変えない** — 例外は全部ここで受け、
+   * ログとメールに出すだけ。KUDGSIR.csv が無い日 (料金所を通っていない) はログ 1 行で終わる。
+   */
+  private async confirmEtcRunsFromZip(
+    account: DtakoAccountEntry,
+    zip: ArrayBuffer,
+    range: { startDate: string; endDate: string },
+  ): Promise<void> {
+    const logBase = { cron: "etc-card-confirm", comp_id: account.comp_id, reading_date: range.startDate };
+    // D1 の binding が無い環境 (登録簿が無い) は機能ごと無い扱い — 毎日の取り込みメールに混ぜない
+    const db = this.env.DTAKO_DB;
+    if (!db) {
+      console.log(JSON.stringify({ ...logBase, status: "skipped", reason: "DTAKO_DB 未設定" }));
+      return;
+    }
+    let results: RunConfirmResult[] = [];
+    let failure: string | null = null;
+    try {
+      const csv = await readZipFile(zip, "KUDGSIR.csv");
+      if (!csv) {
+        console.log(JSON.stringify({ ...logBase, status: "no_kudgsir" }));
+        return;
+      }
+      const report = await confirmRunsFromTollCsv(
+        { db: db as unknown as CardRegisterDb, now: new Date() },
+        account.tenant_id,
+        decodeCsvBytes(csv),
+      );
+      results = report.results;
+      console.log(
+        JSON.stringify({
+          ...logBase,
+          status: "confirmed",
+          non_etc_rows: report.nonEtcRows,
+          results: results.map((r) => ({ id: r.id, kind: r.kind, run_date: r.runDate ?? null })),
+        }),
+      );
+    } catch (err) {
+      failure = describeUnknownError(err);
+      console.error(JSON.stringify({ ...logBase, status: "error", error: failure }));
+    }
+    const mail = buildRunConfirmEmail(results, failure, range.startDate);
+    if (mail) await sendScrapeAlertEmail(scrapeAlertEmailDeps(this.env), mail.subject, mail.body, logBase);
   }
 
   /** ETC スクレイプ本体 (login → 検索 → CSV) + R2 保存。cron (無人実行、waitUntil +

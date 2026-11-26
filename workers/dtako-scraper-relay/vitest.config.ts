@@ -33,6 +33,7 @@ export default defineConfig({
         'src/etc-meisai-client.ts',
         'src/etc-card-register.ts',
         'src/etc-card-register-run.ts',
+        'src/zip-entry.ts',
         'src/cron.ts',
         'src/ichiban-makecsv.ts',
         'src/theearth-report-client.ts',

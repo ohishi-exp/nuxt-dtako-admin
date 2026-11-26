@@ -264,7 +264,8 @@ UPSTREAM_CACHE = "on"
 #                               未設定・それ以外は dry-run (確認画面で止め、HTML を R2
 #                               `{ETC_R2_PREFIX}-card-register/` に置く)。
 #
-# 回るのは ETC_CRON の 21 時 (UTC) の tick だけ (cron 式は増やさない。`isCardRegisterTick`)。
+# 走行日の確認は DTAKO_CRON の zip 登録の後 (zip の KUDGSIR.csv から run_date を書く)、
+# 登録は ETC_CRON の 21 時 (UTC) の tick だけ (cron 式は増やさない。`isCardRegisterTick`)。
 # staging / preview は D1 を本番と共有するので、どちらにも置かないこと (同じ行を 2 か所から触る)。
 
 # dtako 日次スクレイプが失敗したことを人へ知らせる LINE WORKS の宛先
