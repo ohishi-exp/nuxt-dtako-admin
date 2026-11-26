@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createCookieJar, type FetchLike } from '../src/theearth-client'
 import {
   decodeHtml,
+  collectMenuFuncCodes,
   detectAccountType,
   downloadMeisaiCsv,
   ETC_FUNC_CSV_OUTPUT,
@@ -100,6 +101,12 @@ const MENU_HTML = `<html><body>
   <input type="hidden" name="p" value="MENUHIDDEN" />
 </form>
 </body></html>`
+
+/** 法人のログイン後メニュー (「カードの追加登録/削除」リンクがある。Refs #1287)。 */
+const CORP_MENU_HTML = MENU_HTML.replace(
+  '</body>',
+  `<a href="javascript:submitPage('1034000000','1034000000')">カードの追加登録/削除</a></body>`,
+)
 
 const SEARCH_PAGE_HTML = `<html><body>
 <form action="/etc/R" method="post">
@@ -286,7 +293,7 @@ function page(url: string, htmlBody: string): EtcPage {
 }
 
 function session(url: string, htmlBody: string): EtcSession {
-  return { page: page(url, htmlBody), accountType: 'personal', loginPath: new URL(url).pathname }
+  return { page: page(url, htmlBody), accountType: 'personal', loginPath: new URL(url).pathname, menuFuncCodes: [] }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,10 +450,30 @@ describe('withNextfunc / parseCsvFilename / detectAccountType', () => {
     expect(parseCsvFilename(null)).toBe('meisai.csv')
   })
 
-  it('URL からアカウント種別を判定する (issue #14: user / corp path)', () => {
-    expect(detectAccountType('https://www.etc-meisai.jp/etc_corp_meisai/top')).toBe('corporate')
-    expect(detectAccountType('https://www.etc-meisai.jp/etc_user_meisai/top')).toBe('personal')
-    expect(detectAccountType('https://www.etc-meisai.jp/somewhere')).toBe('personal')
+  // Refs #1287: 実物は法人も個人も同じ /etc/R に来るので、URL ではなくメニューの中身で決める
+  it('ログイン後ページに「カードの追加登録」リンクがあれば法人、無ければ個人', () => {
+    const R = 'https://www.etc-meisai.jp/etc/R?funccode=1013000000'
+    expect(detectAccountType(page(R, CORP_MENU_HTML))).toBe('corporate')
+    // 文言だけ / onclick の機能コードだけでも法人
+    expect(detectAccountType(page(R, '<a href="#">カードの追加登録/削除</a>'))).toBe('corporate')
+    expect(
+      detectAccountType(page(R, `<a href="javascript:void(0)" onclick="submitPage('frm','/etc/R?funccode=1034000000')">登録</a>`)),
+    ).toBe('corporate')
+    expect(detectAccountType(page(R, MENU_HTML))).toBe('personal')
+    // URL に etc_corp_meisai が入っていても、リンクが無ければ個人 (URL は見ない)
+    expect(detectAccountType(page('https://www.etc-meisai.jp/etc_corp_meisai/top', MENU_HTML))).toBe('personal')
+  })
+
+  it('collectMenuFuncCodes はリンクの 10 桁の機能コードを重複なし・昇順で集める', () => {
+    const h = `
+<a href="javascript:submitPage('1034000000','1034000000')">a</a>
+<a href="/etc/R?funccode=1032000000&amp;nextfunc=1032000000">b</a>
+<a href="javascript:void(0)" onclick="submitPage('frm','/etc/R?funccode=1013000000&amp;nextfunc=1013000000'); return false;">c</a>
+<a href="javascript:submitPage(&quot;1040000000&quot;)">d</a>
+<a href="/etc/R?funccode=12345678901">11 桁は拾わない</a>
+<a href="/plain">e</a>`
+    expect(collectMenuFuncCodes(h)).toEqual(['1013000000', '1032000000', '1034000000', '1040000000'])
+    expect(collectMenuFuncCodes('<p>no links</p>')).toEqual([])
   })
 })
 
@@ -558,17 +585,19 @@ describe('etcLogin', () => {
     )
   })
 
-  it('法人アカウント (/etc_corp_meisai/) を判定する', async () => {
+  it('法人アカウント (メニューに「カードの追加登録」がある) を判定する', async () => {
+    // 実物 (2026-11-26 本番): 法人も個人も /etc/R?funccode=… のルーターに来る
     const { fetch } = recordingFetch([
       html(TOP_HTML),
       html(LOGIN_PAGE_HTML),
-      redirect('/etc_corp_meisai/top?sid=FAKE-SESSION'),
-      html(MENU_HTML),
+      redirect('/etc/R?funccode=1013000000&sid=FAKE-SESSION'),
+      html(CORP_MENU_HTML),
     ])
     const session = await etcLogin(createCookieJar(), params, fetch, 1000)
     expect(session.accountType).toBe('corporate')
     // Refs #1287: ログイン後の pathname を記録する。クエリ (セッション ID 等が載りうる) は捨てる
-    expect(session.loginPath).toBe('/etc_corp_meisai/top')
+    expect(session.loginPath).toBe('/etc/R')
+    expect(session.menuFuncCodes).toEqual([ETC_FUNC_SEARCH, '1034000000'])
   })
 
   it('redirect が REDIRECT_LIMIT を超えたら最後の 3xx で loud fail する', async () => {
@@ -1122,6 +1151,7 @@ describe('scrapeEtcCsv', () => {
     expect(steps).toEqual(['login', 'search', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal')
     expect(result.loginPath).toBe('/etc_user_meisai/menu')
+    expect(result.menuFuncCodes).toEqual([ETC_FUNC_SEARCH])
     expect(result.filename).toBe('meisai_202607.csv')
     expect(result.bytes.byteLength).toBeGreaterThan(0)
   })
@@ -1131,15 +1161,16 @@ describe('scrapeEtcCsv', () => {
     const { fetch } = recordingFetch([
       html(TOP_HTML),
       html(LOGIN_PAGE_HTML),
-      redirect('/etc_corp_meisai/menu'),
-      html(MENU_HTML),
+      redirect('/etc/R'),
+      html(CORP_MENU_HTML),
       html(SEARCH_PAGE_HTML),
       html(NO_USAGE_HTML),
     ])
     const err = await scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch, undefined, NOW).catch((e) => e)
     expect(err).toBeInstanceOf(EtcMeisaiNoUsageError)
     expect(err.accountType).toBe('corporate')
-    expect(err.loginPath).toBe('/etc_corp_meisai/menu')
+    expect(err.loginPath).toBe('/etc/R')
+    expect(err.menuFuncCodes).toEqual([ETC_FUNC_SEARCH, '1034000000'])
   })
 
   it('検索段の 0 件以外の例外はそのまま投げ直す', async () => {
@@ -1188,8 +1219,9 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
       NOW,
     )
     expect(steps).toEqual(['login', 'search', 'search', 'download', 'done'])
-    expect(result.accountType).toBe('personal') // startUrl が etc_user_meisai
+    expect(result.accountType).toBe('personal') // メニューに「カードの追加登録」が無い
     expect(result.loginPath).toBe('/etc_user_meisai/menu')
+    expect(result.menuFuncCodes).toEqual([ETC_FUNC_SEARCH])
     expect(result.filename).toBe('meisai_202607.csv')
 
     // 最初の GET は startUrl、cookie が載る (login POST は無い = risLoginId を送らない)
@@ -1198,16 +1230,16 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
     expect(JSON.stringify(calls)).not.toContain('risLoginId')
   })
 
-  it('法人 startUrl は corporate 判定', async () => {
+  it('startUrl のメニューに「カードの追加登録」があれば corporate 判定', async () => {
     const { fetch } = recordingFetch([
-      html(MENU_HTML),
+      html(CORP_MENU_HTML),
       html(SEARCH_PAGE_HTML),
       html(RESULT_PAGE_HTML),
       csvResponse(),
     ])
     const result = await scrapeEtcFromCookies(
       cookies,
-      'https://www.etc-meisai.jp/etc_corp_meisai/top',
+      'https://www.etc-meisai.jp/etc/R',
       () => {},
       fetch,
       undefined,
@@ -1285,7 +1317,8 @@ ${buttons}</form></body></html>`
   const session = (h: string): EtcSession => ({
     page: { url: BASE, html: h },
     accountType: 'corporate',
-    loginPath: '/etc_corp_meisai/top',
+    loginPath: '/etc/R',
+    menuFuncCodes: [],
   })
 
   it('dry-run: メニューから登録画面 → 「次へ」の URL へ 9 欄を POST して確認画面で止める (checkbox は送らない)', async () => {

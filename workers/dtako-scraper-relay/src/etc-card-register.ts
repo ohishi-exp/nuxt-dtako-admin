@@ -476,6 +476,83 @@ export const ETC_ACCOUNT_TYPE_STORAGE_KEY = "etc_account_type";
  * (`detectAccountType`) が実物で外れていないかを見るための記録 (Refs #1287)。 */
 export const ETC_LOGIN_PATH_STORAGE_KEY = "etc_login_path";
 
+/** 同じログインで集めたメニューの機能コード一覧 (`collectMenuFuncCodes`) を置くキー。 */
+export const ETC_MENU_FUNCCODES_STORAGE_KEY = "etc_menu_funccodes";
+
+/** 最後の CSV 取得 (`performEtcScrape`) の時刻と成否を置くキー。エラー本文は置かない。 */
+export const ETC_LAST_SCRAPE_STORAGE_KEY = "etc_last_scrape";
+
+/** `etc_last_scrape` の中身。`status` は `performEtcScrape` の outcome の status。 */
+export interface EtcLastScrape {
+  at: string;
+  status: "success" | "skipped" | "error";
+}
+
+/** 各 `etc-{user_id}` DO の `GET /internal/etc-account-type` の応答 (記録が無い欄は `null`)。 */
+export interface EtcAccountRecord {
+  account_type: CardRegisterAccountType | null;
+  login_path: string | null;
+  menu_funccodes: string[] | null;
+  last_scrape: EtcLastScrape | null;
+}
+
+/** storage / 応答の値を `EtcAccountRecord` に絞る (形の合わない欄は `null`)。DO が応答を作るときと
+ * 読む側が受けるときの両方で使う。 */
+export function parseEtcAccountRecord(raw: unknown): EtcAccountRecord {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const codes = r.menu_funccodes;
+  const last = r.last_scrape as Partial<EtcLastScrape> | null | undefined;
+  return {
+    account_type: parseAccountType(r.account_type),
+    login_path: typeof r.login_path === "string" ? r.login_path : null,
+    menu_funccodes:
+      Array.isArray(codes) && codes.every((c) => typeof c === "string") ? (codes as string[]) : null,
+    last_scrape:
+      last &&
+      typeof last.at === "string" &&
+      (last.status === "success" || last.status === "skipped" || last.status === "error")
+        ? { at: last.at, status: last.status }
+        : null,
+  };
+}
+
+/** `readEtcAccountStates` の 1 行 (user_id は末尾 4 文字だけ)。 */
+export interface EtcAccountState extends EtcAccountRecord {
+  idx: number;
+  user_tail: string;
+  /** 読み取りに失敗した (`account_type` 等は `null`) */
+  error?: true;
+}
+
+/**
+ * `ETC_ACCOUNTS` の並び順で、各アカウントの DO が記録した種別・ログイン後パス・機能コード・最後の取得を
+ * 読む (画面の表・MCP・担当判定の診断ログが同じ値を見る。Refs #1287)。読み失敗の行は
+ * `account_type: null` + `error: true` (担当判定では未記録と同じ扱いになる)。
+ */
+export async function readEtcAccountStates(
+  userIds: readonly string[],
+  read: (userId: string) => Promise<EtcAccountRecord>,
+): Promise<EtcAccountState[]> {
+  const states: EtcAccountState[] = [];
+  for (const [idx, userId] of userIds.entries()) {
+    const base = { idx, user_tail: maskUserId(userId) };
+    try {
+      states.push({ ...base, ...(await read(userId)) });
+    } catch {
+      states.push({ ...base, ...parseEtcAccountRecord(null), error: true });
+    }
+  }
+  return states;
+}
+
+/** `readEtcAccountStates` の読み値から担当を決める (DO への読みを打ち直さない)。 */
+export function pickFromStates(
+  userIds: readonly string[],
+  states: readonly EtcAccountState[],
+): Promise<CardRegisterAccountPick> {
+  return pickCardRegisterAccount([...userIds], async (userId) => states[userIds.indexOf(userId)].account_type);
+}
+
 /** 種別を読む DO 内部 route (GET。storage を読むだけで、キューにもログインにも触れない)。 */
 export const ETC_ACCOUNT_TYPE_PATH = "/internal/etc-account-type";
 
@@ -498,7 +575,7 @@ export type CardRegisterAccountPick =
  * カード追加登録を担当するアカウントを決める (Refs #1287)。**`ETC_ACCOUNTS` の並び順で最初の法人**。
  *
  * 登録に使うアカウントは、ETC cron が毎日ログインしている `ETC_ACCOUNTS` の中にある
- * (手で入れる var を持たない)。カードの追加登録は法人 (`/etc_corp_meisai/`) にしか無いので、
+ * (手で入れる var を持たない)。カードの追加登録は法人のメニューにしか無いので、
  * 個人は飛ばす。法人が 2 つ以上あっても登録するのは 1 つだけ (同じカードを二重に入れない)。
  *
  * 種別はログインするまで分からないので、各 DO が記録した値 (`readType`) を前から読む。
@@ -517,20 +594,21 @@ export async function pickCardRegisterAccount(
   return { kind: "none" };
 }
 
-/** `fetchEtcAccountType` が使う DO namespace の形 (`DurableObjectNamespace` の部分)。 */
+/** `fetchEtcAccountRecord` が使う DO namespace の形 (`DurableObjectNamespace` の部分)。 */
 export interface EtcAccountTypeNamespace {
   idFromName(name: string): unknown;
   get(id: unknown): { fetch(url: string): Promise<Response> };
 }
 
-/** `etc-{userId}` の DO が記録した種別を読む。記録なし・異常応答は `null` (= 未確認)。 */
-export async function fetchEtcAccountType(
+/** `etc-{userId}` の DO が記録した種別等を読む。異常応答は throw (`readEtcAccountStates` が
+ * `error: true` の行にする)。 */
+export async function fetchEtcAccountRecord(
   ns: EtcAccountTypeNamespace,
   userId: string,
-): Promise<CardRegisterAccountType | null> {
+): Promise<EtcAccountRecord> {
   const res = await ns.get(ns.idFromName(`etc-${userId}`)).fetch(`https://relay.internal${ETC_ACCOUNT_TYPE_PATH}`);
-  if (!res.ok) return null;
-  return parseAccountType(((await res.json()) as { account_type?: unknown } | null)?.account_type);
+  if (!res.ok) throw new Error(`etc-account-type HTTP ${res.status}`);
+  return parseEtcAccountRecord(await res.json());
 }
 
 /** storage / 応答の値を種別に絞る。それ以外は `null`。 */

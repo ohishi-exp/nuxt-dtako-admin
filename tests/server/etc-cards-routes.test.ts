@@ -36,6 +36,7 @@ import patchHandler from '../../server/api/etc-cards/[id].patch'
 import regDateHandler from '../../server/api/etc-cards/[id]/registration-date.patch'
 import registerHandler from '../../server/api/etc-cards/[id]/register.post'
 import recheckHandler from '../../server/api/etc-cards/accounts-recheck.post'
+import accountsHandler from '../../server/api/etc-cards/accounts.get'
 import rescanHandler from '../../server/api/etc-cards/[id]/rescan.post'
 import ocrHandler from '../../server/api/etc-cards/scans/[sha256]/ocr.post'
 import { insertScan, runOcr } from '../../server/utils/etc-scan'
@@ -274,6 +275,27 @@ describe('/api/etc-cards', () => {
     expect((await rejection(call(recheckHandler, event({ method: 'POST' })))).message).toBe('relay: HTTP 401')
     // binding 未設定 (data を持たない例外) はそのまま
     expect((await rejection(call(recheckHandler, event({ method: 'POST', env: env({ SCRAPER_RELAY: undefined }) })))).statusCode).toBe(503)
+  })
+
+  it('accounts: relay の GET /etc-card/accounts を共有秘密付きで読み、応答をそのまま返す', async () => {
+    const body = {
+      accounts: [{ idx: 0, user_tail: '*0001', account_type: 'corporate', login_path: '/etc/R', menu_funccodes: ['1034000000'], last_scrape: null }],
+      pick: { kind: 'found', user_tail: '*0001' },
+    }
+    relayFetch.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }))
+    expect(await call(accountsHandler, event())).toEqual(body)
+    const [url, init] = relayFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://relay.internal/etc-card/accounts')
+    expect(init.method).toBe('GET')
+    expect(init.body).toBeUndefined()
+    expect((init.headers as Record<string, string>)['X-Alc-Proxy-Secret']).toBe(SECRET)
+    relayFetch.mockResolvedValue(new Response('{"error":"Unauthorized"}', { status: 401 }))
+    expect((await rejection(call(accountsHandler, event()))).statusCode).toBe(401)
+    // 未ログインは relay を叩かない
+    relayFetch.mockClear()
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('unauth'), { statusCode: 401 }))
+    expect((await rejection(call(accountsHandler, event()))).statusCode).toBe(401)
+    expect(relayFetch).not.toHaveBeenCalled()
   })
 
   it('rescan: relay の POST /etc-card/rescan へ {id} を共有秘密付きで送り、202 と応答をそのまま返す', async () => {

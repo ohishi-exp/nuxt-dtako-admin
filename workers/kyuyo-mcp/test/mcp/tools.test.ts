@@ -1743,6 +1743,8 @@ describe("ALL_TOOLS", () => {
     // **取得は起動せず theearth にログインもしない** — 走らせるのは
     // run_vehicle_state_sync 側
     "get_vehicle_state_status",
+    // ETC アカウントの記録と登録の担当を relay から読むだけ (Refs #1287)。ログインしない
+    "get_etc_accounts",
     "get_operation_zip",
     "get_rest_diff",
     "get_restraint_summary",

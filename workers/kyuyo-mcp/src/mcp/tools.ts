@@ -2425,7 +2425,7 @@ export const runEtcScrapeTool = {
     "ETC_ACCOUNTS の各アカウントで 1 回ずつログインし、法人/個人の種別とログイン後のパスを " +
     "relay に記録する (ETC カード追加登録の担当判定に使われる)。" +
     "relay は 202 で受けて裏で回すので、**応答の ok は受け付けただけ。ログインと種別の記録は数十秒〜1 分後**" +
-    "(結末は relay の tail の account_type_stored の行で見る)。" +
+    "(**結果は get_etc_accounts で見る** — 各アカウントの last_scrape.at が変われば記録が更新された)。" +
     "応答は `{total, ok, results:[{target, ok}]}` (target は user_id の末尾 4 桁)。" +
     "全アカウントで受け付けに失敗したときだけ relay が 502 を返す。",
   inputSchema: noArgs,
@@ -2446,6 +2446,31 @@ export const runEtcScrapeTool = {
       ok: r.ok === true,
     }));
     return { total: masked.length, ok: masked.filter((r) => r.ok).length, results: masked };
+  },
+};
+
+// ── get_etc_accounts ─────────────────────────────────────────────────────────
+
+/**
+ * ETC アカウントの記録と、カード追加登録の担当を読む (Refs ohishi-exp/nuxt-dtako-admin#1287)。
+ * relay の `GET /etc-card/accounts` をそのまま返す (user_id は relay 側で末尾 4 文字に伏せ済み)。
+ * **読むだけ — ログインしない** (走らせるのは `run_etc_scrape`)。
+ */
+export const getEtcAccountsTool = {
+  name: "get_etc_accounts",
+  description:
+    "ETC_ACCOUNTS の各アカウントについて、relay が ETC cron / run_etc_scrape のログインで記録した " +
+    "種別 (corporate/personal)・ログイン後のパス・メニューの機能コード一覧・最後の取得 " +
+    "(`last_scrape: {at, status}`) を読み、ETC カード追加登録の担当 (`pick`) と一緒に返す " +
+    "(Refs ohishi-exp/nuxt-dtako-admin#1287)。**読むだけ — etc-meisai.jp へログインしない** " +
+    "(取り直すのは run_etc_scrape)。応答は `{accounts:[{idx, user_tail, account_type, login_path, " +
+    "menu_funccodes, last_scrape, error?}], pick:{kind, user_tail}}`。user_tail は user_id の末尾 4 文字。" +
+    "記録が無い欄は null、DO の読み取りに失敗した行は error: true。" +
+    "pick.kind は found (この user_tail が担当) / unconfirmed (この user_tail の種別が未記録で決められない) / " +
+    "none (全アカウントが個人)。",
+  inputSchema: noArgs,
+  execute: async (env: Env) => {
+    return await callRelay(env, "/etc-card/accounts", undefined, { method: "GET" });
   },
 };
 
@@ -3983,6 +4008,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runEtcScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getEtcAccountsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getVehicleStateStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,

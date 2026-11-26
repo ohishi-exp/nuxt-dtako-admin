@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  accountTypeLabel,
+  countUpdatedSince,
+  lastScrapeStamps,
+  lastScrapeText,
+  pickText,
+  type EtcAccountState,
   applyEdit,
   canRegister,
   canRescan,
@@ -205,5 +211,59 @@ describe('登録日', () => {
     expect(statusAfterRegistrationDateChange('failed')).toBe('waiting_run')
     expect(statusAfterRegistrationDateChange('waiting_run')).toBe('waiting_run')
     expect(statusAfterRegistrationDateChange('needs_review')).toBe('needs_review')
+  })
+})
+
+// ETC アカウントの記録 (Refs #1287)。user_tail は架空値
+describe('ETC アカウントの表示', () => {
+  const acc = (over: Partial<EtcAccountState> = {}): EtcAccountState => ({
+    idx: 0,
+    user_tail: '*0001',
+    account_type: null,
+    login_path: null,
+    menu_funccodes: null,
+    last_scrape: null,
+    ...over,
+  })
+
+  it('accountTypeLabel: 法人 / 個人 / 未記録 / 読めず', () => {
+    expect(accountTypeLabel(acc({ account_type: 'corporate' }))).toBe('法人')
+    expect(accountTypeLabel(acc({ account_type: 'personal' }))).toBe('個人')
+    expect(accountTypeLabel(acc())).toBe('未記録')
+    expect(accountTypeLabel(acc({ error: true }))).toBe('読めず')
+  })
+
+  it('lastScrapeText: 日本時間の日時と成否、記録なしは -、読めない時刻はそのまま', () => {
+    expect(lastScrapeText(null)).toBe('-')
+    expect(lastScrapeText({ at: '2026-11-26T10:57:30.000Z', status: 'success' })).toBe('2026-11-26 19:57 (成功)')
+    expect(lastScrapeText({ at: '2026-11-26T15:00:00.000Z', status: 'skipped' })).toBe('2026-11-27 00:00 (明細なし)')
+    expect(lastScrapeText({ at: 'x', status: 'error' })).toBe('x (失敗)')
+  })
+
+  it('pickText: 担当 / 未確認 / 法人なし', () => {
+    expect(pickText({ kind: 'found', user_tail: '*0001' })).toBe('登録の担当: *0001')
+    expect(pickText({ kind: 'unconfirmed', user_tail: '*0002' })).toContain('法人アカウントが未確認です (*0002')
+    expect(pickText({ kind: 'none', user_tail: null })).toContain('法人アカウントが見つかりません')
+  })
+
+  it('countUpdatedSince: 押す前の時刻から変わった数だけ数える (記録なしのままは数えない)', () => {
+    const before = lastScrapeStamps([
+      acc({ last_scrape: { at: 'A', status: 'success' } }),
+      acc(),
+      acc({ last_scrape: { at: 'C', status: 'error' } }),
+    ])
+    expect(before).toEqual(['A', null, 'C'])
+    expect(countUpdatedSince(before, [
+      acc({ last_scrape: { at: 'A', status: 'success' } }),
+      acc(),
+      acc({ last_scrape: { at: 'C', status: 'error' } }),
+    ])).toBe(0)
+    expect(countUpdatedSince(before, [
+      acc({ last_scrape: { at: 'A2', status: 'success' } }),
+      acc({ last_scrape: { at: 'B', status: 'skipped' } }),
+      acc({ last_scrape: { at: 'C', status: 'error' } }),
+    ])).toBe(2)
+    // 押す前に読めていなかった (表が空) なら、記録があるものはすべて更新扱い
+    expect(countUpdatedSince([], [acc({ last_scrape: { at: 'A', status: 'success' } }), acc()])).toBe(1)
   })
 })
