@@ -1053,7 +1053,7 @@ export async function openDvrFileStream(
       "dvrData",
     );
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
   if (!res.ok) {
     throw new TheearthClientError(`DVR ファイル取得が HTTP ${res.status} を返しました`);
