@@ -205,6 +205,48 @@ describe('runScheduledCron: etc', () => {
     expect(JSON.stringify(calls)).not.toContain('p1') // credential は DO 側で解決する
   })
 
+  // ETC カード追加登録 (Refs #1287): 21 時 (UTC) の tick だけ、登録用アカウントにだけ印を付ける
+  it('21 時 (UTC) の tick は ETC_CARD_REGISTER_USER_ID の DO にだけ card_register を載せる', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    await runScheduledCron(
+      ETC_CRON,
+      { etcAccountsRaw: ETC_ACCOUNTS_JSON, etcCardRegisterUserId: 'etc2' },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls.map((c) => c.body)).toEqual([
+      { user_id: 'etc1' },
+      { user_id: 'etc2', card_register: '1' },
+    ])
+  })
+
+  it.each(['2026-07-02T22:00:00Z', '2026-07-02T23:00:00Z', '2026-07-03T00:00:00Z'])(
+    '21 時以外の tick (%s) は登録の印を載せない',
+    async (at) => {
+      const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+      await runScheduledCron(
+        ETC_CRON,
+        { etcAccountsRaw: ETC_ACCOUNTS_JSON, etcCardRegisterUserId: 'etc2' },
+        okDoCall(calls),
+        new Date(at),
+      )
+      expect(calls.map((c) => c.body)).toEqual([{ user_id: 'etc1' }, { user_id: 'etc2' }])
+    },
+  )
+
+  it('ETC_CARD_REGISTER_USER_ID が未設定 (空文字含む) なら 21 時でも印を載せない', async () => {
+    for (const id of [undefined, '']) {
+      const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+      await runScheduledCron(
+        ETC_CRON,
+        { etcAccountsRaw: ETC_ACCOUNTS_JSON, etcCardRegisterUserId: id },
+        okDoCall(calls),
+        now,
+      )
+      expect(JSON.stringify(calls)).not.toContain('card_register')
+    }
+  })
+
   it('DO 呼び出しの失敗は per-account の error result になる', async () => {
     const failCall: CronDoCall = async (doKey) => {
       if (doKey === 'etc-etc1') throw new Error('boom')

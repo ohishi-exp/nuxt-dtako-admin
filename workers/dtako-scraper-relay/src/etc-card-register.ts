@@ -1,0 +1,372 @@
+/**
+ * ETC コーポレートカードの「カード追加登録」(etc-meisai.jp) を無人で行うための
+ * pure ロジック (Refs ohishi-exp/nuxt-dtako-admin#1287)。
+ *
+ * 流れ (I/O は `etc-card-register-run.ts`・`etc-meisai-client.ts` の `registerEtcCard`):
+ *
+ * 1. front が OCR で D1 `etc_card_registrations` に `waiting_run` の行を作る
+ * 2. relay が alc の運行一覧 (`/api/internal/operations`) から、ナンバー下 4 桁
+ *    (`plate4`) に一致する車両 (`車輌CD % 10000`) の運行を拾う
+ * 3. その運行の料金所 CSV (KUDGSIR = `tolls`) から ETC 走行の **終了日時の日付**を集め、
+ *    探す範囲 (今日から 61 日前〜今日、かつ今年) で **最も新しい日**を走行日にする
+ * 4. etc-meisai.jp の「カードの追加登録」へ カード番号・走行日・車載器管理番号・
+ *    ナンバー下 4 桁を入れて確認画面まで進める (`live` のときだけ完了まで)
+ *
+ * ## なぜ終了日時の日付か
+ *
+ * etc-meisai.jp は「その日にそのカードで ETC 無線走行した記録」と照合する。日跨ぎの
+ * 走行は**出口 (終了) の日**で記録されるので、開始日で入れると弾かれる (ユーザー指示)。
+ *
+ * ## なぜ今年だけか
+ *
+ * 登録画面の「利用年」select の選択肢が空と今年しか無い (2026-11-26 実測)。
+ * 年初の 61 日間は前年の走行が条件を満たしても入れられないので、範囲を今年で切る。
+ *
+ * ## 数字は架空値で書く
+ *
+ * この repo は public。テストの fixture にも実在のカード番号・車載器番号を載せない。
+ */
+
+/** 登録の進め方。**`live` 以外はすべて dry-run** (確認画面で止める)。 */
+export type CardRegisterMode = "dry_run" | "live";
+
+/** `ETC_CARD_REGISTER_MODE` を読む。`"live"` と完全一致のときだけ完了まで進める。 */
+export function resolveCardRegisterMode(raw: string | undefined): CardRegisterMode {
+  return raw === "live" ? "live" : "dry_run";
+}
+
+/** ETC の cron (`ETC_CRON` = 21,22,23,0 時 UTC) のうち、登録を走らせる tick か。
+ * **21 時 (UTC) = JST 6 時の 1 回だけ**。cron 式は増やさない (wrangler.toml と
+ * `cron.ts` の一致を壊さないため)。 */
+export function isCardRegisterTick(now: Date): boolean {
+  return now.getUTCHours() === 21;
+}
+
+// ---------------------------------------------------------------------------
+// 日付 (JST)
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 24 * 3600 * 1000;
+const JST_OFFSET_MS = 9 * 3600 * 1000;
+
+/** JST の日付 `YYYY-MM-DD`。 */
+export function jstDate(now: Date): string {
+  return new Date(now.getTime() + JST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** etc-meisai.jp の条件「過去 62 日以内」に合わせ、今日を含めて 62 日 (= 61 日前まで)。 */
+export const RUN_LOOKBACK_DAYS = 61;
+
+export interface RunSearchWindow {
+  /** `YYYY-MM-DD` (含む)。 */
+  from: string;
+  /** `YYYY-MM-DD` (含む) = 今日 (JST)。 */
+  to: string;
+}
+
+/** 走行日を探す範囲。`今日 - 61 日` と `今年の 1/1` の遅い方〜今日 (JST)。 */
+export function runSearchWindow(now: Date): RunSearchWindow {
+  const to = jstDate(now);
+  const lookback = jstDate(new Date(now.getTime() - RUN_LOOKBACK_DAYS * DAY_MS));
+  const yearStart = `${to.slice(0, 4)}-01-01`;
+  return { from: lookback > yearStart ? lookback : yearStart, to };
+}
+
+/** `YYYYMMDDHHMMSS` (JST)。R2 key の時刻部分。 */
+export function jstStamp(now: Date): string {
+  return new Date(now.getTime() + JST_OFFSET_MS).toISOString().slice(0, 19).replace(/[-T:]/g, "");
+}
+
+// ---------------------------------------------------------------------------
+// 車両の突き合わせ
+// ---------------------------------------------------------------------------
+
+/** 車輌CD → ナンバー下 4 桁 (`車輌CD % 10000`、先頭 0 なし)。数字でなければ null。
+ * nginx の `car_id` の慣例と同じ。 */
+export function plate4OfVehicleCd(vehicleCd: string | null | undefined): string | null {
+  const s = (vehicleCd ?? "").trim();
+  if (!/^\d+$/.test(s)) return null;
+  return String(Number(s) % 10000);
+}
+
+/** alc の運行一覧の 1 行のうち、ここで使う列だけ。 */
+export interface OperationRef {
+  unko_no: string;
+  vehicle_cd: string | null;
+  reading_date: string;
+}
+
+export interface OperationsPage {
+  operations: OperationRef[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+export class CardRegisterDataError extends Error {}
+
+/** `GET /api/internal/operations` の応答を読む。形が違えば **loud fail** (0 件に化けさせない)。 */
+export function parseOperationsPage(json: unknown): OperationsPage {
+  const r = json as Record<string, unknown> | null;
+  if (!r || !Array.isArray(r.operations) || typeof r.total !== "number") {
+    throw new CardRegisterDataError("運行一覧の応答の形が想定と違います (operations / total が無い)");
+  }
+  const operations = r.operations.map((o): OperationRef => {
+    const row = (o ?? {}) as Record<string, unknown>;
+    if (typeof row.unko_no !== "string" || typeof row.reading_date !== "string") {
+      throw new CardRegisterDataError("運行一覧の行に unko_no / reading_date がありません");
+    }
+    return {
+      unko_no: row.unko_no,
+      vehicle_cd: typeof row.vehicle_cd === "string" ? row.vehicle_cd : null,
+      reading_date: row.reading_date,
+    };
+  });
+  return {
+    operations,
+    total: r.total,
+    page: typeof r.page === "number" ? r.page : 1,
+    per_page: typeof r.per_page === "number" ? r.per_page : operations.length,
+  };
+}
+
+/** 次のページがあるか。 */
+export function hasNextOperationsPage(p: OperationsPage): boolean {
+  return p.operations.length > 0 && p.page * p.per_page < p.total;
+}
+
+export type VehicleMatch =
+  | { kind: "none" }
+  | { kind: "multiple"; vehicleCds: string[] }
+  | { kind: "one"; vehicleCd: string; unkoNos: string[] };
+
+/**
+ * `plate4` に一致する車両を決め、その車両の運行NO を**読取日の新しい順**に返す。
+ * 一致する車輌CD が 2 つ以上なら `multiple` (どちらのカードか決められないので登録しない)。
+ * 2 マンの運行は crew_role ごとに行が分かれるので運行NO で重複を畳む。
+ */
+export function matchVehicle(operations: readonly OperationRef[], plate4: string): VehicleMatch {
+  const mine = operations.filter((o) => plate4OfVehicleCd(o.vehicle_cd) === plate4);
+  // mine は plate4 が一致した行 = vehicle_cd が数字の行だけ
+  const cds = [...new Set(mine.map((o) => String(o.vehicle_cd).trim()))].sort();
+  if (cds.length === 0) return { kind: "none" };
+  if (cds.length > 1) return { kind: "multiple", vehicleCds: cds };
+  const sorted = [...mine].sort((a, b) => (a.reading_date < b.reading_date ? 1 : a.reading_date > b.reading_date ? -1 : 0));
+  return { kind: "one", vehicleCd: cds[0], unkoNos: [...new Set(sorted.map((o) => o.unko_no))] };
+}
+
+// ---------------------------------------------------------------------------
+// 料金所 CSV (KUDGSIR) から走行日を拾う
+// ---------------------------------------------------------------------------
+
+/** `ETC利用` 列が ETC 走行を示す値。nginx の取り込み (`DtakoEtcTable`) と集計
+ * (`where(['etc' => 1])`) がこの値で ETC 料金を数えている。 */
+export const ETC_USED_VALUE = "1";
+
+function unquote(cell: string | undefined): string {
+  return (cell ?? "").trim().replace(/^"(.*)"$/, "$1").trim();
+}
+
+/** `2026/11/20 14:23:00` / `2026-11-20T14:23` 等の先頭の日付を `YYYY-MM-DD` に。読めなければ null。 */
+export function dateOfDateTime(value: string): string | null {
+  const m = value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (!m) return null;
+  return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+}
+
+/**
+ * `GET /api/operations/{unko_no}/csv/tolls` の応答 (`{headers, rows}`) から、
+ * ETC 走行の**終了日時の日付**のうち範囲内で最も新しいものを返す。無ければ null。
+ * 必要な列 (`ETC利用` / `終了日時`) が無ければ loud fail。
+ */
+export function latestEtcRunDate(json: unknown, window: RunSearchWindow): string | null {
+  const r = json as { headers?: unknown; rows?: unknown } | null;
+  if (!r || !Array.isArray(r.headers) || !Array.isArray(r.rows)) {
+    throw new CardRegisterDataError("料金所 CSV の応答の形が想定と違います (headers / rows が無い)");
+  }
+  const headers = (r.headers as unknown[]).map((h) => unquote(String(h)));
+  const etcIdx = headers.indexOf("ETC利用");
+  const endIdx = headers.indexOf("終了日時");
+  if (etcIdx < 0 || endIdx < 0) {
+    throw new CardRegisterDataError("料金所 CSV に ETC利用 / 終了日時 の列がありません");
+  }
+  let latest: string | null = null;
+  for (const row of r.rows as unknown[]) {
+    const cells = Array.isArray(row) ? (row as unknown[]).map((c) => String(c)) : [];
+    if (unquote(cells[etcIdx]) !== ETC_USED_VALUE) continue;
+    const date = dateOfDateTime(unquote(cells[endIdx]));
+    if (!date || date < window.from || date > window.to) continue;
+    if (latest === null || date > latest) latest = date;
+  }
+  return latest;
+}
+
+// ---------------------------------------------------------------------------
+// 登録フォームの値
+// ---------------------------------------------------------------------------
+
+/** 登録画面 (funccode 1034000000) の入力欄。**これ以外の名前は送らない**
+ * (同じ form に削除用の checkbox とボタンが同居しているため。`registerEtcCard` の doc)。 */
+export interface CardRegisterFields {
+  icCardID: string;
+  icCardIDConfirm: string;
+  riyonengappiYear: string;
+  riyonengappimonth: string;
+  riyonengappiDay: string;
+  syasaikiNoL: string;
+  syasaikiNoC: string;
+  syasaikiNoR: string;
+  sharyoNo: string;
+}
+
+export interface CardRegisterInput {
+  cardNumber: string | null;
+  obuNumber: string | null;
+  plate4: string | null;
+  /** `YYYY-MM-DD`。 */
+  runDate: string;
+}
+
+/**
+ * フォームの値を組む。桁や年が条件に合わなければ `ok: false` (理由つき) で返し、
+ * **etc-meisai.jp へは送らない** (サイト側の入力エラーを待たずに弾く)。
+ */
+export function buildCardRegisterFields(
+  input: CardRegisterInput,
+  now: Date,
+): { ok: true; fields: CardRegisterFields } | { ok: false; reason: string } {
+  const card = input.cardNumber ?? "";
+  const obu = input.obuNumber ?? "";
+  const plate = input.plate4 ?? "";
+  if (!/^\d{16}$/.test(card)) return { ok: false, reason: "カード番号が数字 16 桁ではありません" };
+  if (!/^\d{19}$/.test(obu)) return { ok: false, reason: "車載器管理番号が数字 19 桁ではありません" };
+  if (!/^[1-9]\d{0,3}$/.test(plate)) {
+    return { ok: false, reason: "ナンバー下 4 桁が 1〜4 桁の数字 (先頭 0 なし) ではありません" };
+  }
+  const m = input.runDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return { ok: false, reason: "走行日が YYYY-MM-DD ではありません" };
+  if (m[1] !== jstDate(now).slice(0, 4)) {
+    return { ok: false, reason: "走行日が今年ではありません (利用年は今年しか選べません)" };
+  }
+  return {
+    ok: true,
+    fields: {
+      icCardID: card,
+      icCardIDConfirm: card,
+      riyonengappiYear: m[1],
+      riyonengappimonth: m[2],
+      riyonengappiDay: m[3],
+      syasaikiNoL: obu.slice(0, 5),
+      syasaikiNoC: obu.slice(5, 13),
+      syasaikiNoR: obu.slice(13),
+      sharyoNo: plate,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 画面の判定
+// ---------------------------------------------------------------------------
+
+/** 登録画面 (入力) の funccode。 */
+export const ETC_FUNC_CARD_REGISTER = "1034000000";
+/** 確認画面 (step 2) の nextfunc。 */
+export const ETC_FUNC_CARD_CONFIRM = "1034100000";
+
+/** 入力画面に戻されたか (= 入力エラー)。確認欄 `icCardIDConfirm` の入力欄 (hidden でない) が
+ * まだ在れば入力画面とみなす。**仮置き — 確認画面の実物はまだ誰も見ていない。** */
+export function isCardInputPage(html: string): boolean {
+  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = m[0];
+    if (!/\bname=["']icCardIDConfirm["']/i.test(tag)) continue;
+    if (!/\btype=["']?hidden\b/i.test(tag)) return true;
+  }
+  return false;
+}
+
+/** 完了画面の印。**仮置き** — dry-run の確認画面の実物を見てから親が確定する。 */
+export const CARD_REGISTER_DONE_MARKERS = ["登録が完了", "追加登録しました", "登録しました"] as const;
+
+/** 完了画面か。印を含み、かつ入力画面でないこと。 */
+export function isCardRegisterDonePage(html: string): boolean {
+  return !isCardInputPage(html) && CARD_REGISTER_DONE_MARKERS.some((m) => html.includes(m));
+}
+
+/** 画面のエラー文らしき部分 (class に error を含む要素の文字) を短く拾う。無ければ空。 */
+export function extractPageError(html: string): string {
+  const m = html.match(/<(\w+)[^>]*class=["'][^"']*error[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i);
+  return m ? m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200) : "";
+}
+
+// ---------------------------------------------------------------------------
+// R2 key / 表示
+// ---------------------------------------------------------------------------
+
+/** dry-run の確認画面の保存先。 */
+export function cardRegisterConfirmKey(prefix: string, id: number, now: Date): string {
+  return `${prefix}-card-register/${id}/${jstStamp(now)}-confirm.html`;
+}
+
+/** 判定できなかった画面の原本の保存先 (既存の `{prefix}-errors/` の下)。 */
+export function cardRegisterErrorKey(prefix: string, id: number, now: Date): string {
+  return `${prefix}-errors/card-register/${id}/${jstStamp(now)}.html`;
+}
+
+/** カード番号は末尾 5 桁まで (メール・ログ・画面に全桁を出さない)。 */
+export function maskCardNumber(card: string | null): string {
+  const s = card ?? "";
+  return s.length >= 5 ? `*${s.slice(-5)}` : "(不明)";
+}
+
+// ---------------------------------------------------------------------------
+// 1 件の結末とメール
+// ---------------------------------------------------------------------------
+
+export type CardRegisterResultKind =
+  /** 走行が見つからない。何もしない (status は変えない)。 */
+  | "no_run"
+  /** 確認画面まで進めて止めた。 */
+  | "dry_run_ok"
+  /** 完了画面まで進んだ。 */
+  | "registered"
+  /** 登録しない / できなかった (status を failed に)。 */
+  | "failed"
+  /** 照合や通信が途中で落ちた (status は変えず last_error だけ)。 */
+  | "error";
+
+export interface CardRegisterResult {
+  id: number;
+  cardNumber: string | null;
+  kind: CardRegisterResultKind;
+  runDate?: string;
+  detail?: string;
+}
+
+/** メールの件名と本文。**送るべき結末が 0 件なら null** (走行待ちだけの日は送らない)。 */
+export function buildCardRegisterEmail(
+  results: readonly CardRegisterResult[],
+  mode: CardRegisterMode,
+  now: Date,
+): { subject: string; body: string } | null {
+  const shown = results.filter((r) => r.kind !== "no_run");
+  if (shown.length === 0) return null;
+  const count = (k: CardRegisterResultKind) => shown.filter((r) => r.kind === k).length;
+  const label: Record<CardRegisterResultKind, string> = {
+    no_run: "走行待ち",
+    dry_run_ok: "確認画面まで (dry-run)",
+    registered: "登録済み",
+    failed: "失敗",
+    error: "照合できず",
+  };
+  const lines = shown.map((r) => {
+    const run = r.runDate ? ` 走行日 ${r.runDate}` : "";
+    const detail = r.detail ? ` — ${r.detail}` : "";
+    return `id ${r.id} カード ${maskCardNumber(r.cardNumber)}: ${label[r.kind]}${run}${detail}`;
+  });
+  return {
+    subject:
+      `[dtako] ETC カード登録 ${mode === "live" ? "" : "(dry-run) "}${jstDate(now)} ` +
+      `登録 ${count("registered")} / dry-run ${count("dry_run_ok")} / 失敗 ${count("failed") + count("error")}`,
+    body: [`【ETC カード追加登録】${mode === "live" ? "本登録" : "dry-run (確認画面で停止)"}`, ...lines].join("\n"),
+  };
+}

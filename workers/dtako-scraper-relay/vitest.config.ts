@@ -31,6 +31,8 @@ export default defineConfig({
         'src/alc-internal-upload.ts',
         'src/theearth-venus-client.ts',
         'src/etc-meisai-client.ts',
+        'src/etc-card-register.ts',
+        'src/etc-card-register-run.ts',
         'src/cron.ts',
         'src/ichiban-makecsv.ts',
         'src/theearth-report-client.ts',

@@ -33,6 +33,15 @@ import {
   type CookieJar,
   type FetchLike,
 } from "./theearth-client";
+import {
+  ETC_FUNC_CARD_CONFIRM,
+  ETC_FUNC_CARD_REGISTER,
+  extractPageError,
+  isCardInputPage,
+  isCardRegisterDonePage,
+  type CardRegisterFields,
+  type CardRegisterMode,
+} from "./etc-card-register";
 
 export const ETC_BASE_URL = "https://www.etc-meisai.jp";
 
@@ -586,6 +595,52 @@ async function advancePastConfirmationPage(
   );
 }
 
+/** ログイン後のメニューのリンク 1 本を、実ブラウザと同じ形で辿る。リンクの形は 3 通り:
+ * - onclick の `submitPage('frm','<フル URL>')` (href はダミー。Refs #134 後続報告5回目):
+ *   メイン form をその URL へ POST (advancePastConfirmationPage の確認ページボタンと同じ呼び出し規約)
+ * - 素の href: GET
+ * - `javascript:submitPage('funccode','nextfunc')` / `submitPage('nextfunc')`: 最後の引数を
+ *   nextfunc、2 引数以上なら先頭を funccode としてメイン form を POST
+ * 検索条件の指定 (`navigateToSearchPage`) とカードの追加登録 (`registerEtcCard`) が使う。 */
+async function followMenuLink(
+  jar: CookieJar,
+  page: EtcPage,
+  link: EtcLink,
+  label: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<EtcPage> {
+  const onclickUrl = extractOnclickSubmitPageUrl(link.onclick);
+  const jsArgs = onclickUrl ? null : parseJsSubmitArgs(link.href);
+  if (!onclickUrl && jsArgs === null) {
+    return followToPage(jar, new URL(link.href, page.url).toString(), { method: "GET" }, fetchImpl, timeoutMs);
+  }
+  const mainForm = pickMainForm(parseForms(page.html));
+  if (!mainForm) {
+    throw new EtcMeisaiClientError(
+      `${label}の遷移用 form が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります`,
+    );
+  }
+  if (onclickUrl) {
+    const body = new URLSearchParams();
+    for (const [name, value] of mainForm.fields) body.set(name, value);
+    return followToPage(
+      jar,
+      new URL(onclickUrl, page.url).toString(),
+      { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() },
+      fetchImpl,
+      timeoutMs,
+    );
+  }
+  const args = jsArgs as string[];
+  const nextfunc = args[args.length - 1] ?? "";
+  const overrides: Record<string, string> = {};
+  if (args.length >= 2 && mainForm.fields.has("funccode")) {
+    overrides.funccode = args[0];
+  }
+  return submitForm(jar, page, mainForm, overrides, nextfunc || null, fetchImpl, timeoutMs);
+}
+
 /** 確認ページの自動突破を試みる最大回数 (#134 実機検証では2回で結果ページに到達)。 */
 const CONFIRMATION_HOP_LIMIT = 3;
 
@@ -622,53 +677,7 @@ export async function navigateToSearchPage(
     );
   }
 
-  const onclickUrl = extractOnclickSubmitPageUrl(link.onclick);
-  const jsArgs = onclickUrl ? null : parseJsSubmitArgs(link.href);
-  let next: EtcPage;
-  if (onclickUrl) {
-    // 実機で確認された形式 (Refs #134 後続報告5回目): href は
-    // `javascript:void(0)` 等のダミーで、実遷移は onclick の
-    // `submitPage('frm','<フル URL>')` にのみ載る (advancePastConfirmationPage
-    // の確認ページボタンと同じ呼び出し規約)。
-    const mainForm = pickMainForm(parseForms(page.html));
-    if (!mainForm) {
-      throw new EtcMeisaiClientError(
-        "「検索条件の指定」の遷移用 form が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
-      );
-    }
-    const body = new URLSearchParams();
-    for (const [name, value] of mainForm.fields) body.set(name, value);
-    next = await followToPage(
-      jar,
-      new URL(onclickUrl, page.url).toString(),
-      { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() },
-      fetchImpl,
-      timeoutMs,
-    );
-  } else if (jsArgs === null) {
-    next = await followToPage(
-      jar,
-      new URL(link.href, page.url).toString(),
-      { method: "GET" },
-      fetchImpl,
-      timeoutMs,
-    );
-  } else {
-    const mainForm = pickMainForm(parseForms(page.html));
-    if (!mainForm) {
-      throw new EtcMeisaiClientError(
-        "「検索条件の指定」の遷移用 form が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
-      );
-    }
-    // submitPage('funccode','nextfunc') / submitPage('nextfunc') の両形式に対応:
-    // 最後の引数を nextfunc、2 引数以上なら先頭を funccode とみなす。
-    const nextfunc = jsArgs[jsArgs.length - 1] ?? "";
-    const overrides: Record<string, string> = {};
-    if (jsArgs.length >= 2 && mainForm.fields.has("funccode")) {
-      overrides.funccode = jsArgs[0];
-    }
-    next = await submitForm(jar, page, mainForm, overrides, nextfunc || null, fetchImpl, timeoutMs);
-  }
+  const next = await followMenuLink(jar, page, link, "「検索条件の指定」", fetchImpl, timeoutMs);
 
   if (!findFormWithField(parseForms(next.html), "sokoKbn")) {
     throw new EtcMeisaiClientError(
@@ -1166,4 +1175,141 @@ export async function scrapeEtcFromCookies(
 
   onProgress("done");
   return { ...csv, accountType: session.accountType };
+}
+
+// ---------------------------------------------------------------------------
+// カードの追加登録 (Refs ohishi-exp/nuxt-dtako-admin#1287)
+// ---------------------------------------------------------------------------
+
+/** `registerEtcCard` の結末。 */
+export type EtcCardRegisterOutcome =
+  /** dry-run: 確認画面まで進めて止めた (`html` = 確認画面)。 */
+  | { kind: "confirmed"; html: string }
+  /** live: 完了画面まで進んだ (`html` = 完了画面)。 */
+  | { kind: "registered"; html: string }
+  /** 入力画面に戻された / 完了と判定できない (`html` = その画面の原本)。 */
+  | { kind: "rejected"; html: string; reason: string };
+
+/** 「次へ」ボタンの name。 */
+const CARD_REGISTER_NEXT_BUTTON = "focusTarget";
+
+/** 送ってよい form の値だけを残す。**checkbox は 1 つも送らない** — 登録画面の form には
+ * 登録済みカードの削除用 checkbox が同居していて、実ブラウザでも「次へ」で送る必要が無い。
+ * (ボタンは `parseForms` が元から fields に入れないので、削除ボタンも送られない。) */
+function withoutCheckboxes(form: EtcForm): EtcForm {
+  const checkboxNames = new Set(form.checkboxes.map((c) => c.name));
+  return {
+    ...form,
+    fields: new Map([...form.fields].filter(([name]) => !checkboxNames.has(name))),
+    checkboxes: [],
+  };
+}
+
+/** submit/button 型の input のうち、onclick の遷移先の nextfunc が `allowed` を満たすものを集める。 */
+function buttonTargets(page: EtcPage): { name: string; url: string }[] {
+  const out: { name: string; url: string }[] = [];
+  for (const m of page.html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = m[0];
+    const type = (getAttr(tag, "type") ?? "text").toLowerCase();
+    if (type !== "submit" && type !== "button") continue;
+    const url = extractOnclickTargetUrl(extractOnclick(tag));
+    if (!url) continue;
+    out.push({ name: getAttr(tag, "name") ?? "", url: new URL(url, page.url).toString() });
+  }
+  return out;
+}
+
+/**
+ * ログイン済みの session から「カードの追加登録/削除」(funccode 1034000000) を開き、
+ * カード 1 枚の追加登録を **確認画面 (nextfunc 1034100000) まで**進める。`live` のときだけ
+ * 確認画面の先 (完了) まで進む。
+ *
+ * ## 削除の口に触れない
+ *
+ * 同じ form に登録済みカードの削除 (checkbox + 削除ボタン) が同居している。
+ * - checkbox は **1 つも送らない** (`withoutCheckboxes`)
+ * - 送り先は「次へ」ボタンの onclick の URL で、**その nextfunc が確認画面
+ *   (1034100000) でなければ送らずに throw** する (遷移先の取り違えで別の操作を起こさない)
+ * - live の 2 段目も、確認画面のボタンのうち登録画面 (1034000000)・確認画面 (1034100000)
+ *   以外へ進むものが**ちょうど 1 つ**のときだけ押す。0 個・2 個以上は throw
+ *
+ * ## 判定は仮置き
+ *
+ * 確認画面・完了画面の HTML はまだ誰も見ていない (2026-11-26)。入力画面に戻されたか /
+ * 完了したかの判定 (`etc-card-register.ts` の `isCardInputPage` / `isCardRegisterDonePage`)
+ * は dry-run の実物を見てから確定する。判定できない画面は `rejected` で原本を返す (loud fail)。
+ */
+export async function registerEtcCard(
+  jar: CookieJar,
+  session: EtcSession,
+  fields: CardRegisterFields,
+  mode: CardRegisterMode,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = ETC_REQUEST_TIMEOUT_MS,
+): Promise<EtcCardRegisterOutcome> {
+  // 1. メニューから登録画面へ
+  let inputPage = session.page;
+  if (!findFormWithField(parseForms(inputPage.html), "icCardID")) {
+    const link = parseLinks(inputPage.html).find(
+      (l) =>
+        l.text.includes("カードの追加登録") ||
+        l.href.includes(ETC_FUNC_CARD_REGISTER) ||
+        l.onclick.includes(ETC_FUNC_CARD_REGISTER),
+    );
+    if (!link) {
+      throw new EtcMeisaiClientError(
+        "「カードの追加登録/削除」リンクが見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
+      );
+    }
+    inputPage = await followMenuLink(jar, inputPage, link, "「カードの追加登録/削除」", fetchImpl, timeoutMs);
+  }
+  const form = findFormWithField(parseForms(inputPage.html), "icCardID");
+  if (!form) {
+    throw new EtcMeisaiClientError(
+      "カード追加登録の入力欄 (icCardID) が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
+    );
+  }
+
+  // 2. 「次へ」→ 確認画面
+  const nextUrl = findButtonSubmitPageUrl(inputPage.html, CARD_REGISTER_NEXT_BUTTON);
+  const target = nextUrl ? new URL(nextUrl, inputPage.url) : null;
+  if (!target || target.searchParams.get("nextfunc") !== ETC_FUNC_CARD_CONFIRM) {
+    throw new EtcMeisaiClientError(
+      `「次へ」ボタンの遷移先が確認画面 (nextfunc=${ETC_FUNC_CARD_CONFIRM}) ではありません — 送らずに止めました`,
+    );
+  }
+  const confirm = await submitFormToTarget(
+    jar,
+    withoutCheckboxes(form),
+    { ...fields },
+    target.toString(),
+    fetchImpl,
+    timeoutMs,
+  );
+  if (isCardInputPage(confirm.html)) {
+    const error = extractPageError(confirm.html);
+    return { kind: "rejected", html: confirm.html, reason: `入力画面に戻されました${error ? ` (${error})` : ""}` };
+  }
+  if (mode !== "live") return { kind: "confirmed", html: confirm.html };
+
+  // 3. live: 確認画面 → 完了
+  const forward = buttonTargets(confirm).filter((b) => {
+    const nf = new URL(b.url).searchParams.get("nextfunc");
+    return nf !== ETC_FUNC_CARD_REGISTER && nf !== ETC_FUNC_CARD_CONFIRM;
+  });
+  if (forward.length !== 1) {
+    return {
+      kind: "rejected",
+      html: confirm.html,
+      reason: `確認画面の登録ボタンを 1 つに決められません (候補 ${forward.length} 個)`,
+    };
+  }
+  const confirmForm = pickMainForm(parseForms(confirm.html));
+  if (!confirmForm) {
+    return { kind: "rejected", html: confirm.html, reason: "確認画面に form がありません" };
+  }
+  const done = await submitFormToTarget(jar, withoutCheckboxes(confirmForm), {}, forward[0].url, fetchImpl, timeoutMs);
+  if (isCardRegisterDonePage(done.html)) return { kind: "registered", html: done.html };
+  const error = extractPageError(done.html);
+  return { kind: "rejected", html: done.html, reason: `完了画面と判定できません${error ? ` (${error})` : ""}` };
 }
