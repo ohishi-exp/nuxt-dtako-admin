@@ -20,7 +20,6 @@ import {
   jstStamp,
   maskCardNumber,
   parseTollCsv,
-  parseTollTable,
   plate4OfVehicleCd,
   resolveCardRegisterMode,
   runSearchWindow,
@@ -88,16 +87,6 @@ describe('日付 (JST)', () => {
     expect(runSearchWindow(new Date('2026-02-10T00:00:00Z'), '2025-12-20')).toEqual({ from: '2026-01-01', to: '2026-02-10' })
     // 今日より後の登録日 → from > to (何も拾わない)
     expect(runSearchWindow(NOW, '2026-11-27')).toEqual({ from: '2026-11-27', to: '2026-11-26' })
-  })
-
-  it('parseTollTable: {headers, rows} を CSV と同じ形に読む (列の順は見出しで引く)', () => {
-    const rows = parseTollTable(['ETC利用', '終了日時', '車輌CD', '運行NO'], [['1', '2026/11/20 01:00:00', '10001234', 'U1'], []])
-    expect(rows).toEqual([
-      { unkoNo: 'U1', vehicleCd: '10001234', endDate: '2026-11-20', etc: '1' },
-      { unkoNo: '', vehicleCd: '', endDate: null, etc: '' },
-    ])
-    expect(parseTollCsv('運行NO,車輌CD,終了日時,ETC利用\nU1,10001234,2026/11/20 01:00:00,1')).toEqual([rows[0]])
-    expect(() => parseTollTable(['運行NO'], [])).toThrow('車輌CD')
   })
 
   it('effectiveRegistrationDate: 入れた登録日、空なら受信日の JST の日付 (UTC 15:00 の境界を含む)', () => {

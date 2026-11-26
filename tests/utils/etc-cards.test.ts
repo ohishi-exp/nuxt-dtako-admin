@@ -3,7 +3,7 @@ import {
   applyEdit,
   canRegister,
   canRescan,
-  rescanResultText,
+  RESCAN_ACCEPTED_TEXT,
   cardLast5,
   countByStatus,
   effectiveRegistrationDate,
@@ -147,12 +147,7 @@ describe('表示', () => {
     expect(canRescan({ status: 'waiting_run', plate4: '1234' })).toBe(true)
     expect(canRescan({ status: 'waiting_run', plate4: null })).toBe(false)
     expect(canRescan({ status: 'dry_run_ok', plate4: '1234' })).toBe(false)
-    const base = { operations: 3, skipped: 0, truncated: false }
-    expect(rescanResultText({ ...base, kind: 'found', run_date: '2026-11-20' })).toBe('走行日 2026-11-20 が見つかりました (運行 3 件を確認)')
-    expect(rescanResultText({ ...base, kind: 'kept', run_date: '2026-11-21' })).toBe('走行日は 2026-11-21 のままです (これより新しい走行はありません) (運行 3 件を確認)')
-    expect(rescanResultText({ ...base, kind: 'none', run_date: null })).toBe('見つかりませんでした (運行 3 件を確認)')
-    expect(rescanResultText({ operations: 200, skipped: 2, truncated: true, kind: 'multiple', run_date: null }))
-      .toBe('下 4 桁が同じ車両が複数あるため「失敗」にしました (運行 200 件を確認。料金所の記録が無い運行 2 件は飛ばしました。運行が多いため新しい方だけ確認しました)')
+    expect(RESCAN_ACCEPTED_TEXT).toBe('探し直しを受け付けました。数分後に再読み込みしてください')
     expect(canRegister('needs_review')).toBe(false)
     expect(canRegister('registered')).toBe(false)
     expect(canRegister('waiting_run')).toBe(true)

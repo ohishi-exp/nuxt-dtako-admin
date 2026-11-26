@@ -239,10 +239,11 @@ describe('/api/etc-cards', () => {
     expect(relayFetch).not.toHaveBeenCalled()
   })
 
-  it('rescan: relay の POST /etc-card/rescan へ {id} を共有秘密付きで送り、結果をそのまま返す', async () => {
-    const out = { id: 1, kind: 'found', run_date: '2026-11-20', operations: 3, skipped: 0, truncated: false, from: '2026-11-10', to: '2026-11-26' }
-    relayFetch.mockResolvedValue(new Response(JSON.stringify(out), { status: 200 }))
-    expect(await call(rescanHandler, event({ method: 'POST', params: { id: '1' } }))).toEqual(out)
+  it('rescan: relay の POST /etc-card/rescan へ {id} を共有秘密付きで送り、202 と応答をそのまま返す', async () => {
+    relayFetch.mockResolvedValue(new Response(JSON.stringify({ accepted: true, id: 1, comp_ids: ['c1'] }), { status: 202 }))
+    const e = event({ method: 'POST', params: { id: '1' } })
+    expect(await call(rescanHandler, e)).toEqual({ accepted: true, id: 1, comp_ids: ['c1'] })
+    expect(e.res.status).toBe(202)
     const [url, init] = relayFetch.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://relay.internal/etc-card/rescan')
     expect(init.method).toBe('POST')

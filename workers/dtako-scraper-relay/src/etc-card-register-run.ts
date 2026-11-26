@@ -32,16 +32,15 @@ import {
   findRunForPlate,
   isRunDateUsable,
   parseTollCsv,
-  parseTollTable,
   plate4OfVehicleCd,
   runSearchWindow,
   type CardRegisterFields,
   type CardRegisterMode,
   type CardRegisterResult,
   type RunConfirmResult,
-  type TollRow,
 } from "./etc-card-register";
 import type { EtcCardRegisterOutcome } from "./etc-meisai-client";
+import { deriveOpeNoFromUnkoNo, type DerivedOpeNo } from "./kintai-diff";
 
 /** D1 の最小の面 (テストで差し替えられるように binding 型に依存しない)。 */
 export interface CardRegisterDb {
@@ -90,16 +89,7 @@ export async function confirmRunsFromTollCsv(
   csvText: string,
   onlyId?: number,
 ): Promise<RunConfirmReport> {
-  return confirmRunsFromTolls(deps, tenantId, parseTollCsv(csvText), onlyId);
-}
-
-/** {@link confirmRunsFromTollCsv} の本体 (読み終えた料金所の行を受ける)。判定はここ 1 か所。 */
-export async function confirmRunsFromTolls(
-  deps: { db: CardRegisterDb; now: Date },
-  tenantId: string,
-  tolls: readonly TollRow[],
-  onlyId?: number,
-): Promise<RunConfirmReport> {
+  const tolls = parseTollCsv(csvText);
   const updatedAt = deps.now.toISOString();
   const select =
     onlyId === undefined
@@ -146,7 +136,7 @@ export async function confirmRunsFromTolls(
 }
 
 // ---------------------------------------------------------------------------
-// 走行日を探し直す (手動。alc に取り込み済みの運行の KUDGSIR を読み直す)
+// 走行日を探し直す (手動。alc の運行の一覧で絞り、運行 1 件ぶんの zip を theearth から取り直す)
 // ---------------------------------------------------------------------------
 
 /** 探し直しの対象の行: id 1 つ、`waiting_run` で plate4 あり。tenant (どの会社の運行を読むか) と
@@ -171,25 +161,23 @@ export async function findRescanTarget(db: CardRegisterDb, id: number): Promise<
   return rows[0] ?? null;
 }
 
-/** 1 回に KUDGSIR を読む運行の上限。超えたら新しい (読取日の遅い) 方から上限まで読み、`truncated` を立てる。 */
-export const RESCAN_MAX_OPERATIONS = 200;
+/** 1 回に zip を取る運行の上限 (operation-zip の items と同じ 20)。超えたら新しい方から 20 件、`truncated`。 */
+export const RESCAN_MAX_OPERATIONS = 20;
 
 /** 運行の一覧の 1 ページの件数 (alc-dtako-worker の `MAX_PER_PAGE`)。 */
 export const RESCAN_LIST_PER_PAGE = 200;
 
-/** alc の 1 運行の KUDGSIR の口が受ける運行 NO (auth-worker の許可が数字 1〜32 桁に絞っている)。 */
-const UNKO_NO_PATH_RE = /^[0-9]{1,32}$/;
-
-/** alc の shared-secret class の口を GET する (`getViaAlcInternalProxy` に tenant と secret を束ねたもの)。 */
-export type AlcGet = (path: string) => Promise<{ status: number; text: string }>;
-
 export interface RescanDeps {
   db: CardRegisterDb;
   now: Date;
-  /** tenant は呼び手が {@link RescanTarget.tenant_id} で束ねる。 */
+  /** alc の内部用の口 (shared-secret class) を `tenantId` で GET する。**alc には何も書かない。** */
   alcGet(tenantId: string, path: string): Promise<{ status: number; text: string }>;
+  /** 運行 1 件ぶんの csvdata.zip を theearth から取り、`KUDGSIR.csv` を文字列で返す。無ければ null。
+   * ログインは呼び手が 1 回にまとめる。**alc へは上げない** (upload は has_kudgivt をリセットする)。 */
+  fetchTollCsv(op: DerivedOpeNo): Promise<string | null>;
 }
 
+/** 運行の一覧が非 2xx・JSON でない (探し直しを始められない)。 */
 export class RescanUpstreamError extends Error {
   constructor(message: string) {
     super(message);
@@ -211,40 +199,59 @@ export type RescanReport =
       /** 運行を引いた読取日の範囲 (`runSearchWindow`)。 */
       from: string;
       to: string;
-      /** KUDGSIR を読めた運行の数。 */
+      /** plate4 に当たった運行の数 (上限で切る前。`truncated` なら上限 + 1 で止まる)。 */
       operations: number;
-      /** KUDGSIR が無かった (404) / 運行 NO が数字でなかった運行の数。 */
+      /** zip を取って KUDGSIR を読めた運行の数。 */
+      fetched: number;
+      /** KUDGSIR が無い・運行 NO の形が違う運行の数。 */
       skipped: number;
-      /** 対象の運行が上限 ({@link RESCAN_MAX_OPERATIONS}) を超え、新しい方だけ読んだ。 */
+      /** zip の取得が失敗した運行の数と、最初の理由。 */
+      failed: number;
+      firstError: string | null;
       truncated: boolean;
-      /** その行の確認の結果 (登録日より後の走行が無い・未来の登録日なら null)。 */
+      /** 走行日が見つかった (書いた / 既にあった / 複数一致) ときの結果。無ければ null。 */
       result: RunConfirmResult | null;
     };
 
 /**
  * 「走行日を探し直す」本体 (Refs #1287)。カードを登録する前に alc へ取り込み済みの運行は cron の
- * 確認段 (`confirmRunsFromTollCsv`) が見ないので、行 1 つについて alc の運行を読み直す。
+ * 確認段 (`confirmRunsFromTollCsv`) が見ず、取り込み済みの zip には KUDGSIR.csv が無いことがあるので、
+ * 行 1 つについて運行 1 件ぶんの zip を theearth から取り直す。
  *
  * 1. `GET /api/internal/operations?date_from&date_to&page&per_page` で、実効の登録日〜今日
- *    (`runSearchWindow`) の**読取日**の運行を全ページ引く (読取日は運行日と同じか遅い)。
+ *    (`runSearchWindow`) の**読取日**の運行を全ページ引く (一覧は読取日の新しい順)。
  *    **plate4 は車輌CD の下 4 桁 (`車輌CD % 10000`) で、一覧の `vehicle_cd` は完全一致の絞り込みなので
- *    問いには載せない**。一覧の `vehicle_cd` が plate4 に当たる運行 (と `vehicle_cd` の無い運行) だけを残す
- * 2. 各運行の `GET /api/internal/operations/{運行NO}/csv/kudgsir` (`{headers, rows}`) を読む。404 は飛ばして数える
- * 3. 集めた料金所の行を確認段と同じ判定 (`confirmRunsFromTolls`) に 1 回で通す。行 id で絞る
+ *    問いには載せない**。`vehicle_cd` が plate4 に当たる運行 (と `vehicle_cd` の無い運行) だけを残す
+ * 2. 新しい順に最大 {@link RESCAN_MAX_OPERATIONS} 件、運行 NO から `ope_no_22` / `start_ope` を作り
+ *    (`deriveOpeNoFromUnkoNo`) zip の KUDGSIR を読み、確認段と同じ判定に行 id で絞って通す
+ * 3. 走行日が見つかったら (`none` 以外) 残りの運行は取らない
  *
- * **alc には何も書かない (GET だけ)**。D1 に書くのは確認段が書くもの (run_date / unko_no、複数一致の failed) だけ。
- * 一覧・CSV の 404 以外の非 2xx は {@link RescanUpstreamError} で投げる。
+ * - `tenantId` (呼び手の theearth アカウントの tenant) と行の tenant が違えば `not_found`
+ * - 1 運行の取得の失敗は数えて次へ進む。一覧が読めなければ {@link RescanUpstreamError}
+ *
+ * 呼び手は theearth の同じ会社への同時ログインを避けるため、DO の `enqueueScrape` の中から呼ぶこと。
  */
-export async function rescanRunsForRow(deps: RescanDeps, id: number): Promise<RescanReport> {
+export async function rescanRunsForRow(deps: RescanDeps, tenantId: string, id: number): Promise<RescanReport> {
   const target = await findRescanTarget(deps.db, id);
-  if (!target) return { kind: "not_found" };
+  if (!target || target.tenant_id !== tenantId) return { kind: "not_found" };
   const window = runSearchWindow(deps.now, effectiveRegistrationDate(target.registration_date, target.received_at));
-  const get: AlcGet = (path) => deps.alcGet(target.tenant_id, path);
-  const base = { kind: "done" as const, id, cardNumber: target.card_number, from: window.from, to: window.to };
-  if (window.from > window.to) return { ...base, operations: 0, skipped: 0, truncated: false, result: null };
+  const report = {
+    kind: "done" as const,
+    id,
+    cardNumber: target.card_number,
+    from: window.from,
+    to: window.to,
+    operations: 0,
+    fetched: 0,
+    skipped: 0,
+    failed: 0,
+    firstError: null as string | null,
+    truncated: false,
+    result: null as RunConfirmResult | null,
+  };
+  if (window.from > window.to) return report;
 
   const unkoNos: string[] = [];
-  let truncated = false;
   for (let page = 1; ; page++) {
     const q = new URLSearchParams({
       date_from: window.from,
@@ -252,7 +259,7 @@ export async function rescanRunsForRow(deps: RescanDeps, id: number): Promise<Re
       page: String(page),
       per_page: String(RESCAN_LIST_PER_PAGE),
     });
-    const res = await get(`/alc-internal-proxy/api/internal/operations?${q}`);
+    const res = await deps.alcGet(tenantId, `/alc-internal-proxy/api/internal/operations?${q}`);
     if (res.status < 200 || res.status >= 300) {
       throw new RescanUpstreamError(`運行の一覧を読めません (${res.status}): ${res.text.slice(0, 200)}`);
     }
@@ -263,40 +270,41 @@ export async function rescanRunsForRow(deps: RescanDeps, id: number): Promise<Re
       const cd = typeof op.vehicle_cd === "string" ? op.vehicle_cd : null;
       if (cd !== null && plate4OfVehicleCd(cd) !== target.plate4) continue;
       if (unkoNos.includes(unko)) continue; // 2 マン運行は crew_role ごとに行がある
-      if (unkoNos.length >= RESCAN_MAX_OPERATIONS) {
-        truncated = true;
-        break;
-      }
       unkoNos.push(unko);
+      if (unkoNos.length > RESCAN_MAX_OPERATIONS) break;
     }
     const total = typeof body.total === "number" ? body.total : 0;
-    if (truncated || items.length === 0 || page * RESCAN_LIST_PER_PAGE >= total) break;
+    if (unkoNos.length > RESCAN_MAX_OPERATIONS || items.length === 0 || page * RESCAN_LIST_PER_PAGE >= total) break;
   }
+  report.operations = unkoNos.length;
+  report.truncated = unkoNos.length > RESCAN_MAX_OPERATIONS;
 
-  const tolls: TollRow[] = [];
-  let operations = 0;
-  let skipped = 0;
-  for (const unko of unkoNos) {
-    if (!UNKO_NO_PATH_RE.test(unko)) {
-      skipped++;
+  for (const unko of unkoNos.slice(0, RESCAN_MAX_OPERATIONS)) {
+    const op = deriveOpeNoFromUnkoNo(unko);
+    if (!op) {
+      report.skipped++;
       continue;
     }
-    const res = await get(`/alc-internal-proxy/api/internal/operations/${unko}/csv/kudgsir`);
-    if (res.status === 404) {
-      skipped++;
+    let csv: string | null;
+    try {
+      csv = await deps.fetchTollCsv(op);
+    } catch (err) {
+      report.failed++;
+      report.firstError ??= `${op.opeNo22}: ${errorMessage(err)}`;
       continue;
     }
-    if (res.status < 200 || res.status >= 300) {
-      throw new RescanUpstreamError(`運行 ${unko} の KUDGSIR を読めません (${res.status}): ${res.text.slice(0, 200)}`);
+    if (csv === null) {
+      report.skipped++;
+      continue;
     }
-    const table = JSON.parse(res.text) as { headers?: string[]; rows?: string[][] };
-    tolls.push(...parseTollTable(table.headers ?? [], table.rows ?? []));
-    operations++;
+    report.fetched++;
+    const result = (await confirmRunsFromTollCsv(deps, tenantId, csv, id)).results[0];
+    if (result && result.kind !== "none") {
+      report.result = result;
+      break;
+    }
   }
-
-  const result =
-    tolls.length === 0 ? null : ((await confirmRunsFromTolls(deps, target.tenant_id, tolls, id)).results[0] ?? null);
-  return { ...base, operations, skipped, truncated, result };
+  return report;
 }
 
 // ---------------------------------------------------------------------------

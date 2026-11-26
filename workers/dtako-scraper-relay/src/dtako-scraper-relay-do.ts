@@ -51,6 +51,7 @@ import {
   type TheearthEvidence,
 } from "./theearth-client";
 import {
+  getViaAlcInternalProxy,
   parseAlcUploadResponse,
   recalcPendingViaAlcInternalProxy,
   uploadDtakoZipViaAlcInternalProxy,
@@ -73,6 +74,7 @@ import {
   buildRunConfirmEmail,
   CARD_REGISTER_OFF_MESSAGE,
   decodeCsvBytes,
+  maskCardNumber,
   ETC_ACCOUNT_TYPE_PATH,
   ETC_ACCOUNT_TYPE_STORAGE_KEY,
   fetchEtcAccountType,
@@ -85,6 +87,7 @@ import {
 import { readZipFile } from "./zip-entry";
 import {
   confirmRunsFromTollCsv,
+  rescanRunsForRow,
   runCardRegistrations,
   type CardRegisterDb,
   type CardRegisterReport,
@@ -1469,6 +1472,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (X-Alc-Proxy-Secret) からだけ届く (/internal/* は index.ts が外から転送しない)。
     if (url.pathname === "/internal/etc-card-register" && request.method === "POST") {
       return this.handleInternalEtcCardRegister(request);
+    }
+    // ETC カードの「走行日を探し直す」(Refs #1287)。index.ts の `POST /etc-card/rescan`
+    // (X-Alc-Proxy-Secret) が行の tenant の会社の DO (`scraper-comp-{comp_id}`) へ転送する。
+    if (url.pathname === "/internal/etc-card-rescan" && request.method === "POST") {
+      return this.handleInternalEtcCardRescan(request);
     }
     // この DO (`etc-{user_id}`) が ETC cron のログインで記録した種別 (Refs #1287)。担当アカウントの
     // 判定 (`pickCardRegisterAccount`) が他の DO・index.ts から読む。storage を読むだけ。
@@ -3835,6 +3843,97 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       return Response.json({ error: describeUnknownError(err) }, { status: 500 });
     }
+  }
+
+  /**
+   * POST /internal/etc-card-rescan — body {id, comp_id}。ETC カード 1 行の走行日を、この会社
+   * (`scraper-comp-{comp_id}`) の theearth から運行 1 件ぶんの zip を取り直して探す (Refs #1287)。
+   * 1 件の zip でも stage 2 が長く、最大 20 運行取るので **202 で受け、dtako の取り込みと同じキュー
+   * (`enqueueScrape`) に載せて後で回す** (同じ会社の theearth へ同時にログインしない)。
+   * 結果は relay のログ 1 行だけ (メールは送らない)。
+   */
+  private async handleInternalEtcCardRescan(request: Request): Promise<Response> {
+    let body: { id?: unknown; comp_id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const id = body.id;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+      return Response.json({ error: "id (正の整数) が必要です" }, { status: 400 });
+    }
+    if (resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE) === "off") {
+      return Response.json({ error: CARD_REGISTER_OFF_MESSAGE }, { status: 503 });
+    }
+    if (!this.env.DTAKO_DB) {
+      return Response.json({ error: "DTAKO_DB が未設定です" }, { status: 503 });
+    }
+    const account = typeof body.comp_id === "string" ? await this.resolveAccount(body.comp_id) : null;
+    if (!account) {
+      return Response.json({ error: "comp_id が DTAKO_ACCOUNTS に見つかりません" }, { status: 503 });
+    }
+    this.ctx.waitUntil(
+      this.enqueueScrape(() => this.runEtcCardRescan(account, id)).catch((err) => {
+        console.error(
+          JSON.stringify({ cron: "etc-card-rescan", comp_id: account.comp_id, id, status: "error", error: describeUnknownError(err) }),
+        );
+      }),
+    );
+    return Response.json({ accepted: true, id, comp_id: account.comp_id }, { status: 202 });
+  }
+
+  /**
+   * 「走行日を探し直す」1 行ぶん (Refs #1287)。**`enqueueScrape` の中から呼ぶこと。**
+   * 判定と D1 の書き方は `etc-card-register-run.ts` の `rescanRunsForRow`。ここは配線だけ:
+   * 運行の一覧は alc の内部用の口 (GET だけ)、zip は `/cron/dtako/operation-zip` と同じ
+   * `downloadOperationCsvZip` (ログインは job で 1 回にまとめる)。**alc へは上げない**
+   * (upload は has_kudgivt をリセットする)。
+   */
+  private async runEtcCardRescan(account: DtakoAccountRaw, id: number): Promise<void> {
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const authWorker = this.env.AUTH_WORKER;
+    const jobState = this.makeTheearthLoginJobState();
+    const report = await rescanRunsForRow(
+      {
+        db: this.env.DTAKO_DB as unknown as CardRegisterDb,
+        now: new Date(),
+        alcGet: (tenantId, path) =>
+          getViaAlcInternalProxy({ path, sharedSecret, tenantId }, authWorker.fetch.bind(authWorker)),
+        fetchTollCsv: async (op) => {
+          const zip = await this.withTheearthLoginSession(account, jobState, (jar) =>
+            downloadOperationCsvZip(jar, { opeNo: op.opeNo22, startOpe: op.startOpe }),
+          );
+          const csv = await readZipFile(zip, "KUDGSIR.csv");
+          return csv ? decodeCsvBytes(csv) : null;
+        },
+      },
+      account.tenant_id,
+      id,
+    );
+    const logBase = { cron: "etc-card-rescan", comp_id: account.comp_id, id };
+    if (report.kind === "not_found") {
+      console.log(JSON.stringify({ ...logBase, status: "not_found" }));
+      return;
+    }
+    console.log(
+      JSON.stringify({
+        ...logBase,
+        status: "done",
+        card: maskCardNumber(report.cardNumber),
+        range: `${report.from}..${report.to}`,
+        operations: report.operations,
+        fetched: report.fetched,
+        skipped: report.skipped,
+        failed: report.failed,
+        ...(report.firstError !== null ? { first_error: report.firstError.slice(0, 200) } : {}),
+        truncated: report.truncated,
+        kind: report.result?.kind ?? "none",
+        run_date: report.result?.runDate ?? null,
+        theearth_logins: jobState.logins.length,
+      }),
+    );
   }
 
   /**

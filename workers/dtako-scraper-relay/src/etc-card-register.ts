@@ -193,15 +193,7 @@ export interface TollRow {
 /** `KUDGSIR.csv` の本文を読む。必要な列 (運行NO / 車輌CD / 終了日時 / ETC利用) が無ければ loud fail。 */
 export function parseTollCsv(text: string): TollRow[] {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l.trim() !== "");
-  return parseTollTable(splitCsvLine(lines[0] ?? ""), lines.slice(1).map(splitCsvLine));
-}
-
-/**
- * 見出しと行に分かれた `KUDGSIR.csv` を読む (alc の `GET /api/internal/operations/{運行NO}/csv/kudgsir` の
- * `{headers, rows}` もこれで読む)。必要な列が無ければ loud fail。CSV の本文から読む {@link parseTollCsv} と
- * 判定は同じ。
- */
-export function parseTollTable(headers: readonly string[], rows: readonly (readonly string[])[]): TollRow[] {
+  const headers = splitCsvLine(lines[0] ?? "");
   const idx = (name: string) => {
     const i = headers.indexOf(name);
     if (i < 0) throw new CardRegisterDataError(`料金所 CSV (KUDGSIR) に ${name} の列がありません`);
@@ -211,7 +203,8 @@ export function parseTollTable(headers: readonly string[], rows: readonly (reado
   const vehicle = idx("車輌CD");
   const end = idx("終了日時");
   const etc = idx("ETC利用");
-  return rows.map((c) => {
+  return lines.slice(1).map((line) => {
+    const c = splitCsvLine(line);
     return {
       unkoNo: c[unko] ?? "",
       vehicleCd: c[vehicle] ?? "",
