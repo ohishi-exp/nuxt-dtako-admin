@@ -383,7 +383,7 @@ describe("runEtcCardRegister の配線 (登録段)", () => {
     const login = `<form action="/etc/R?funccode=1013000000"><input type="hidden" name="p" value="lp" /><input name="risLoginId" /><input type="password" name="risPassword" /></form>`;
     const input = `<form name="frm" action="/etc/R"><input type="hidden" name="p" value="ip" /><input name="icCardID" /><input name="icCardIDConfirm" />
 <input type="button" name="focusTarget" onclick="submitPage('frm','/etc/R?funccode=1034000000&amp;nextfunc=1034100000')" /></form>`;
-    const confirm = `<p>確認</p><input type="button" name="focusTarget" onclick="submitPage('frm','/etc/R?funccode=1034100000&amp;nextfunc=1034110000')" />`;
+    const confirm = `<p>確認</p><INPUT type="button" class="btn" value="  次へ  " onClick="submitPage('frm','/etc/R?funccode=1034100000&nextfunc=1034110000');">`;
     const pages = [top, login, input, confirm];
     const calls: string[] = [];
     const f = vi.fn(async (url: string) => {
