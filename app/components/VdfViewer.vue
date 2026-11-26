@@ -13,6 +13,8 @@ export interface VdfSegment {
   rearUrl: string | null
   telemetry: VdfTelemetry
   duration: number
+  /** 元の `.vdf` (ページが持っている時だけ)。あれば「.vdf をダウンロード」を出す (dvr-viewer 用)。 */
+  sourceBlob?: Blob
 }
 </script>
 
@@ -215,6 +217,17 @@ function toggleLoopRange() {
   const els = [frontVideoEl.value, rearVideoEl.value].filter((el): el is HTMLVideoElement => el !== null)
   els.forEach(el => el.play().catch(() => {}))
   isPlaying.value = true
+}
+
+/** 元の `.vdf` を保存できるセグメント (1 ファイル表示で、ページが原本を渡した時だけ)。 */
+const downloadableSource = computed(() => {
+  const seg = props.segments.length === 1 ? props.segments[0] : undefined
+  return seg?.sourceBlob ? seg : null
+})
+
+function downloadSource() {
+  const seg = downloadableSource.value
+  if (seg?.sourceBlob) downloadBlob(seg.sourceBlob, seg.fileName || 'dvr.vdf')
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -446,14 +459,25 @@ function fmtDateTime(unixSeconds: number): string {
           <div><span class="text-gray-500">後方フレーム数:</span> <span class="font-medium">{{ mergedTelemetry.rear_frame_count }}</span></div>
         </div>
 
-        <UButton
-          :label="isPlaying ? '一時停止' : '再生'"
-          :icon="isPlaying ? 'i-lucide-pause' : 'i-lucide-play'"
-          size="xs"
-          color="neutral"
-          variant="soft"
-          @click="togglePlayback"
-        />
+        <div class="flex items-center gap-2">
+          <UButton
+            v-if="downloadableSource"
+            label=".vdf をダウンロード"
+            icon="i-lucide-download"
+            size="xs"
+            color="neutral"
+            variant="soft"
+            @click="downloadSource"
+          />
+          <UButton
+            :label="isPlaying ? '一時停止' : '再生'"
+            :icon="isPlaying ? 'i-lucide-pause' : 'i-lucide-play'"
+            size="xs"
+            color="neutral"
+            variant="soft"
+            @click="togglePlayback"
+          />
+        </div>
       </div>
       <p class="text-xs text-gray-400 mt-2">
         下のグラフのシークバー・区間選択バーでも位置を移動できます。

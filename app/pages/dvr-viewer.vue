@@ -399,6 +399,8 @@ async function openNotification(n: DvrNotification) {
       rearUrl,
       telemetry: result.telemetry,
       duration,
+      // 「.vdf をダウンロード」用に原本を持つ (取り直さずに保存できる)
+      sourceBlob: new Blob([buf], { type: 'application/octet-stream' }),
     }]
     viewingFileName.value = n.fileName
   }
