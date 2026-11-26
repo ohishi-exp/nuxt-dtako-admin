@@ -254,6 +254,20 @@ KINTAI_COMP_IDS = "75700192"
 # フォールバックするので、切り戻しはこの 1 行を off に戻すだけ。
 UPSTREAM_CACHE = "on"
 
+# ETC コーポレートカードの追加登録 (etc-meisai.jp、Refs #1287)。**ここには値を書かない —
+# dashboard の plain 変数 + keep_vars = true** (ETC_ACCOUNTS と同じ作法。[vars] に書くと
+# deploy がその値で上書きし、dashboard で切り替えられなくなる)。
+#
+#   ETC_CARD_REGISTER_USER_ID = 登録に使う ETC_ACCOUNTS の user_id (1 つ)。
+#                               未設定なら cron は登録を回さず、POST /etc-card/register は 503。
+#   ETC_CARD_REGISTER_MODE    = "live" のときだけ確認画面の先 (完了) まで進む。
+#                               未設定・それ以外は dry-run (確認画面で止め、HTML を R2
+#                               `{ETC_R2_PREFIX}-card-register/` に置く)。
+#
+# 走行日の確認は DTAKO_CRON の zip 登録の後 (zip の KUDGSIR.csv から run_date を書く)、
+# 登録は ETC_CRON の 21 時 (UTC) の tick だけ (cron 式は増やさない。`isCardRegisterTick`)。
+# staging / preview は D1 を本番と共有するので、どちらにも置かないこと (同じ行を 2 か所から触る)。
+
 # dtako 日次スクレイプが失敗したことを人へ知らせる LINE WORKS の宛先
 # (SCRAPE_ALERT_TARGET、Refs #967)。**ここには値を書かない — dashboard の plain
 # 変数 + keep_vars = true** (ETC_ACCOUNTS と同じ作法。[vars] に書くと deploy が

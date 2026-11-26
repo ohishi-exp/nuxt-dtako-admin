@@ -92,6 +92,9 @@ export interface RelayWorkerEnv {
    * 消える (Refs #367)。 */
   DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
+  /** ETC カード追加登録に使う ETC_ACCOUNTS の user_id (Refs #1287)。dashboard の plain 変数。
+   * 未設定なら cron は登録を回さず、手動口は 503。 */
+  ETC_CARD_REGISTER_USER_ID?: string;
   /** auth-worker への service binding (勤怠では使わない)。 */
   AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding。本番 (top-level) にだけある。
@@ -401,6 +404,11 @@ export default {
       return handleEtcRun(request, env);
     }
 
+    if (url.pathname === "/etc-card/register" && request.method === "POST") {
+      // ETC カード追加登録の「今すぐ登録」(Refs #1287)。front の画面から service binding 越し
+      return handleEtcCardRegister(request, env);
+    }
+
     if (url.pathname === "/ws/scraper") {
       // SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) は comp_id 単位で
       // DO を分けることで同一企業への並列リクエストを自然に直列化する。comp_id が
@@ -472,6 +480,8 @@ export default {
               scraperMode: env.SCRAPER_MODE,
               dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
               etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
+              // ETC カード追加登録 (Refs #1287)。21 時 (UTC) の tick だけ cron.ts が使う
+              etcCardRegisterUserId: env.ETC_CARD_REGISTER_USER_ID,
               // KV 読み取りの例外は握らない (`resolveKvConfigRaw` の方針)。伝播させて
               // cron の実行ごと失敗させる — 宛先が確定できないまま古い plain 変数で
               // 日報を送るより、送らずに Observability に出す方を選ぶ。
@@ -1713,6 +1723,52 @@ export async function handleEtcRun(request: Request, env: RelayWorkerEnv): Promi
 
   return new Response(JSON.stringify({ results }), {
     status: results.some((r) => r.ok) ? 200 : 502,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /etc-card/register` — body `{"id": number}`。D1 `etc_card_registrations` の 1 件について
+ * 運行データから走行日を照合し、etc-meisai.jp へカード追加登録する (Refs #1287。既定は dry-run)。
+ *
+ * 関門は他の `*-run` と同じ `X-Alc-Proxy-Secret` (= `INTERNAL_SHARED_SECRET`) の constant-time
+ * 検証 1 つ (front の `server/utils/scraper-relay.ts` が付けるヘッダ)。本体は登録用アカウントの
+ * DO (`etc-{ETC_CARD_REGISTER_USER_ID}`) の `/internal/etc-card-register` — cron の登録・
+ * CSV 取得と同じキューで直列に走る (同じアカウントへ同時にログインしない)。
+ * DO の応答 (status と本文) をそのまま返す。
+ */
+export async function handleEtcCardRegister(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  const userId = env.ETC_CARD_REGISTER_USER_ID;
+  if (!userId) return fail(503, "ETC_CARD_REGISTER_USER_ID が未設定です");
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return fail(400, "JSON body が必要です");
+  }
+  const id = (body as { id?: unknown } | null)?.id;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+    return fail(400, "id (正の整数) が必要です");
+  }
+
+  const res = await env.RELAY.get(env.RELAY.idFromName(`etc-${userId}`)).fetch(
+    "https://relay.internal/internal/etc-card-register",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) },
+  );
+  return new Response(await res.text(), {
+    status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }

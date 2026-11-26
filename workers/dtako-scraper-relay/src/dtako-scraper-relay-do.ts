@@ -60,10 +60,28 @@ import {
   EtcMeisaiClientError,
   EtcMeisaiNoUsageError,
   EtcMeisaiNotCsvError,
+  etcLogin,
+  registerEtcCard,
   resolveScrapeMonthAnchor,
   scrapeEtcCsv,
+  type EtcSession,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
+import {
+  buildCardRegisterEmail,
+  buildRunConfirmEmail,
+  decodeCsvBytes,
+  resolveCardRegisterMode,
+  type RunConfirmResult,
+} from "./etc-card-register";
+import { readZipFile } from "./zip-entry";
+import {
+  confirmRunsFromTollCsv,
+  runCardRegistrations,
+  type CardRegisterDb,
+  type CardRegisterReport,
+  type CardRegisterTarget,
+} from "./etc-card-register-run";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveKvConfigRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
   buildScrapeHistoryEntries,
@@ -1057,6 +1075,11 @@ export interface RelayEnv {
    * ohishi-exp/browser-render-rust#14)。
    */
   ETC_ACCOUNTS?: unknown;
+  /** ETC カード追加登録に使う ETC_ACCOUNTS の user_id (Refs #1287)。dashboard の plain 変数
+   * (`ETC_ACCOUNTS` と同じ作法、`keep_vars = true`)。**未設定なら登録しない** (fail-closed)。 */
+  ETC_CARD_REGISTER_USER_ID?: string;
+  /** `"live"` のときだけ確認画面の先 (完了) まで進む。未設定・それ以外は dry-run (確認画面で止める)。 */
+  ETC_CARD_REGISTER_MODE?: string;
   /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding (Refs ohishi-exp/rust-ichibanboshi#322)。
    * 勤怠の読み書きはここだけ。拘束サマリの写しも `PUT /api/restraint/summaries` で D1 に書く。**本番
    * (top-level) にだけある** — staging・preview は本番 KV・本番 D1 を共有するので置かない。無ければ勤怠の口は 503。 */
@@ -1436,6 +1459,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/internal/etc-scrape" && request.method === "POST") {
       return this.handleInternalEtcScrape(request);
     }
+    // ETC カード追加登録の手動 1 件 (Refs #1287)。index.ts の `POST /etc-card/register`
+    // (X-Alc-Proxy-Secret) からだけ届く (/internal/* は index.ts が外から転送しない)。
+    if (url.pathname === "/internal/etc-card-register" && request.method === "POST") {
+      return this.handleInternalEtcCardRegister(request);
+    }
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
@@ -1767,6 +1795,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           ? { kind: "split_failed", splitFailed: outcome.splitFailed }
           : { kind: "success" },
       );
+      // ETC カード追加登録の確認段 (Refs #1287)。取り込みは上で記録済み。この呼び出しは
+      // 例外を外へ出さない (`confirmEtcRunsFromZip` の doc) — 取り込みの結果を道連れにしない。
+      await this.confirmEtcRunsFromZip(account, zip, range);
       // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
       // 何をしようと、上の記録は変わらない (条件3: fold 失敗が取り込みを道連れ
       // にしない)。cron 経路は元々 ctx.waitUntil の中なので、ここで await して
@@ -3716,7 +3747,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * から解決する (cron dispatch 側に password を運ばせない)。取得した CSV は
    * R2 (DTAKO_R2) に保存する。 */
   private async handleCronEtc(request: Request): Promise<Response> {
-    let body: { user_id?: unknown };
+    let body: { user_id?: unknown; card_register?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -3742,7 +3773,108 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     this.ctx.waitUntil(this.enqueueScrape(() => this.runCronEtcScrape(account)));
-    return Response.json({ accepted: true, user_id: userId }, { status: 202 });
+    // ETC カード追加登録 (Refs #1287)。cron が 21 時 (UTC) の tick に登録用アカウントの DO へ
+    // だけ印を付けてくる (`dispatchEtcAccounts`)。**CSV 取得の後に同じキューで直列に**回す —
+    // 同じ etc-meisai.jp アカウントへ同時にログインしない。
+    const cardRegister = body.card_register === "1" && userId === this.env.ETC_CARD_REGISTER_USER_ID;
+    if (cardRegister) {
+      this.ctx.waitUntil(
+        this.enqueueScrape(() => this.runEtcCardRegister(account, { kind: "cron" })).catch((err) => {
+          console.error(JSON.stringify({ cron: "etc-card-register", status: "error", error: describeUnknownError(err) }));
+        }),
+      );
+    }
+    return Response.json({ accepted: true, user_id: userId, card_register: cardRegister }, { status: 202 });
+  }
+
+  /** POST /internal/etc-card-register — body {id}。手動の「今すぐ登録」(index.ts の
+   * `POST /etc-card/register` が `etc-{ETC_CARD_REGISTER_USER_ID}` の DO へ転送する)。
+   * cron と同じキュー (`enqueueScrape`) に載せ、結果を待って返す。 */
+  private async handleInternalEtcCardRegister(request: Request): Promise<Response> {
+    let body: { id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const id = body.id;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+      return Response.json({ error: "id (正の整数) が必要です" }, { status: 400 });
+    }
+    const userId = this.env.ETC_CARD_REGISTER_USER_ID;
+    const account = userId ? await this.resolveEtcAccount(userId) : null;
+    if (!account) {
+      return Response.json(
+        { error: "ETC_CARD_REGISTER_USER_ID が未設定か ETC_ACCOUNTS に見つかりません" },
+        { status: 503 },
+      );
+    }
+    try {
+      const report = await this.enqueueScrape(() => this.runEtcCardRegister(account, { kind: "one", id }));
+      if (report.notFound) {
+        return Response.json({ error: "対象の行がありません (id 違い、または登録できる状態でない)" }, { status: 404 });
+      }
+      if (report.conflict) {
+        return Response.json({ error: "走行日が未確認 (次の zip 登録で確認される)" }, { status: 409 });
+      }
+      // カード番号は末尾 5 桁まで (メールと同じ)
+      return Response.json({
+        results: report.results.map((r) => ({ ...r, cardNumber: r.cardNumber ? `*${r.cardNumber.slice(-5)}` : null })),
+      });
+    } catch (err) {
+      return Response.json({ error: describeUnknownError(err) }, { status: 500 });
+    }
+  }
+
+  /**
+   * ETC カード追加登録の登録段を 1 回回す (Refs #1287)。**`enqueueScrape` の中から呼ぶこと。**
+   * 対象は確認段 (`confirmEtcRunsFromZip`) が `run_date` を書いた行。判定と D1 の書き方は
+   * `etc-card-register-run.ts`。ここは配線だけ: etc-meisai.jp へのログインは要るときに 1 回、
+   * 結果は取り込み失敗と同じ宛先へメール。
+   */
+  private async runEtcCardRegister(
+    account: EtcAccountEntry,
+    target: CardRegisterTarget,
+  ): Promise<CardRegisterReport> {
+    const db = this.env.DTAKO_DB;
+    const bucket = this.env.DTAKO_R2;
+    if (!db || !bucket) {
+      throw new Error("DTAKO_DB / DTAKO_R2 のどちらかが未設定のため ETC カード登録を回せません");
+    }
+    const now = new Date();
+    const mode = resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE);
+    const jar = createCookieJar();
+    let session: EtcSession | null = null;
+
+    const report = await runCardRegistrations(
+      {
+        db: db as unknown as CardRegisterDb,
+        now,
+        mode,
+        r2Prefix: this.env.ETC_R2_PREFIX || "etc",
+        register: async (fields) => {
+          session ??= await etcLogin(jar, { userId: account.user_id, password: account.password });
+          return registerEtcCard(jar, session, fields, mode);
+        },
+        putHtml: async (key, html) => {
+          await bucket.put(key, html, { httpMetadata: { contentType: "text/html; charset=utf-8" } });
+        },
+      },
+      target,
+    );
+
+    const logBase = { cron: "etc-card-register", target: target.kind, mode };
+    console.log(
+      JSON.stringify({
+        ...logBase,
+        results: report.results.map((r) => ({ id: r.id, kind: r.kind, run_date: r.runDate ?? null })),
+      }),
+    );
+    const mail = buildCardRegisterEmail(report.results, mode, now);
+    if (mail) {
+      await sendScrapeAlertEmail(scrapeAlertEmailDeps(this.env), mail.subject, mail.body, logBase);
+    }
+    return report;
   }
 
   private async resolveEtcAccount(userId: string): Promise<EtcAccountEntry | null> {
@@ -3754,6 +3886,56 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error("DtakoScraperRelayDO: ETC_ACCOUNTS parse error:", describeUnknownError(err));
       return null;
     }
+  }
+
+  /**
+   * ETC カード追加登録の**確認段** (Refs #1287)。dtako の cron が alc へ zip を登録した**後**に、
+   * 手元の zip の `KUDGSIR.csv` から `waiting_run` の行の走行日を確かめて `run_date` を書く
+   * (`confirmRunsFromTollCsv`)。対象は zip のアカウントの tenant の行だけ。
+   *
+   * **ここで何が起きても取り込み (upload) の結果は変えない** — 例外は全部ここで受け、
+   * ログとメールに出すだけ。KUDGSIR.csv が無い日 (料金所を通っていない) はログ 1 行で終わる。
+   */
+  private async confirmEtcRunsFromZip(
+    account: DtakoAccountEntry,
+    zip: ArrayBuffer,
+    range: { startDate: string; endDate: string },
+  ): Promise<void> {
+    const logBase = { cron: "etc-card-confirm", comp_id: account.comp_id, reading_date: range.startDate };
+    // D1 の binding が無い環境 (登録簿が無い) は機能ごと無い扱い — 毎日の取り込みメールに混ぜない
+    const db = this.env.DTAKO_DB;
+    if (!db) {
+      console.log(JSON.stringify({ ...logBase, status: "skipped", reason: "DTAKO_DB 未設定" }));
+      return;
+    }
+    let results: RunConfirmResult[] = [];
+    let failure: string | null = null;
+    try {
+      const csv = await readZipFile(zip, "KUDGSIR.csv");
+      if (!csv) {
+        console.log(JSON.stringify({ ...logBase, status: "no_kudgsir" }));
+        return;
+      }
+      const report = await confirmRunsFromTollCsv(
+        { db: db as unknown as CardRegisterDb, now: new Date() },
+        account.tenant_id,
+        decodeCsvBytes(csv),
+      );
+      results = report.results;
+      console.log(
+        JSON.stringify({
+          ...logBase,
+          status: "confirmed",
+          non_etc_rows: report.nonEtcRows,
+          results: results.map((r) => ({ id: r.id, kind: r.kind, run_date: r.runDate ?? null })),
+        }),
+      );
+    } catch (err) {
+      failure = describeUnknownError(err);
+      console.error(JSON.stringify({ ...logBase, status: "error", error: failure }));
+    }
+    const mail = buildRunConfirmEmail(results, failure, range.startDate);
+    if (mail) await sendScrapeAlertEmail(scrapeAlertEmailDeps(this.env), mail.subject, mail.body, logBase);
   }
 
   /** ETC スクレイプ本体 (login → 検索 → CSV) + R2 保存。cron (無人実行、waitUntil +

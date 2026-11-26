@@ -23,6 +23,8 @@ import { parseNetprintTargets, type NetprintTarget } from "./netprint-cron";
 // 宣言 (`KINTAI_COMP_ID`) を参照するために再利用する (Refs #981)。この module は
 // import を 1 本も持たない pure なので、cron.ts の「pure に保つ」制約を壊さない。
 import { judgeFoldScope } from "./kintai-relay";
+// etc-card-register.ts も import を持たない pure (ETC カード追加登録の tick 判定、Refs #1287)。
+import { isCardRegisterTick } from "./etc-card-register";
 
 /** dtako 日次スクレイプの cron 式 (UTC)。VPS cron `0 1 * * *` JST と同時刻。 */
 export const DTAKO_CRON = "0 16 * * *";
@@ -361,6 +363,9 @@ export interface CronEnvValues {
   scraperMode?: string;
   dtakoAccountsRaw?: string;
   etcAccountsRaw?: string;
+  /** `ETC_CARD_REGISTER_USER_ID` — ETC カード追加登録に使う ETC_ACCOUNTS の user_id
+   * (Refs #1287)。未設定は登録しない (fail-closed)。 */
+  etcCardRegisterUserId?: string;
   /** `NETPRINT_TARGETS` (KV `netprint_targets` が正、plain 変数は fallback)。
    * 未設定は netprint cron skip (Refs #874)。 */
   netprintTargetsRaw?: string;
@@ -452,10 +457,16 @@ export async function dispatchCompIdTargets(
  * 並列でも同一アカウントへの並列ログインにはならない (DO 内の `scrapeQueue` が直列化)。
  *
  * **`detail` は `HTTP {status}: {本文の先頭 200 文字}`** (他の dispatch と同じ)。
+ *
+ * `cardRegisterUserId` (Refs #1287) を渡すと、その user_id の DO にだけ
+ * `card_register: "1"` を載せる — DO が CSV 取得の**後に直列で** ETC カードの追加登録を回す
+ * (`etc-card-register-run.ts`)。cron が渡すのは 21 時 (UTC) の tick だけ
+ * (`isCardRegisterTick`)。手動の `etc-run` は渡さない (登録には専用の口がある)。
  */
 export async function dispatchEtcAccounts(
   accounts: EtcAccountEntry[],
   callDo: CronDoCall,
+  cardRegisterUserId?: string,
 ): Promise<CronRunResult[]> {
   if (accounts.length === 0) {
     return [{ kind: "etc", target: "*", ok: true, detail: "ETC_ACCOUNTS 未設定のため skip" }];
@@ -463,9 +474,9 @@ export async function dispatchEtcAccounts(
   return Promise.all(
     accounts.map(async (account): Promise<CronRunResult> => {
       try {
-        const res = await callDo(`etc-${account.user_id}`, "/cron/etc", {
-          user_id: account.user_id,
-        });
+        const body: Record<string, string> = { user_id: account.user_id };
+        if (account.user_id === cardRegisterUserId) body.card_register = "1";
+        const res = await callDo(`etc-${account.user_id}`, "/cron/etc", body);
         return {
           kind: "etc",
           target: account.user_id,
@@ -622,7 +633,11 @@ export async function runScheduledCron(
   }
 
   if (cron === ETC_CRON) {
-    return dispatchEtcAccounts(parseEtcAccounts(env.etcAccountsRaw), callDo);
+    return dispatchEtcAccounts(
+      parseEtcAccounts(env.etcAccountsRaw),
+      callDo,
+      isCardRegisterTick(now) ? env.etcCardRegisterUserId || undefined : undefined,
+    );
   }
 
   if (cron === RESTRAINT_SYNC_CRON) {
