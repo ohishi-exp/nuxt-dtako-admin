@@ -1835,6 +1835,7 @@ describe("downloadEditedZip", () => {
       <input type="text" id="MainContent_ucEndDate_txtMonth" name="endM" value="" />
       <input type="text" id="MainContent_ucEndDate_txtDay" name="endD" value="" />
       <input type="submit" id="btnCsvSvr" name="btnCsvSvr" value="ダウンロード" />
+      <select name="ctl00$MainContent$ddlSystem"><option value="1" selected="selected">連動出力形式</option></select>
     </form></body></html>`;
     const fetchImpl = sequenceFetch([html(csvPageHtml), zipResponse()]);
     const buf = await downloadEditedZip(jar, { startDate: "2026-07-01", endDate: "2026-07-07" }, fetchImpl);

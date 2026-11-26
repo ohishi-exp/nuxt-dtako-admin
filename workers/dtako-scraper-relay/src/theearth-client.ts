@@ -407,6 +407,41 @@ export function serializeFormFields(html: string): Record<string, string> {
   return result;
 }
 
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
+/** `attr` (id か name) が `key` に一致する `<select>` の selected value と全 option を返す。
+ * selected 無しは HTML 仕様どおり先頭 option (serializeFormFields と同じ規約)。 */
+function parseSelectOptions(
+  html: string,
+  attr: "id" | "name",
+  key: string,
+): { value: string; options: SelectOption[] } | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<select\\b[^>]*\\b${attr}=["']${escaped}["'][^>]*>([\\s\\S]*?)</select>`, "i");
+  const m = html.match(re);
+  if (!m) return null;
+  const options: SelectOption[] = [];
+  let selected: SelectOption | null = null;
+  for (const om of m[1].matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)) {
+    const valueMatch = om[1].match(/\bvalue=["']([^"']*)["']/i);
+    const option = {
+      value: valueMatch ? valueMatch[1] : "",
+      label: om[2].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim(),
+    };
+    options.push(option);
+    if (/\bselected\b/i.test(om[1])) selected = option;
+  }
+  return { value: (selected ?? options[0] ?? { value: "", label: "" }).value, options };
+}
+
+/** id 指定の [`parseSelectOptions`]。 */
+export function parseSelectOptionsById(html: string, id: string): { value: string; options: SelectOption[] } | null {
+  return parseSelectOptions(html, "id", id);
+}
+
 // ---------------------------------------------------------------------------
 // ログイン
 // ---------------------------------------------------------------------------
@@ -829,6 +864,35 @@ const CSV_FORM_IDS = [
  * **10 桁ゼロ埋め**の option 値。既定は `0000000000` 〜 `9999999999` (= 全員)。 */
 const CSV_DRIVER_FORM_IDS = ["txtDriver_0", "txtDriver_1", "ddlDriver_0", "ddlDriver_1"] as const;
 
+/** 出力ファイル形式の select (Refs #1287)。 */
+export const CSV_SYSTEM_SELECT_NAME = "ctl00$MainContent$ddlSystem";
+/** 出力ファイル形式のうち、料金所 (`KUDGSIR.csv`) と給油 (`KUDGFUL.csv`) を含むもの。 */
+export const CSV_SYSTEM_LABEL = "連動出力形式";
+
+/**
+ * 出力ファイル形式 (`ddlSystem`) を「連動出力形式」に決める form 項目を、**そのページの HTML から**
+ * 組み立てる (Refs #1287)。
+ *
+ * これを送らないと、theearth は連動出力形式でない形式で zip を作る — 日次 cron の zip (alc に
+ * 取り込まれた 50 件すべて) は `KUDGFRY/KUDGIVT/KUDGURI/SokudoData` だけで、画面で連動出力形式を
+ * 選んで取った zip と運行 1 件の zip (`downloadOperationCsvZip`、全フィールドを送る) にある
+ * `KUDGFUL.csv`・`KUDGSIR.csv` が無かった。
+ *
+ * value は決め打ちせず、option の**表示文字列**で探す。見つからなければ null。
+ *
+ * - **GET のページ (stage1) で null なら throw** — 黙って別の形式で取らない (取り込みは通るが
+ *   料金所が欠ける、を繰り返さないため)。画面にこの select があることはユーザーのスクショで確認済み。
+ * - **確認ページ (stage2) で null なら stage1 の value を使い、warn 1 行** — 確認ページにこの select が
+ *   あるかは実物で確かめていない (選択モードの確認ページの記録 #203 からの推定)。推定が外れたときに
+ *   毎日の dtako の取り込みを丸ごと止めないため。
+ */
+function findCsvSystemValue(html: string): string | null {
+  const option = parseSelectOptions(html, "name", CSV_SYSTEM_SELECT_NAME)?.options.find(
+    (o) => o.label === CSV_SYSTEM_LABEL,
+  );
+  return option ? decodeHtmlEntities(option.value) : null;
+}
+
 /** ZIP のマジックバイト (`PK\x03\x04`) で始まるか。 */
 function zipMagicOk(buf: ArrayBuffer): boolean {
   const bytes = new Uint8Array(buf);
@@ -1060,9 +1124,20 @@ export async function downloadCsvZip(
     }
   }
 
+  // 出力ファイル形式 = 連動出力形式 (Refs #1287)。stage1 / stage2 ともに、その段で受けた
+  // ページの option から value を拾って送る ([`findCsvSystemValue`] の doc)。
+  const systemValue = findCsvSystemValue(html);
+  if (systemValue === null) {
+    throw new TheearthPageMismatchError(
+      `CSV ダウンロードページに出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢 (name=${CSV_SYSTEM_SELECT_NAME}) が見つかりません`,
+      buildEvidence(getRes, html, Date.now() - getT0),
+      html,
+    );
+  }
   const stage1Body = new URLSearchParams({
     ...hidden,
     ...dateRange,
+    [CSV_SYSTEM_SELECT_NAME]: systemValue,
     [fields.get("btnCsvSvr")!.name]: fields.get("btnCsvSvr")!.value,
   });
 
@@ -1102,9 +1177,22 @@ export async function downloadCsvZip(
       stage1Html,
     );
   }
+  let stage2SystemValue = findCsvSystemValue(stage1Html);
+  if (stage2SystemValue === null) {
+    console.warn(
+      JSON.stringify({
+        csv_request: "date_range",
+        status: "confirm_page_without_csv_system",
+        message: `確認ページに出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢が無いため、GET のページの値を送る`,
+        value: systemValue,
+      }),
+    );
+    stage2SystemValue = systemValue;
+  }
   const stage2Body = new URLSearchParams({
     ...hidden2,
     ...dateRange,
+    [CSV_SYSTEM_SELECT_NAME]: stage2SystemValue,
     [outputButton.name]: outputButton.value || "ダウンロード",
   });
   const stage2Res = await measurePhase(timer, "stage2", () =>

@@ -48,7 +48,9 @@ import {
   type CookieJar,
   type CsvDateRange,
   type FetchLike,
+  parseSelectOptionsById,
   type ScrapeTimeouts,
+  type SelectOption,
 } from "./theearth-client";
 import {
   extractErrorSnippet,
@@ -2254,31 +2256,8 @@ function assertEditPageNotLocked(html: string): void {
   }
 }
 
-export interface WorkEventOption {
-  value: string;
-  label: string;
-}
-
-/** id 指定で `<select>` の selected value と全 option を返す。selected 無しは
- * HTML 仕様どおり先頭 option (serializeFormFields と同じ規約)。 */
-function parseSelectOptionsById(html: string, id: string): { value: string; options: WorkEventOption[] } | null {
-  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`<select\\b[^>]*\\bid=["']${escaped}["'][^>]*>([\\s\\S]*?)</select>`, "i");
-  const m = html.match(re);
-  if (!m) return null;
-  const options: WorkEventOption[] = [];
-  let selected: WorkEventOption | null = null;
-  for (const om of m[1].matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)) {
-    const valueMatch = om[1].match(/\bvalue=["']([^"']*)["']/i);
-    const option = {
-      value: valueMatch ? valueMatch[1] : "",
-      label: om[2].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim(),
-    };
-    options.push(option);
-    if (/\bselected\b/i.test(om[1])) selected = option;
-  }
-  return { value: (selected ?? options[0] ?? { value: "", label: "" }).value, options };
-}
+/** 作業種別の選択肢 (`value` = 作業種別CD、`label` = 表示名)。 */
+export type WorkEventOption = SelectOption;
 
 /** 指定 id の `<select>` から POST 用 name を抽出する (`findFormFieldById` は
  * `<input>` 専用のため select 用に別実装)。 */

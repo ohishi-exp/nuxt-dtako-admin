@@ -1743,6 +1743,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         {},
         timer,
       );
+      // 日次 zip に料金所 (KUDGSIR.csv) が入っているか (Refs #1287)。ETC カードの走行日の確認段
+      // (`confirmEtcRunsFromZip`) の材料で、無いと確認が一度も動かない (本番の cron の zip で実際に
+      // 4 日続けて無かった)。**取得の段で 1 行だけ warn し、失敗にはしない** — 料金所を通らない日も
+      // ありうるため。確認段の `no_kudgsir` (log) とは status の語で区別する。
+      const zipEntries = listZipEntryNames(zip);
+      if (!zipEntries.includes("KUDGSIR.csv")) {
+        console.warn(JSON.stringify({ ...logBase, status: "cron_zip_without_kudgsir", entries: zipEntries }));
+      }
 
       if (!sharedSecret) {
         const message = `INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)${secretDetail}`;
