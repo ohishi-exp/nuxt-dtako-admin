@@ -1316,13 +1316,18 @@ describe('registerEtcCard', () => {
 </form></body></html>`
 
   const CONFIRM_HTML = (buttons: string) => `<html><body>
-<form name="frm" action="/etc/R" method="post"><input type="hidden" name="p" value="confirm-p" />
+<h2>カードの追加登録 -確認-</h2><p>step 1 お申込 step 2 確認 step 3 完了</p>
+<p>以下の内容でよろしければ、「次へ」ボタンを押してください。</p>
+<FORM name="frm" onSubmit="return false;" action="/etc/R" method="post"><input type="hidden" name="p" value="confirm-p" />
 <input type="hidden" name="icCardIDConfirm" value="x" />
 <input type="checkbox" name="chkCardBox" value="DELROW7" checked />
 ${buttons}</form></body></html>`
-  const BACK = `<input type="button" name="back" value="戻る" onclick="submitPage('frm','${REGISTER_URL}')" />`
-  const GO = `<input type="button" name="go" value="登録" onclick="submitPage('frm','/etc/R?funccode=1034100000&amp;nextfunc=1034300000')" />`
-
+  // 2026-11-26 dry-run の実物と同じ 3 ボタン構成 (大文字タグ・onClick・value の空白も実物どおり)
+  const BACK = `<INPUT type="button" name="focusTarget_Back" value="  戻る  " onClick="submitPage('frm','/etc/R?funccode=1034100000&nextfunc=1034000000');">`
+  const NEXT = (nextfunc = '1034110000') =>
+    `<INPUT type="button" name="focusTarget" value="  次へ  " onClick="submitPage('frm','/etc/R?funccode=1034100000&nextfunc=${nextfunc}');">`
+  const TO_SEARCH = `<INPUT type="button" name="focusTarget_Search" value="利用明細検索に戻る" onClick="submitPage('frm','/etc/R?funccode=1033000000&nextfunc=1033000000');">`
+  const CONFIRM_3 = BACK + NEXT() + TO_SEARCH
   const session = (h: string): EtcSession => ({
     page: { url: BASE, html: h },
     accountType: 'corporate',
@@ -1331,7 +1336,7 @@ ${buttons}</form></body></html>`
   })
 
   it('dry-run: メニューから登録画面 → 「次へ」の URL へ 9 欄を POST して確認画面で止める (checkbox は送らない)', async () => {
-    const { fetch, calls } = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(BACK + GO))])
+    const { fetch, calls } = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(CONFIRM_3))])
     const r = await registerEtcCard(createCookieJar(), session(MENU_HTML), FIELDS, 'dry_run', fetch, 1000)
     expect(r.kind).toBe('confirmed')
     expect(calls).toHaveLength(2)
@@ -1347,18 +1352,18 @@ ${buttons}</form></body></html>`
   })
 
   it('ログイン後ページが既に登録画面なら辿らない。素の href のメニューは GET で辿る', async () => {
-    const a = recordingFetch([html(CONFIRM_HTML(''))])
+    const a = recordingFetch([html(CONFIRM_HTML(CONFIRM_3))])
     expect((await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'dry_run', a.fetch, 1000)).kind).toBe('confirmed')
     expect(a.calls).toHaveLength(1)
 
-    const b = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(''))])
+    const b = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(CONFIRM_3))])
     const menu = '<a href="/etc/R?funccode=1034000000&amp;nextfunc=1034000000">メニュー</a>'
     await registerEtcCard(createCookieJar(), session(menu), FIELDS, 'dry_run', b.fetch, 1000)
     expect(b.calls[0].init.method).toBe('GET')
   })
 
   it('JS ラッパー href (submitPage(funccode,nextfunc)) のメニューも辿る', async () => {
-    const { fetch, calls } = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(''))])
+    const { fetch, calls } = recordingFetch([html(inputHtml()), html(CONFIRM_HTML(CONFIRM_3))])
     const menu = `<form action="/etc/R"><input type="hidden" name="funccode" value="1013000000" /></form>
 <a href="javascript:submitPage('1034000000','1034000000')">カードの追加登録/削除</a>`
     await registerEtcCard(createCookieJar(), session(menu), FIELDS, 'dry_run', fetch, 1000)
@@ -1410,36 +1415,55 @@ ${buttons}</form></body></html>`
     expect(b).toMatchObject({ kind: 'rejected', reason: '入力画面に戻されました' })
   })
 
-  it('live: 確認画面の「戻る」以外のボタン 1 つを押し、完了画面なら registered', async () => {
-    const { fetch, calls } = recordingFetch([html(CONFIRM_HTML(BACK + GO + '<input type="text" name="t" /><input name="u" /><input type="button" value="印刷" onclick="print()" />')), html('<p>カードの追加登録が完了しました</p>')])
+  it('dry-run: 確認画面の「次へ」の遷移先が完了画面 (1034110000) でない / 無ければ rejected (確認画面までしか送らない)', async () => {
+    for (const buttons of [BACK + NEXT('1034000000') + TO_SEARCH, BACK + TO_SEARCH, '']) {
+      const { fetch, calls } = recordingFetch([html(CONFIRM_HTML(buttons))])
+      const r = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'dry_run', fetch, 1000)
+      expect(r).toEqual({
+        kind: 'rejected',
+        html: CONFIRM_HTML(buttons),
+        reason: '確認画面の「次へ」の遷移先が完了画面 (nextfunc=1034110000) ではありません',
+      })
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('live: 確認画面の「次へ」(1034110000) へ送り、「利用明細検索に戻る」には送らない。完了画面なら registered', async () => {
+    const { fetch, calls } = recordingFetch([
+      html(CONFIRM_HTML(CONFIRM_3 + '<input type="text" name="t" /><input name="u" /><input type="button" value="印刷" onclick="print()" />')),
+      html('<p>カードの追加登録が完了しました</p>'),
+    ])
     const r = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', fetch, 1000)
-    expect(r.kind).toBe('registered')
-    expect(calls[1].url).toBe('https://www.etc-meisai.jp/etc/R?funccode=1034100000&nextfunc=1034300000')
+    expect(r).toEqual({ kind: 'registered', html: '<p>カードの追加登録が完了しました</p>' })
+    expect(calls).toHaveLength(2)
+    expect(calls[1].url).toBe('https://www.etc-meisai.jp/etc/R?funccode=1034100000&nextfunc=1034110000')
+    for (const c of calls) {
+      expect(c.url).not.toContain('1033000000')
+      expect(c.url).not.toContain('nextfunc=1034000000')
+    }
     const body = bodyParams(calls[1].init)
     expect(body.get('p')).toBe('confirm-p')
     expect(body.has('chkCardBox')).toBe(false)
   })
 
-  it('live: 登録ボタンを 1 つに決められなければ押さずに rejected', async () => {
-    const GO2 = GO.replace('name="go"', 'value="x"').replace('1034300000', '1034400000')
-    for (const [buttons, n] of [[BACK, 0], [BACK + GO + GO2, 2]] as const) {
-      const { fetch, calls } = recordingFetch([html(CONFIRM_HTML(buttons))])
-      const r = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', fetch, 1000)
-      expect(r).toMatchObject({ kind: 'rejected', reason: `確認画面の登録ボタンを 1 つに決められません (候補 ${n} 個)` })
-      expect(calls).toHaveLength(1)
-    }
+  it('live: 「次へ」が完了画面へ進まなければ押さずに rejected', async () => {
+    const { fetch, calls } = recordingFetch([html(CONFIRM_HTML(BACK + NEXT('1033000000') + TO_SEARCH))])
+    const r = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', fetch, 1000)
+    expect(r).toMatchObject({ kind: 'rejected', reason: '確認画面の「次へ」の遷移先が完了画面 (nextfunc=1034110000) ではありません' })
+    expect(calls).toHaveLength(1)
   })
 
   it('live: 確認画面に form が無ければ rejected', async () => {
-    const { fetch } = recordingFetch([html(`<html>${GO}</html>`)])
+    const { fetch, calls } = recordingFetch([html(`<html>${NEXT()}</html>`)])
     const r = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', fetch, 1000)
     expect(r).toMatchObject({ kind: 'rejected', reason: '確認画面に form がありません' })
+    expect(calls).toHaveLength(1)
   })
 
   it('live: 完了と判定できなければ rejected (原本を返す)', async () => {
-    const a = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', recordingFetch([html(CONFIRM_HTML(GO)), html('<p>?</p>')]).fetch, 1000)
+    const a = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', recordingFetch([html(CONFIRM_HTML(CONFIRM_3)), html('<p>?</p>')]).fetch, 1000)
     expect(a).toEqual({ kind: 'rejected', html: '<p>?</p>', reason: '完了画面と判定できません' })
-    const b = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', recordingFetch([html(CONFIRM_HTML(GO)), html('<span class="error-msg">期限切れ</span>')]).fetch, 1000)
+    const b = await registerEtcCard(createCookieJar(), session(inputHtml()), FIELDS, 'live', recordingFetch([html(CONFIRM_HTML(CONFIRM_3)), html('<span class="error-msg">期限切れ</span>')]).fetch, 1000)
     expect(b).toMatchObject({ reason: '完了画面と判定できません (期限切れ)' })
   })
 })

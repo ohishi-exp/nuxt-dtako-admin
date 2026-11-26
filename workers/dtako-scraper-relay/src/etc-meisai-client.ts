@@ -34,6 +34,7 @@ import {
   type FetchLike,
 } from "./theearth-client";
 import {
+  ETC_FUNC_CARD_COMPLETE,
   ETC_FUNC_CARD_CONFIRM,
   ETC_FUNC_CARD_REGISTER,
   extractPageError,
@@ -1283,20 +1284,6 @@ function withoutCheckboxes(form: EtcForm): EtcForm {
   };
 }
 
-/** submit/button 型の input のうち、onclick の遷移先の nextfunc が `allowed` を満たすものを集める。 */
-function buttonTargets(page: EtcPage): { name: string; url: string }[] {
-  const out: { name: string; url: string }[] = [];
-  for (const m of page.html.matchAll(/<input\b[^>]*>/gi)) {
-    const tag = m[0];
-    const type = (getAttr(tag, "type") ?? "text").toLowerCase();
-    if (type !== "submit" && type !== "button") continue;
-    const url = extractOnclickTargetUrl(extractOnclick(tag));
-    if (!url) continue;
-    out.push({ name: getAttr(tag, "name") ?? "", url: new URL(url, page.url).toString() });
-  }
-  return out;
-}
-
 /**
  * ログイン済みの session から「カードの追加登録/削除」(funccode 1034000000) を開き、
  * カード 1 枚の追加登録を **確認画面 (nextfunc 1034100000) まで**進める。`live` のときだけ
@@ -1308,14 +1295,17 @@ function buttonTargets(page: EtcPage): { name: string; url: string }[] {
  * - checkbox は **1 つも送らない** (`withoutCheckboxes`)
  * - 送り先は「次へ」ボタンの onclick の URL で、**その nextfunc が確認画面
  *   (1034100000) でなければ送らずに throw** する (遷移先の取り違えで別の操作を起こさない)
- * - live の 2 段目も、確認画面のボタンのうち登録画面 (1034000000)・確認画面 (1034100000)
- *   以外へ進むものが**ちょうど 1 つ**のときだけ押す。0 個・2 個以上は throw
+ * - 確認画面の「次へ」も、入力画面と同じく name で名指しし、**その nextfunc が完了画面
+ *   (1034110000) でなければ `rejected`** にする。**dry-run でもここまで検査する** (live に
+ *   する前に dry-run で分かるように)。確認画面には「戻る」(1034000000) と
+ *   「利用明細検索に戻る」(1033000000) も並ぶが、名指しなので取り違えない
  *
- * ## 判定は仮置き
+ * ## 判定
  *
- * 確認画面・完了画面の HTML はまだ誰も見ていない (2026-11-26)。入力画面に戻されたか /
- * 完了したかの判定 (`etc-card-register.ts` の `isCardInputPage` / `isCardRegisterDonePage`)
- * は dry-run の実物を見てから確定する。判定できない画面は `rejected` で原本を返す (loud fail)。
+ * 確認画面の実物は 2026-11-26 の dry-run で確認した (ボタンは「戻る」「次へ」「利用明細検索に戻る」の 3 つ)。
+ * 完了画面の HTML はまだ誰も見ていない — 完了の判定 (`etc-card-register.ts` の
+ * `isCardRegisterDonePage`) は仮置きで、最初の live の原本を見て確定する。判定できない画面は
+ * `rejected` で原本を返す (loud fail)。
  */
 export async function registerEtcCard(
   jar: CookieJar,
@@ -1363,25 +1353,23 @@ export async function registerEtcCard(
     const error = extractPageError(confirm.html);
     return { kind: "rejected", html: confirm.html, reason: `入力画面に戻されました${error ? ` (${error})` : ""}` };
   }
-  if (mode !== "live") return { kind: "confirmed", html: confirm.html };
-
-  // 3. live: 確認画面 → 完了
-  const forward = buttonTargets(confirm).filter((b) => {
-    const nf = new URL(b.url).searchParams.get("nextfunc");
-    return nf !== ETC_FUNC_CARD_REGISTER && nf !== ETC_FUNC_CARD_CONFIRM;
-  });
-  if (forward.length !== 1) {
+  const completeUrl = findButtonSubmitPageUrl(confirm.html, CARD_REGISTER_NEXT_BUTTON);
+  const completeTarget = completeUrl ? new URL(completeUrl, confirm.url) : null;
+  if (!completeTarget || completeTarget.searchParams.get("nextfunc") !== ETC_FUNC_CARD_COMPLETE) {
     return {
       kind: "rejected",
       html: confirm.html,
-      reason: `確認画面の登録ボタンを 1 つに決められません (候補 ${forward.length} 個)`,
+      reason: `確認画面の「次へ」の遷移先が完了画面 (nextfunc=${ETC_FUNC_CARD_COMPLETE}) ではありません`,
     };
   }
+  if (mode !== "live") return { kind: "confirmed", html: confirm.html };
+
+  // 3. live: 確認画面の「次へ」→ 完了
   const confirmForm = pickMainForm(parseForms(confirm.html));
   if (!confirmForm) {
     return { kind: "rejected", html: confirm.html, reason: "確認画面に form がありません" };
   }
-  const done = await submitFormToTarget(jar, withoutCheckboxes(confirmForm), {}, forward[0].url, fetchImpl, timeoutMs);
+  const done = await submitFormToTarget(jar, withoutCheckboxes(confirmForm), {}, completeTarget.toString(), fetchImpl, timeoutMs);
   if (isCardRegisterDonePage(done.html)) return { kind: "registered", html: done.html };
   const error = extractPageError(done.html);
   return { kind: "rejected", html: done.html, reason: `完了画面と判定できません${error ? ` (${error})` : ""}` };

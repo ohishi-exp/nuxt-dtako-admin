@@ -383,7 +383,8 @@ describe("runEtcCardRegister の配線 (登録段)", () => {
     const login = `<form action="/etc/R?funccode=1013000000"><input type="hidden" name="p" value="lp" /><input name="risLoginId" /><input type="password" name="risPassword" /></form>`;
     const input = `<form name="frm" action="/etc/R"><input type="hidden" name="p" value="ip" /><input name="icCardID" /><input name="icCardIDConfirm" />
 <input type="button" name="focusTarget" onclick="submitPage('frm','/etc/R?funccode=1034000000&amp;nextfunc=1034100000')" /></form>`;
-    const pages = [top, login, input, "<p>確認</p>"];
+    const confirm = `<p>確認</p><input type="button" name="focusTarget" onclick="submitPage('frm','/etc/R?funccode=1034100000&amp;nextfunc=1034110000')" />`;
+    const pages = [top, login, input, confirm];
     const calls: string[] = [];
     const f = vi.fn(async (url: string) => {
       calls.push(String(url));
@@ -413,7 +414,7 @@ describe("runEtcCardRegister の配線 (登録段)", () => {
     expect(report).toMatchObject({ results: [{ id: 3, kind: "dry_run_ok", runDate: "2026-11-20" }] });
     expect(siteCalls.at(-1)).toContain("nextfunc=1034100000");
     expect(siteCalls).toHaveLength(4);
-    expect(puts).toEqual([{ key: "etc-card-register/3/20261126090000-confirm.html", body: "<p>確認</p>" }]);
+    expect(puts).toEqual([{ key: "etc-card-register/3/20261126090000-confirm.html", body: expect.stringContaining("<p>確認</p>") }]);
     expect(calls[1]!.params[0]).toBe("dry_run_ok");
   });
 

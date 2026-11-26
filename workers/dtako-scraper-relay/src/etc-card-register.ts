@@ -323,9 +323,11 @@ export function buildCardRegisterFields(
 export const ETC_FUNC_CARD_REGISTER = "1034000000";
 /** 確認画面 (step 2) の nextfunc。 */
 export const ETC_FUNC_CARD_CONFIRM = "1034100000";
+/** 完了画面 (step 3) の nextfunc。確認画面の「次へ」の遷移先 (2026-11-26 dry-run で実物を確認)。 */
+export const ETC_FUNC_CARD_COMPLETE = "1034110000";
 
 /** 入力画面に戻されたか (= 入力エラー)。確認欄 `icCardIDConfirm` の入力欄 (hidden でない) が
- * まだ在れば入力画面とみなす。**仮置き — 確認画面の実物はまだ誰も見ていない。** */
+ * まだ在れば入力画面とみなす。確認画面の実物は 2026-11-26 dry-run で確認 (確認欄の入力欄は無い)。 */
 export function isCardInputPage(html: string): boolean {
   for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
     const tag = m[0];
@@ -335,7 +337,7 @@ export function isCardInputPage(html: string): boolean {
   return false;
 }
 
-/** 完了画面の印。**仮置き** — dry-run の確認画面の実物を見てから親が確定する。 */
+/** 完了画面の印。**仮置き** — 完了画面の実物はまだ誰も見ていない。最初の live の原本を見て親が確定する。 */
 export const CARD_REGISTER_DONE_MARKERS = ["登録が完了", "追加登録しました", "登録しました"] as const;
 
 /** 完了画面か。印を含み、かつ入力画面でないこと。 */
