@@ -33,10 +33,24 @@
 /** 登録の進め方。**`live` 以外はすべて dry-run** (確認画面で止める)。 */
 export type CardRegisterMode = "dry_run" | "live";
 
-/** `ETC_CARD_REGISTER_MODE` を読む。`"live"` と完全一致のときだけ完了まで進める。 */
-export function resolveCardRegisterMode(raw: string | undefined): CardRegisterMode {
+/** `ETC_CARD_REGISTER_MODE` の解釈。`off` = 登録段も確認段 (zip の走行日) も回さない。 */
+export type CardRegisterSetting = CardRegisterMode | "off";
+
+/**
+ * `ETC_CARD_REGISTER_MODE` を読む。`"live"` と完全一致のときだけ完了まで進め、`"off"` と完全一致の
+ * ときは機能ごと止める。それ以外 (未設定を含む) は dry-run。
+ *
+ * `off` は staging / preview 用 (wrangler.toml の `[env.*.vars]` が宣言する)。どちらも D1 と
+ * ETC_ACCOUNTS (KV) を本番と共有し ETC_CRON・DTAKO_CRON も持つので、止めないと本番の行に
+ * run_date を書き、同じカードの登録を本番と並んで回す。本番 (top-level) は宣言しない。
+ */
+export function resolveCardRegisterMode(raw: string | undefined): CardRegisterSetting {
+  if (raw === "off") return "off";
   return raw === "live" ? "live" : "dry_run";
 }
+
+/** `off` のときに手動口が返す文言 (503)。 */
+export const CARD_REGISTER_OFF_MESSAGE = "この環境では ETC カード追加登録を止めています (ETC_CARD_REGISTER_MODE=off)";
 
 /** ETC の cron (`ETC_CRON` = 21,22,23,0 時 UTC) のうち、登録を走らせる tick か。
  * **21 時 (UTC) = JST 6 時の 1 回だけ**。cron 式は増やさない (wrangler.toml と

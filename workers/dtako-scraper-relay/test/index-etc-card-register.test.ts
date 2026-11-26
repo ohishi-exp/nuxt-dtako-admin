@@ -78,6 +78,7 @@ describe("handleEtcCardRegister (POST /etc-card/register、Refs #1287)", () => {
   it.each([
     ["secret 不一致", fakeEnv().env, post('{"id":1}', "wrong"), 401],
     ["INTERNAL_SHARED_SECRET 未設定", fakeEnv({ INTERNAL_SHARED_SECRET: undefined }).env, post('{"id":1}'), 503],
+    ["ETC_CARD_REGISTER_MODE=off", fakeEnv({ ETC_CARD_REGISTER_MODE: "off" }).env, post('{"id":1}'), 503],
     ["ETC_ACCOUNTS 未設定", fakeEnv({ ETC_ACCOUNTS: undefined }).env, post('{"id":1}'), 503],
     ["ETC_ACCOUNTS が壊れている", fakeEnv({ ETC_ACCOUNTS: "not-json" }).env, post('{"id":1}'), 503],
     ["JSON でない", fakeEnv().env, post("nope"), 400],
@@ -88,6 +89,15 @@ describe("handleEtcCardRegister (POST /etc-card/register、Refs #1287)", () => {
   ])("%s は DO を叩かずに落とす", async (_label, env, req, status) => {
     const res = await handleEtcCardRegister(req as Request, env as RelayWorkerEnv);
     expect(res.status).toBe(status);
+  });
+
+  it("MODE=off は種別も読まずに 503", async () => {
+    const { env, get } = fakeEnv({ ETC_CARD_REGISTER_MODE: "off" });
+    const res = await handleEtcCardRegister(post('{"id":1}'), env);
+    expect(await res.json()).toEqual({
+      error: "この環境では ETC カード追加登録を止めています (ETC_CARD_REGISTER_MODE=off)",
+    });
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("関門で落ちたら DO を叩かない", async () => {

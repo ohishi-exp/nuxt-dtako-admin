@@ -117,6 +117,17 @@ describe("/cron/etc の登録の印", () => {
     if ((opts as { ownType?: string }).ownType !== "corporate") expect(relayFetch).not.toHaveBeenCalled(); // 個人は他の DO を読まない
   });
 
+  it("ETC_CARD_REGISTER_MODE=off (staging / preview) なら担当でも登録しない (ログに出す)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { d, waits, relayFetch } = makeDo({ ETC_CARD_REGISTER_MODE: "off" }, { ownType: "corporate" });
+    const order = track(d);
+    await d.fetch(post("/cron/etc", { user_id: "etc-reg", card_register: "1" }));
+    await Promise.all(waits);
+    expect(order).toEqual(["scrape"]);
+    expect(relayFetch).not.toHaveBeenCalled();
+    expect(log.mock.calls.flat().join("\n")).toContain("ETC_CARD_REGISTER_MODE=off");
+  });
+
   it("印が無ければ登録段を積まない", async () => {
     const { d, waits } = makeDo({}, { ownType: "corporate" });
     const order = track(d);
@@ -157,6 +168,17 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
     const { d } = makeDo();
     d.runEtcCardRegister = vi.fn();
     expect((await d.fetch(post("/internal/etc-card-register", body))).status).toBe(status);
+    expect(d.runEtcCardRegister).not.toHaveBeenCalled();
+  });
+
+  it("ETC_CARD_REGISTER_MODE=off なら 503 で回さない", async () => {
+    const { d } = makeDo({ ETC_CARD_REGISTER_MODE: "off" });
+    d.runEtcCardRegister = vi.fn();
+    const res = await d.fetch(post("/internal/etc-card-register", { id: 1, user_id: "etc-reg" }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "この環境では ETC カード追加登録を止めています (ETC_CARD_REGISTER_MODE=off)",
+    });
     expect(d.runEtcCardRegister).not.toHaveBeenCalled();
   });
 
@@ -295,6 +317,21 @@ describe("confirmEtcRunsFromZip (確認段の配線)", () => {
     expect(sent).toEqual([]);
   });
 
+  it("ETC_CARD_REGISTER_MODE=off (staging / preview) は D1 を読まずに skip (ログだけ、メールしない)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const sent: unknown[] = [];
+    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null }]);
+    const { d } = makeDo({
+      DTAKO_DB: db,
+      ETC_CARD_REGISTER_MODE: "off",
+      ALERT_EMAIL: { send: async (m: unknown) => void sent.push(m) },
+    });
+    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE);
+    expect(calls).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(log.mock.calls.flat().join("\n")).toContain("ETC_CARD_REGISTER_MODE=off");
+  });
+
   it("KUDGSIR.csv が無い日はログ 1 行で終わる (D1 を読まない)", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { db, calls } = fakeD1([]);
@@ -364,7 +401,12 @@ describe("runEtcCardRegister の配線 (登録段)", () => {
     expect(calls[1]!.params[0]).toBe("dry_run_ok");
   });
 
-  it("DTAKO_DB / R2 が欠けていれば throw", async () => {
+  it("DTAKO_DB / R2 が欠けている・MODE=off なら throw (etc-meisai.jp へ行かない)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("fetch してはいけない"); }));
+    const { d: off } = makeDo({ DTAKO_DB: fakeD1([]).db, ETC_CARD_REGISTER_MODE: "off" });
+    await expect(off.runEtcCardRegister({ user_id: "etc-reg", password: "x" }, { kind: "cron" })).rejects.toThrow(
+      "ETC_CARD_REGISTER_MODE=off",
+    );
     for (const env of [{ DTAKO_DB: undefined }, { DTAKO_R2: undefined }]) {
       const { d } = makeDo({ DTAKO_DB: fakeD1([]).db, ...env });
       await expect(d.runEtcCardRegister({ user_id: "etc-reg", password: "x" }, { kind: "cron" })).rejects.toThrow(

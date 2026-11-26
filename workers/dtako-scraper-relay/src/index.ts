@@ -79,7 +79,9 @@ import { VIEWER_COMPS_PATH, viewerCompIdsForTenant } from "./restraint-viewer-au
 import { respondAnnualReport } from "./min-wage-annual-report";
 import { renderPdf } from "./pdf-render";
 import {
+  CARD_REGISTER_OFF_MESSAGE,
   CARD_REGISTER_UNCONFIRMED_MESSAGE,
+  resolveCardRegisterMode,
   fetchEtcAccountType,
   pickCardRegisterAccount,
 } from "./etc-card-register";
@@ -97,6 +99,9 @@ export interface RelayWorkerEnv {
    * 消える (Refs #367)。 */
   DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
+  /** `"off"` なら ETC カード追加登録の手動口を 503 にする (staging / preview、Refs #1287)。
+   * 解釈は `resolveCardRegisterMode`。 */
+  ETC_CARD_REGISTER_MODE?: string;
   /** auth-worker への service binding (勤怠では使わない)。 */
   AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** 勤怠 Worker (`ichibanboshi-kintai`) への Service Binding。本番 (top-level) にだけある。
@@ -1750,6 +1755,7 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
   if (!proxySecret) return fail(503, "kintai-relay not configured");
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+  if (resolveCardRegisterMode(env.ETC_CARD_REGISTER_MODE) === "off") return fail(503, CARD_REGISTER_OFF_MESSAGE);
 
   let body: unknown;
   try {

@@ -40,9 +40,10 @@ const NOW = new Date('2026-11-26T00:00:00Z')
 describe('resolveCardRegisterMode / isCardRegisterTick', () => {
   it('"live" と完全一致のときだけ live、他は dry-run', () => {
     expect(resolveCardRegisterMode('live')).toBe('live')
-    for (const v of [undefined, '', 'LIVE', 'dry_run', ' live']) {
+    for (const v of [undefined, '', 'LIVE', 'dry_run', ' live', 'OFF', ' off']) {
       expect(resolveCardRegisterMode(v)).toBe('dry_run')
     }
+    expect(resolveCardRegisterMode('off')).toBe('off')
   })
 
   it('21 時 (UTC) だけ true', () => {

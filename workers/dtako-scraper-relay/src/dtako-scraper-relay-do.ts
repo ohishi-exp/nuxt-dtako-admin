@@ -70,6 +70,7 @@ import {
 import {
   buildCardRegisterEmail,
   buildRunConfirmEmail,
+  CARD_REGISTER_OFF_MESSAGE,
   decodeCsvBytes,
   ETC_ACCOUNT_TYPE_PATH,
   ETC_ACCOUNT_TYPE_STORAGE_KEY,
@@ -3810,6 +3811,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
       return Response.json({ error: "id (正の整数) が必要です" }, { status: 400 });
     }
+    if (resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE) === "off") {
+      return Response.json({ error: CARD_REGISTER_OFF_MESSAGE }, { status: 503 });
+    }
     const account = typeof body.user_id === "string" ? await this.resolveEtcAccount(body.user_id) : null;
     if (!account) {
       return Response.json({ error: "user_id が ETC_ACCOUNTS に見つかりません" }, { status: 503 });
@@ -3838,6 +3842,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 前のアカウントの種別が未記録なら回さない (翌日の tick で決まる)。
    */
   private async runCronEtcCardRegisterIfAssigned(account: EtcAccountEntry): Promise<void> {
+    if (resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE) === "off") {
+      console.log(JSON.stringify({ cron: "etc-card-register", status: "skipped", reason: "ETC_CARD_REGISTER_MODE=off" }));
+      return;
+    }
     const own = await this.readOwnEtcAccountType();
     const accounts = own === "corporate" ? await this.resolveEtcAccounts() : [];
     const pick = await pickCardRegisterAccount(
@@ -3876,6 +3884,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     const now = new Date();
     const mode = resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE);
+    // 呼び出し側 (cron の登録段・手動口) が off を先に弾く。ここに来たら配線の誤り
+    if (mode === "off") throw new Error("ETC_CARD_REGISTER_MODE=off のため ETC カード登録を回せません");
     const jar = createCookieJar();
     let session: EtcSession | null = null;
 
@@ -3940,6 +3950,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     range: { startDate: string; endDate: string },
   ): Promise<void> {
     const logBase = { cron: "etc-card-confirm", comp_id: account.comp_id, reading_date: range.startDate };
+    // staging / preview (D1 を本番と共有) は確認段も止める — 本番の行に run_date を書かない
+    if (resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE) === "off") {
+      console.log(JSON.stringify({ ...logBase, status: "skipped", reason: "ETC_CARD_REGISTER_MODE=off" }));
+      return;
+    }
     // D1 の binding が無い環境 (登録簿が無い) は機能ごと無い扱い — 毎日の取り込みメールに混ぜない
     const db = this.env.DTAKO_DB;
     if (!db) {

@@ -259,6 +259,7 @@ UPSTREAM_CACHE = "on"
 # deploy がその値で上書きし、dashboard で切り替えられなくなる)。
 #
 #   ETC_CARD_REGISTER_MODE = "live" のときだけ確認画面の先 (完了) まで進む。
+#                            "off" は登録段も確認段 (zip の走行日) も回さない (staging / preview 用)。
 #                            未設定・それ以外は dry-run (確認画面で止め、HTML を R2
 #                            `{ETC_R2_PREFIX}-card-register/` に置く)。
 #
@@ -268,8 +269,10 @@ UPSTREAM_CACHE = "on"
 #
 # 走行日の確認は DTAKO_CRON の zip 登録の後 (zip の KUDGSIR.csv から run_date を書く)、
 # 登録は ETC_CRON の 21 時 (UTC) の tick だけ (cron 式は増やさない。`isCardRegisterTick`)。
-# **staging / preview に ETC_ACCOUNTS を置かないこと** — D1 を本番と共有し staging も ETC_CRON を
-# 持つので、置くと staging も同じ行の登録を回す (同じ行を 2 か所から触る)。
+# **staging / preview は [env.*.vars] の ETC_CARD_REGISTER_MODE = "off" で登録と確認を止める** —
+# D1 と ETC_ACCOUNTS (KV) を本番と共有し、staging は ETC_CRON・DTAKO_CRON も持つので、止めないと
+# 本番の行に run_date を書き、同じカードの登録を本番と並んで回す (同じ行を 2 か所から触る)。
+# top-level (本番) には書かない (書くと dashboard で切り替えられなくなる)。
 
 # dtako 日次スクレイプが失敗したことを人へ知らせる LINE WORKS の宛先
 # (SCRAPE_ALERT_TARGET、Refs #967)。**ここには値を書かない — dashboard の plain
