@@ -89,7 +89,9 @@ describe("/cron/etc の登録の印", () => {
     expect(await res.json()).toEqual({ accepted: true, user_id: "etc-reg", card_register: true });
     await Promise.all(waits);
     expect(order).toEqual(["scrape", 'register:etc-reg:{"kind":"cron"}']);
-    expect(relayFetch).not.toHaveBeenCalled(); // 先頭なので他の DO は読まない
+    // 担当は先頭 (自分) で決まる。後ろの DO は診断ログ用に 1 回だけ読む (readEtcAccountStates は全件読む)
+    expect(relayFetch).toHaveBeenCalledTimes(1);
+    expect(relayFetch.mock.calls[0][0]).toBe("etc-etc-other");
   });
 
   it("前のアカウントが個人なら、後ろの法人が登録する", async () => {
@@ -151,20 +153,25 @@ describe("/cron/etc の登録の印", () => {
 });
 
 describe("GET /internal/etc-account-type", () => {
-  it("記録済みの種別を返す。未記録・不正な値は null", async () => {
+  it("記録済みの種別・ログイン後パス・機能コード・最後の取得を返す。未記録・不正な値は null", async () => {
     const get = () => new Request("https://relay.internal/internal/etc-account-type");
-    const withPath = makeDo({}, { ownType: "corporate" });
-    withPath.store.set("etc_login_path", "/etc_corp_meisai/top");
-    expect(await (await withPath.d.fetch(get())).json()).toEqual({
+    const empty = { account_type: null, login_path: null, menu_funccodes: null, last_scrape: null };
+    const full = makeDo({}, { ownType: "corporate" });
+    full.store.set("etc_login_path", "/etc/R");
+    full.store.set("etc_menu_funccodes", ["1032000000", "1034000000"]);
+    full.store.set("etc_last_scrape", { at: "2026-11-26T01:00:00.000Z", status: "skipped" });
+    expect(await (await full.d.fetch(get())).json()).toEqual({
       account_type: "corporate",
-      login_path: "/etc_corp_meisai/top",
+      login_path: "/etc/R",
+      menu_funccodes: ["1032000000", "1034000000"],
+      last_scrape: { at: "2026-11-26T01:00:00.000Z", status: "skipped" },
     });
     expect(await (await makeDo({}, { ownType: "corporate" }).d.fetch(get())).json()).toEqual({
+      ...empty,
       account_type: "corporate",
-      login_path: null,
     });
-    expect(await (await makeDo({}, { ownType: "weird" }).d.fetch(get())).json()).toEqual({ account_type: null, login_path: null });
-    expect(await (await makeDo().d.fetch(get())).json()).toEqual({ account_type: null, login_path: null });
+    expect(await (await makeDo({}, { ownType: "weird" }).d.fetch(get())).json()).toEqual(empty);
+    expect(await (await makeDo().d.fetch(get())).json()).toEqual(empty);
   });
 });
 

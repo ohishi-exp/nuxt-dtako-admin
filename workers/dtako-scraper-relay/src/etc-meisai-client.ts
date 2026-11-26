@@ -75,6 +75,8 @@ export class EtcMeisaiNoUsageError extends EtcMeisaiClientError {
   /** ログイン後ページの pathname (クエリは捨てる)。`accountType` と同じく載せる —
    * 種別判定が実物で外れていないかを本番で見るため (Refs #1287)。 */
   loginPath?: string;
+  /** ログイン後ページのメニューの機能コード一覧 (`collectMenuFuncCodes`)。`loginPath` と同じ扱い。 */
+  menuFuncCodes?: string[];
   constructor() {
     super("当該月のご利用はありません (明細 0 件)");
     this.name = "EtcMeisaiNoUsageError";
@@ -472,6 +474,9 @@ export interface EtcSession {
   accountType: EtcAccountType;
   /** ログイン後ページの pathname (クエリは捨てる。Refs #1287 — 種別判定の実測用)。 */
   loginPath: string;
+  /** ログイン後ページのリンクにある 10 桁の機能コード (重複なし・昇順)。種別判定が外れたときに
+   * 実物のメニューを見るための記録 (値は機能コードだけで個人情報を含まない。Refs #1287)。 */
+  menuFuncCodes: string[];
 }
 
 export interface EtcLoginParams {
@@ -479,10 +484,49 @@ export interface EtcLoginParams {
   password: string;
 }
 
-/** ログイン後 URL からアカウント種別を判定する (issue #14: 個人
- * `/etc_user_meisai/` / 法人 `/etc_corp_meisai/` で分岐)。 */
-export function detectAccountType(url: string): EtcAccountType {
-  return url.includes("/etc_corp_meisai/") ? "corporate" : "personal";
+/** ログイン後ページの「カードの追加登録」リンク (法人のメニューにしか無い)。種別判定
+ * (`detectAccountType`) と登録画面への遷移 (`registerEtcCard`) が同じ条件で探す。 */
+export function findCardRegisterLink(html: string): EtcLink | undefined {
+  return parseLinks(html).find(
+    (l) =>
+      l.text.includes("カードの追加登録") ||
+      l.href.includes(ETC_FUNC_CARD_REGISTER) ||
+      l.onclick.includes(ETC_FUNC_CARD_REGISTER),
+  );
+}
+
+/** ログイン後ページからアカウント種別を判定する。**「カードの追加登録」リンクがあれば法人**。
+ *
+ * 以前は URL の `/etc_corp_meisai/` で分けていたが、実物は法人も個人も同じ `/etc/R?funccode=…`
+ * のルーターに来るので必ず個人になっていた (2026-11-26 本番 relay ログ、Refs #1287)。登録を担当
+ * できるか = 登録画面へのリンクがあるか、なので `registerEtcCard` と同じ基準にする。 */
+export function detectAccountType(page: EtcPage): EtcAccountType {
+  return findCardRegisterLink(page.html) ? "corporate" : "personal";
+}
+
+/** ログイン後ページのリンク (href・onclick) にある 10 桁の機能コードを重複なし・昇順で集める
+ * (`funccode=…` と `submitPage('…', …)` の引数)。 */
+export function collectMenuFuncCodes(html: string): string[] {
+  const codes = new Set<string>();
+  for (const l of parseLinks(html)) {
+    for (const s of [l.href, l.onclick]) {
+      for (const m of s.matchAll(/funccode=(\d{10})(?!\d)/g)) codes.add(m[1]);
+      for (const call of s.matchAll(/submitPage\(([^)]*)\)/g)) {
+        for (const m of call[1].matchAll(/['"](\d{10})['"]/g)) codes.add(m[1]);
+      }
+    }
+  }
+  return [...codes].sort();
+}
+
+/** ログイン後ページから `EtcSession` を作る (`etcLogin` と cookie 委譲経路で共有)。 */
+function sessionFromPage(page: EtcPage): EtcSession {
+  return {
+    page,
+    accountType: detectAccountType(page),
+    loginPath: new URL(page.url).pathname,
+    menuFuncCodes: collectMenuFuncCodes(page.html),
+  };
 }
 
 export async function etcLogin(
@@ -534,11 +578,7 @@ export async function etcLogin(
     );
   }
 
-  return {
-    page: afterLogin,
-    accountType: detectAccountType(afterLogin.url),
-    loginPath: new URL(afterLogin.url).pathname,
-  };
+  return sessionFromPage(afterLogin);
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1128,7 @@ export type EtcProgressCallback = (
 export interface EtcScrapeResult extends EtcCsvResult {
   accountType: EtcAccountType;
   loginPath: string;
+  menuFuncCodes: string[];
 }
 
 /**
@@ -1125,6 +1166,7 @@ export async function scrapeEtcCsv(
     if (err instanceof EtcMeisaiNoUsageError) {
       err.accountType = session.accountType;
       err.loginPath = session.loginPath;
+      err.menuFuncCodes = session.menuFuncCodes;
     }
     throw err;
   }
@@ -1133,7 +1175,12 @@ export async function scrapeEtcCsv(
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
 
   onProgress("done");
-  return { ...csv, accountType: session.accountType, loginPath: session.loginPath };
+  return {
+    ...csv,
+    accountType: session.accountType,
+    loginPath: session.loginPath,
+    menuFuncCodes: session.menuFuncCodes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,11 +1233,7 @@ export async function scrapeEtcFromCookies(
 
   onProgress("login"); // 実際は login 済み cookie で開始 (login POST はしない)
   const startPage = await followToPage(jar, startUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
-  const session: EtcSession = {
-    page: startPage,
-    accountType: detectAccountType(startPage.url),
-    loginPath: new URL(startPage.url).pathname,
-  };
+  const session = sessionFromPage(startPage);
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
@@ -1200,7 +1243,12 @@ export async function scrapeEtcFromCookies(
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
 
   onProgress("done");
-  return { ...csv, accountType: session.accountType, loginPath: session.loginPath };
+  return {
+    ...csv,
+    accountType: session.accountType,
+    loginPath: session.loginPath,
+    menuFuncCodes: session.menuFuncCodes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,12 +1324,7 @@ export async function registerEtcCard(
   // 1. メニューから登録画面へ
   let inputPage = session.page;
   if (!findFormWithField(parseForms(inputPage.html), "icCardID")) {
-    const link = parseLinks(inputPage.html).find(
-      (l) =>
-        l.text.includes("カードの追加登録") ||
-        l.href.includes(ETC_FUNC_CARD_REGISTER) ||
-        l.onclick.includes(ETC_FUNC_CARD_REGISTER),
-    );
+    const link = findCardRegisterLink(inputPage.html);
     if (!link) {
       throw new EtcMeisaiClientError(
         "「カードの追加登録/削除」リンクが見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",

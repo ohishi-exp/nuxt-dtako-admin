@@ -280,3 +280,64 @@ export function etcCardErrorText(e: unknown, retry: string): string {
   if (status === 409) return '今の状態ではこの操作はできません。再読み込みしてください'
   return describeCaughtError(e, retry)
 }
+
+// ---------------------------------------------------------------------------
+// ETC アカウントの記録 (relay `GET /etc-card/accounts`、Refs #1287)
+// ---------------------------------------------------------------------------
+
+/** 1 アカウントの記録。user_id は末尾 4 文字 (`user_tail`) しか来ない。記録が無い欄は null */
+export interface EtcAccountState {
+  idx: number
+  user_tail: string
+  account_type: 'corporate' | 'personal' | null
+  login_path: string | null
+  menu_funccodes: string[] | null
+  last_scrape: { at: string, status: 'success' | 'skipped' | 'error' } | null
+  /** relay が DO の記録を読めなかった */
+  error?: true
+}
+
+export interface EtcAccountsResponse {
+  accounts: EtcAccountState[]
+  /** 「今すぐ登録」の担当。found = この user_tail / unconfirmed = この user_tail が未記録で決められない / none = 全員個人 */
+  pick: { kind: 'found' | 'unconfirmed' | 'none', user_tail: string | null }
+}
+
+/** 種別の表示。読めなかった行は「読めず」 */
+export function accountTypeLabel(a: Pick<EtcAccountState, 'account_type' | 'error'>): string {
+  if (a.error) return '読めず'
+  if (a.account_type === 'corporate') return '法人'
+  if (a.account_type === 'personal') return '個人'
+  return '未記録'
+}
+
+const LAST_SCRAPE_LABEL = { success: '成功', skipped: '明細なし', error: '失敗' } as const
+
+/** 最後の取得を `YYYY-MM-DD HH:MM (成否)` (日本時間) で出す。記録が無ければ `-` */
+export function lastScrapeText(last: EtcAccountState['last_scrape']): string {
+  if (!last) return '-'
+  const t = Date.parse(last.at)
+  const when = Number.isNaN(t) ? last.at : new Date(t + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')
+  return `${when} (${LAST_SCRAPE_LABEL[last.status]})`
+}
+
+/** 担当の一文 */
+export function pickText(pick: EtcAccountsResponse['pick']): string {
+  if (pick.kind === 'found') return `登録の担当: ${pick.user_tail}`
+  if (pick.kind === 'unconfirmed') return `法人アカウントが未確認です (${pick.user_tail} の種別がまだ記録されていません)`
+  return '法人アカウントが見つかりません (全アカウントが個人と判定)'
+}
+
+/** 「取り直す」の前に控える、各アカウントの最後の取得の時刻 (並び順) */
+export function lastScrapeStamps(accounts: readonly EtcAccountState[]): (string | null)[] {
+  return accounts.map(a => a.last_scrape?.at ?? null)
+}
+
+/** 控えた時刻から `last_scrape.at` が変わったアカウントの数 (時計は比べない。変わったかだけを見る) */
+export function countUpdatedSince(before: readonly (string | null)[], accounts: readonly EtcAccountState[]): number {
+  return accounts.filter((a, i) => a.last_scrape !== null && a.last_scrape.at !== before[i]).length
+}
+
+/** 「取り直す」の後に読み直す間隔と上限 */
+export const RECHECK_POLL_INTERVAL_MS = 15_000
+export const RECHECK_POLL_LIMIT_MS = 120_000

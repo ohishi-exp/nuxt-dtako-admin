@@ -83,9 +83,10 @@ import {
   CARD_REGISTER_OFF_MESSAGE,
   CARD_REGISTER_UNCONFIRMED_MESSAGE,
   resolveCardRegisterMode,
-  fetchEtcAccountType,
+  fetchEtcAccountRecord,
   maskUserId,
-  pickCardRegisterAccount,
+  pickFromStates,
+  readEtcAccountStates,
 } from "./etc-card-register";
 import { findRescanTarget, type CardRegisterDb } from "./etc-card-register-run";
 import {
@@ -417,6 +418,12 @@ export default {
     if (url.pathname === "/etc-card/register" && request.method === "POST") {
       // ETC カード追加登録の「今すぐ登録」(Refs #1287)。front の画面から service binding 越し
       return handleEtcCardRegister(request, env);
+    }
+
+    if (url.pathname === "/etc-card/accounts" && request.method === "GET") {
+      // ETC アカウントの記録 (種別・ログイン後パス・機能コード・最後の取得) と登録の担当 (Refs #1287)。
+      // front の画面と kyuyo-mcp の get_etc_accounts から service binding 越し
+      return handleEtcCardAccounts(request, env);
     }
 
     if (url.pathname === "/etc-card/rescan" && request.method === "POST") {
@@ -1782,22 +1789,10 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
   } catch (err) {
     return fail(503, err instanceof Error ? err.message : String(err));
   }
-  // 診断ログ用: 読んだ順の種別 (user_id は末尾 4 文字だけ)
-  const checked: { idx: number; user_tail: string; type: string | null }[] = [];
-  const pick = await pickCardRegisterAccount(
-    accounts.map((a) => a.user_id),
-    async (userId) => {
-      const idx = checked.length;
-      try {
-        const type = await fetchEtcAccountType(env.RELAY, userId);
-        checked.push({ idx, user_tail: maskUserId(userId), type });
-        return type;
-      } catch (err) {
-        checked.push({ idx, user_tail: maskUserId(userId), type: "error" });
-        throw err;
-      }
-    },
-  );
+  // 診断ログ用にも使う読み値 (user_id は末尾 4 文字だけ)
+  const userIds = accounts.map((a) => a.user_id);
+  const checked = await readEtcAccountStates(userIds, (userId) => fetchEtcAccountRecord(env.RELAY, userId));
+  const pick = await pickFromStates(userIds, checked);
   console.log(
     JSON.stringify({
       route: "etc-card-register",
@@ -1821,6 +1816,40 @@ export async function handleEtcCardRegister(request: Request, env: RelayWorkerEn
   return new Response(await res.text(), {
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `GET /etc-card/accounts` — `ETC_ACCOUNTS` の各アカウントの DO が記録した種別・ログイン後パス・
+ * 機能コード一覧・最後の取得と、カード追加登録の担当 (`pick`) を返す (Refs #1287)。「ETC アカウントを
+ * 取り直す」(etc-run) は 202 で受けるだけなので、結果はこれで読む。
+ *
+ * 関門は `/etc-card/register` と同じ `X-Alc-Proxy-Secret` の constant-time 検証 1 つ。読むだけなので
+ * `ETC_CARD_REGISTER_MODE=off` でも返す。user_id は末尾 4 文字だけ (`maskUserId`)。
+ */
+export async function handleEtcCardAccounts(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return json(503, { error: "kintai-relay not configured" });
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return json(401, { error: "Unauthorized" });
+
+  let userIds: string[];
+  try {
+    userIds = parseEtcAccounts(await resolveSecretBinding(env.ETC_ACCOUNTS)).map((a) => a.user_id);
+  } catch (err) {
+    return json(503, { error: err instanceof Error ? err.message : String(err) });
+  }
+  const states = await readEtcAccountStates(userIds, (userId) => fetchEtcAccountRecord(env.RELAY, userId));
+  const pick = await pickFromStates(userIds, states);
+  return json(200, {
+    accounts: states,
+    pick: { kind: pick.kind, user_tail: "userId" in pick ? maskUserId(pick.userId) : null },
   });
 }
 

@@ -26,7 +26,10 @@ import {
   runSearchWindow,
   splitCsvLine,
   type CardRegisterResult,
-  fetchEtcAccountType,
+  fetchEtcAccountRecord,
+  parseEtcAccountRecord,
+  pickFromStates,
+  readEtcAccountStates,
   parseAccountType,
   pickCardRegisterAccount,
   type EtcAccountTypeNamespace,
@@ -395,7 +398,7 @@ describe('pickCardRegisterAccount', () => {
   })
 })
 
-describe('fetchEtcAccountType', () => {
+describe('fetchEtcAccountRecord', () => {
   function ns(res: Response) {
     const calls: string[] = []
     const n: EtcAccountTypeNamespace = {
@@ -410,17 +413,84 @@ describe('fetchEtcAccountType', () => {
     return { n, calls }
   }
 
-  it('etc-{user_id} の DO の種別を読む', async () => {
-    const { n, calls } = ns(Response.json({ account_type: 'corporate' }))
-    expect(await fetchEtcAccountType(n, 'u1')).toBe('corporate')
+  const FULL = {
+    account_type: 'corporate',
+    login_path: '/etc/R',
+    menu_funccodes: ['1032000000', '1034000000'],
+    last_scrape: { at: '2026-11-26T01:00:00.000Z', status: 'success' },
+  }
+
+  it('etc-{user_id} の DO の記録を読む', async () => {
+    const { n, calls } = ns(Response.json(FULL))
+    expect(await fetchEtcAccountRecord(n, 'u1')).toEqual(FULL)
     expect(calls).toEqual(['id:etc-u1 https://relay.internal/internal/etc-account-type'])
   })
 
-  it('記録なし・不正な値・null 本文・異常応答は null', async () => {
-    expect(await fetchEtcAccountType(ns(Response.json({ account_type: null })).n, 'u')).toBeNull()
-    expect(await fetchEtcAccountType(ns(Response.json({ account_type: 'other' })).n, 'u')).toBeNull()
-    expect(await fetchEtcAccountType(ns(Response.json(null)).n, 'u')).toBeNull()
-    expect(await fetchEtcAccountType(ns(new Response('x', { status: 500 })).n, 'u')).toBeNull()
+  it('記録なし・null 本文は各欄 null、異常応答は throw', async () => {
+    const empty = { account_type: null, login_path: null, menu_funccodes: null, last_scrape: null }
+    expect(await fetchEtcAccountRecord(ns(Response.json({ account_type: null })).n, 'u')).toEqual(empty)
+    expect(await fetchEtcAccountRecord(ns(Response.json(null)).n, 'u')).toEqual(empty)
+    await expect(fetchEtcAccountRecord(ns(new Response('x', { status: 500 })).n, 'u')).rejects.toThrow('HTTP 500')
+  })
+})
+
+describe('parseEtcAccountRecord', () => {
+  it('形の合わない欄は null に落とす', () => {
+    expect(
+      parseEtcAccountRecord({
+        account_type: 'other',
+        login_path: 1,
+        menu_funccodes: ['1', 2],
+        last_scrape: { at: 'x', status: 'weird' },
+      }),
+    ).toEqual({ account_type: null, login_path: null, menu_funccodes: null, last_scrape: null })
+    expect(parseEtcAccountRecord({ menu_funccodes: 'x', last_scrape: { status: 'error' } })).toMatchObject({
+      menu_funccodes: null,
+      last_scrape: null,
+    })
+    expect(
+      parseEtcAccountRecord({ menu_funccodes: [], last_scrape: { at: 't', status: 'skipped' } }),
+    ).toMatchObject({ menu_funccodes: [], last_scrape: { at: 't', status: 'skipped' } })
+    expect(parseEtcAccountRecord({ last_scrape: { at: 't', status: 'error' } }).last_scrape).toEqual({
+      at: 't',
+      status: 'error',
+    })
+  })
+})
+
+describe('readEtcAccountStates / pickFromStates', () => {
+  const rec = (account_type: 'personal' | 'corporate' | null) => ({
+    account_type,
+    login_path: '/etc/R',
+    menu_funccodes: ['1032000000'],
+    last_scrape: null,
+  })
+
+  it('並び順に全件読み、user_id は末尾 4 文字、読み失敗は error: true', async () => {
+    const ids = ['user0001', 'user0002', 'user0003']
+    const states = await readEtcAccountStates(ids, async (id) => {
+      if (id === 'user0002') throw new Error('boom')
+      return rec(id === 'user0003' ? 'corporate' : 'personal')
+    })
+    expect(states).toEqual([
+      { idx: 0, user_tail: '*0001', ...rec('personal') },
+      { idx: 1, user_tail: '*0002', account_type: null, login_path: null, menu_funccodes: null, last_scrape: null, error: true },
+      { idx: 2, user_tail: '*0003', ...rec('corporate') },
+    ])
+    expect(JSON.stringify(states)).not.toContain('user000')
+    // 読み失敗は未記録と同じ扱い (前に居れば決めない)
+    expect(await pickFromStates(ids, states)).toEqual({ kind: 'unconfirmed', userId: 'user0002' })
+  })
+
+  it('読み値だけで担当を決める (読み直さない)', async () => {
+    let reads = 0
+    const ids = ['a', 'b']
+    const states = await readEtcAccountStates(ids, async (id) => {
+      reads += 1
+      return rec(id === 'b' ? 'corporate' : 'personal')
+    })
+    expect(await pickFromStates(ids, states)).toEqual({ kind: 'found', userId: 'b' })
+    expect(reads).toBe(2)
   })
 })
 

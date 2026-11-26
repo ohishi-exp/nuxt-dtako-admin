@@ -78,12 +78,15 @@ import {
   maskUserId,
   ETC_ACCOUNT_TYPE_PATH,
   ETC_ACCOUNT_TYPE_STORAGE_KEY,
+  ETC_LAST_SCRAPE_STORAGE_KEY,
   ETC_LOGIN_PATH_STORAGE_KEY,
-  fetchEtcAccountType,
-  parseAccountType,
-  pickCardRegisterAccount,
+  ETC_MENU_FUNCCODES_STORAGE_KEY,
+  fetchEtcAccountRecord,
+  parseEtcAccountRecord,
+  pickFromStates,
+  readEtcAccountStates,
   resolveCardRegisterMode,
-  type CardRegisterAccountType,
+  type EtcAccountRecord,
   type RunConfirmResult,
 } from "./etc-card-register";
 import { readZipFile } from "./zip-entry";
@@ -1483,11 +1486,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // この DO (`etc-{user_id}`) が ETC cron のログインで記録した種別 (Refs #1287)。担当アカウントの
     // 判定 (`pickCardRegisterAccount`) が他の DO・index.ts から読む。storage を読むだけ。
     if (url.pathname === ETC_ACCOUNT_TYPE_PATH && request.method === "GET") {
-      const loginPath = await this.ctx.storage.get(ETC_LOGIN_PATH_STORAGE_KEY);
-      return Response.json({
-        account_type: await this.readOwnEtcAccountType(),
-        login_path: typeof loginPath === "string" ? loginPath : null,
-      });
+      return Response.json(await this.readOwnEtcAccountRecord());
     }
 
     if (request.headers.get("Upgrade") !== "websocket") {
@@ -3961,24 +3960,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.log(JSON.stringify({ cron: "etc-card-register", status: "skipped", reason: "ETC_CARD_REGISTER_MODE=off" }));
       return;
     }
-    const own = await this.readOwnEtcAccountType();
-    const accounts = own === "corporate" ? await this.resolveEtcAccounts() : [];
-    // 診断ログ用: 読んだ順の種別 (user_id は末尾 4 文字だけ)
-    const checked: { idx: number; user_tail: string; type: string | null }[] = [];
-    const pick = await pickCardRegisterAccount(
-      accounts.map((a) => a.user_id),
-      async (userId) => {
-        const idx = checked.length;
-        try {
-          const type = userId === account.user_id ? own : await fetchEtcAccountType(this.env.RELAY, userId);
-          checked.push({ idx, user_tail: maskUserId(userId), type });
-          return type;
-        } catch (err) {
-          checked.push({ idx, user_tail: maskUserId(userId), type: "error" });
-          throw err;
-        }
-      },
+    const ownRecord = await this.readOwnEtcAccountRecord();
+    const own = ownRecord.account_type;
+    const userIds = (own === "corporate" ? await this.resolveEtcAccounts() : []).map((a) => a.user_id);
+    // 診断ログ用にも使う読み値 (user_id は末尾 4 文字だけ)
+    const checked = await readEtcAccountStates(userIds, async (userId) =>
+      userId === account.user_id ? ownRecord : fetchEtcAccountRecord(this.env.RELAY, userId),
     );
+    const pick = await pickFromStates(userIds, checked);
     if (pick.kind !== "found" || pick.userId !== account.user_id) {
       console.log(
         JSON.stringify({
@@ -3995,9 +3984,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     await this.runEtcCardRegister(account, { kind: "cron" });
   }
 
-  /** この DO が記録したアカウント種別 (未記録は `null`)。 */
-  private async readOwnEtcAccountType(): Promise<CardRegisterAccountType | null> {
-    return parseAccountType(await this.ctx.storage.get(ETC_ACCOUNT_TYPE_STORAGE_KEY));
+  /** この DO が ETC cron のログインで記録した種別・ログイン後パス・機能コード・最後の取得 (未記録は `null`)。 */
+  private async readOwnEtcAccountRecord(): Promise<EtcAccountRecord> {
+    const s = this.ctx.storage;
+    return parseEtcAccountRecord({
+      account_type: await s.get(ETC_ACCOUNT_TYPE_STORAGE_KEY),
+      login_path: await s.get(ETC_LOGIN_PATH_STORAGE_KEY),
+      menu_funccodes: await s.get(ETC_MENU_FUNCCODES_STORAGE_KEY),
+      last_scrape: await s.get(ETC_LAST_SCRAPE_STORAGE_KEY),
+    });
   }
 
   /**
@@ -4126,11 +4121,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** ETC スクレイプ本体 (login → 検索 → CSV) + R2 保存。cron (無人実行、waitUntil +
    * console.log のみ) と手動 WS トリガー (`/ws/scraper?kind=etc`、進捗を browser に
-   * 中継しつつ同じ結果を返す) の両方から共有する。 */
+   * 中継しつつ同じ結果を返す) の両方から共有する。出口 (成功・0 件・エラー) はどれもここを通るので、
+   * 最後の取得の時刻と成否 (`etc_last_scrape`) は 1 か所で置く (エラー本文は置かない。Refs #1287)。 */
   private async performEtcScrape(
     account: EtcAccountEntry,
     onStep: (step: string, message?: string) => void,
     now: Date = new Date(),
+  ): Promise<EtcScrapeOutcome> {
+    const outcome = await this.performEtcScrapeBody(account, onStep, now);
+    await this.ctx.storage.put(ETC_LAST_SCRAPE_STORAGE_KEY, { at: new Date().toISOString(), status: outcome.status });
+    return outcome;
+  }
+
+  private async performEtcScrapeBody(
+    account: EtcAccountEntry,
+    onStep: (step: string, message?: string) => void,
+    now: Date,
   ): Promise<EtcScrapeOutcome> {
     const bucket = this.env.DTAKO_R2!;
     const prefix = this.env.ETC_R2_PREFIX || "etc";
@@ -4145,6 +4151,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // 種別を記録する (ETC カード追加登録の担当判定、Refs #1287)。ログインは CSV 取得の 1 回だけ
       await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, result.accountType);
       await this.ctx.storage.put(ETC_LOGIN_PATH_STORAGE_KEY, result.loginPath);
+      await this.ctx.storage.put(ETC_MENU_FUNCCODES_STORAGE_KEY, result.menuFuncCodes);
       console.log(
         JSON.stringify({
           etc_scrape: "account_type_stored",
@@ -4152,6 +4159,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           outcome: "success",
           stored: result.accountType,
           login_path: result.loginPath,
+          menu_funccodes: result.menuFuncCodes,
         }),
       );
       const key = etcCsvKey(prefix, account.user_id, now);
@@ -4172,6 +4180,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         if (err.accountType) {
           await this.ctx.storage.put(ETC_ACCOUNT_TYPE_STORAGE_KEY, err.accountType);
           await this.ctx.storage.put(ETC_LOGIN_PATH_STORAGE_KEY, err.loginPath);
+          await this.ctx.storage.put(ETC_MENU_FUNCCODES_STORAGE_KEY, err.menuFuncCodes);
           console.log(
             JSON.stringify({
               etc_scrape: "account_type_stored",
@@ -4179,6 +4188,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
               outcome: "no_usage",
               stored: err.accountType,
               login_path: err.loginPath,
+              menu_funccodes: err.menuFuncCodes,
             }),
           );
         }

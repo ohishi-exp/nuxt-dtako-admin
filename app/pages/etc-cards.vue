@@ -10,12 +10,22 @@
  *   - 行ごとの「登録日」(空なら受信日)。relay はこの日より前の走行を、そのカードの利用日にしない
  *   - ヘッダの「ETC アカウントを取り直す」(ETC 明細 CSV の取得を cron と同じ道で 1 回走らせ、各アカウントの
  *     法人/個人の種別を relay に記録し直させる。「今すぐ登録」の担当判定に使われる)
+ *   - ヘッダ直下の「ETC アカウント」の表 (relay が記録した種別・ログイン後のパス・機能コード・最後の取得と担当)。
+ *     「取り直す」の後は、押す前に読んだ各アカウントの最後の取得の時刻が変わるまで読み直す
  * カード番号は末尾 5 桁しか受け取らない (API が全桁を返さない)。
  * 下に複合機の資格情報 (purpose `etc-scan`) の発行・一覧を置く (部品 `MachineCredentials`、`/fuel/credentials` と共有)。
  */
 import { currentAccessToken } from '~/utils/api'
 import { describeCaughtError } from '~/utils/api-error'
 import {
+  RECHECK_POLL_INTERVAL_MS,
+  RECHECK_POLL_LIMIT_MS,
+  accountTypeLabel,
+  countUpdatedSince,
+  lastScrapeStamps,
+  lastScrapeText,
+  pickText,
+  type EtcAccountsResponse,
   CARD_NUMBER_DIGITS,
   KUBUN,
   OBU_NUMBER_DIGITS,
@@ -178,27 +188,74 @@ async function register(r: EtcCardView) {
   }
 }
 
-// ---- ETC アカウントを取り直す ----
+// ---- ETC アカウント (記録の表と取り直し) ----
+const accounts = ref<EtcAccountsResponse | null>(null)
+const accountsError = ref<string | null>(null)
+
+async function loadAccounts(): Promise<EtcAccountsResponse | null> {
+  try {
+    accounts.value = await $fetch<EtcAccountsResponse>('/api/etc-cards/accounts', { headers: authHeaders() })
+    accountsError.value = null
+  }
+  catch (e) {
+    accountsError.value = etcCardErrorText(e, '「再読み込み」を押してください')
+  }
+  return accounts.value
+}
+
 /** 結果は行ではなくページ上部に出す (どの行の操作でもないため) */
 const recheckNotice = ref<{ ok: boolean, text: string } | null>(null)
+/** 取り直しの後の読み直し中 (他の操作は止めない。取り直しのボタンだけ止める) */
+const recheckPolling = ref(false)
+let disposed = false
+onBeforeUnmount(() => {
+  disposed = true
+})
 
 async function recheckAccounts() {
   busy.value = 'recheck'
   recheckNotice.value = null
+  // 押す前の最後の取得の時刻。更新は「これが変わったか」で見る (時計は比べない)
+  const before = lastScrapeStamps(accounts.value?.accounts ?? [])
+  let res: { total: number, ok: number }
   try {
-    const res = await $fetch<{ total: number, ok: number }>('/api/etc-cards/accounts-recheck', { method: 'POST', body: {}, headers: authHeaders() })
-    recheckNotice.value = {
-      ok: res.ok === res.total,
-      text: `ETC アカウント ${res.total} 件中 ${res.ok} 件で取り直しを受け付けました (ログインは裏で走ります)。`
-        + '1〜2 分おいてから、もう一度「今すぐ登録」を押してください',
-    }
+    res = await $fetch<{ total: number, ok: number }>('/api/etc-cards/accounts-recheck', { method: 'POST', body: {}, headers: authHeaders() })
   }
   catch (e) {
     recheckNotice.value = { ok: false, text: `取り直せませんでした: ${describeCaughtError(e, 'もう一度「ETC アカウントを取り直す」を押してください')}` }
+    return
   }
   finally {
     busy.value = null
   }
+  if (res.ok === 0) {
+    recheckNotice.value = { ok: false, text: `ETC アカウント ${res.total} 件のどれも取り直しを受け付けませんでした` }
+    return
+  }
+  const accepted = `ETC アカウント ${res.total} 件中 ${res.ok} 件で取り直しを受け付けました。`
+  recheckNotice.value = { ok: res.ok === res.total, text: `${accepted}記録が更新されるまで ${RECHECK_POLL_INTERVAL_MS / 1000} 秒おきに読み直します (最大 ${RECHECK_POLL_LIMIT_MS / 60_000} 分)` }
+  recheckPolling.value = true
+  try {
+    for (let waited = 0; waited < RECHECK_POLL_LIMIT_MS; waited += RECHECK_POLL_INTERVAL_MS) {
+      await new Promise(resolve => setTimeout(resolve, RECHECK_POLL_INTERVAL_MS))
+      if (disposed) return
+      const now = await loadAccounts()
+      const updated = now ? countUpdatedSince(before, now.accounts) : 0
+      if (now && updated >= res.ok) {
+        recheckNotice.value = { ok: res.ok === res.total, text: `${accepted}${updated} 件の記録が更新されました。${pickText(now.pick)}` }
+        return
+      }
+    }
+    recheckNotice.value = { ok: false, text: `${accepted}まだ記録が更新されていません (${RECHECK_POLL_LIMIT_MS / 60_000} 分待ちました)。少しおいて「再読み込み」を押してください` }
+  }
+  finally {
+    recheckPolling.value = false
+  }
+}
+
+function reloadAll() {
+  void loadAccounts()
+  return load()
 }
 
 // ---- 走行日を探し直す ----
@@ -224,7 +281,7 @@ const statusColor: Record<EtcCardStatus, 'warning' | 'neutral' | 'info' | 'succe
   failed: 'error',
 }
 
-onMounted(load)
+onMounted(reloadAll)
 </script>
 
 <template>
@@ -236,12 +293,38 @@ onMounted(load)
         icon="i-lucide-user-round-search"
         variant="outline"
         label="ETC アカウントを取り直す"
-        :loading="busy === 'recheck'"
-        :disabled="busy !== null"
+        :loading="busy === 'recheck' || recheckPolling"
+        :disabled="busy !== null || recheckPolling"
         data-testid="accounts-recheck"
         @click="recheckAccounts"
       />
-      <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="loading" @click="load" />
+      <UButton icon="i-lucide-refresh-cw" variant="outline" label="再読み込み" :loading="loading" @click="reloadAll" />
+    </div>
+
+    <!-- ETC アカウント (relay が ETC cron / 取り直しのログインで記録した値。user_id は末尾 4 文字) -->
+    <div class="space-y-1" data-testid="etc-accounts">
+      <h3 class="font-bold text-sm">ETC アカウント</h3>
+      <UAlert v-if="accountsError" color="error" variant="subtle" icon="i-lucide-alert-triangle" :description="`ETC アカウントの記録を読めませんでした: ${accountsError}`" />
+      <template v-if="accounts">
+        <p class="text-sm" data-testid="etc-accounts-pick">{{ pickText(accounts.pick) }}</p>
+        <div class="overflow-x-auto">
+          <table class="etc-table" data-testid="etc-accounts-table">
+            <thead>
+              <tr><th>アカウント</th><th>種別</th><th>ログイン後のパス</th><th>機能コード</th><th>最後の取得</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="a in accounts.accounts" :key="a.idx">
+                <td class="font-mono">{{ a.user_tail }}</td>
+                <td>{{ accountTypeLabel(a) }}</td>
+                <td class="font-mono">{{ a.login_path ?? '-' }}</td>
+                <td class="font-mono text-xs">{{ a.menu_funccodes?.join(' ') || '-' }}</td>
+                <td>{{ lastScrapeText(a.last_scrape) }}</td>
+              </tr>
+              <tr v-if="accounts.accounts.length === 0"><td colspan="5" class="text-muted">ETC_ACCOUNTS にアカウントがありません</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
     </div>
 
     <p class="text-sm text-muted">
