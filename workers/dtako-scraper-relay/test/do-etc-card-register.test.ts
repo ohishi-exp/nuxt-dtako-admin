@@ -22,7 +22,12 @@ import { PromiseQueue } from "../src/promise-queue";
  */
 type Priv = {
   fetch(req: Request): Promise<Response>;
-  confirmEtcRunsFromZip: (account: unknown, zip: ArrayBuffer, range: { startDate: string; endDate: string }) => Promise<void>;
+  confirmEtcRunsFromZip: (
+    account: unknown,
+    zip: ArrayBuffer,
+    range: { startDate: string; endDate: string },
+    jobKey: string,
+  ) => Promise<Record<string, unknown>>;
   env: Record<string, unknown>;
   ctx: { waitUntil(p: Promise<unknown>): void; storage: { get(k: string): Promise<unknown>; put(k: string, v: unknown): Promise<void> } };
   scrapeQueue: PromiseQueue;
@@ -308,72 +313,177 @@ function storedZip(name: string, data: Uint8Array): ArrayBuffer {
 describe("confirmEtcRunsFromZip (確認段の配線)", () => {
   const ACCOUNT = { comp_id: "c1", tenant_id: "tenant-a", user_name: "u", user_pass: "p" };
   const RANGE = { startDate: "2026-11-25", endDate: "2026-11-25" };
+  const JOB = "2026-11-25";
   // Shift_JIS の CSV (「運行NO,車輌CD,終了日時,ETC利用」の見出し) を組むのは手間なので、UTF-8 で渡す。
   // Shift_JIS の判定は etc-card-register.test.ts の decodeCsvBytes が固定している。
-  const CSV = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\r\nU1,10001234,2026/11/20 01:00:00,1\r\n");
+  const CSV = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\r\nU1,10001234,2026/11/20 01:00:00,1\r\nU1,10001234,2026/11/20 02:00:00,0\r\n");
+  const ROW = { id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" };
+  function mailEnv() {
+    // 件名は MIME で符号化されるので、ここでは通数だけ見る (件名の文言は etc-card-register.test.ts)
+    const sent: unknown[] = [];
+    return {
+      sent,
+      env: {
+        DTAKO_CONFIG_KV: { get: async () => JSON.stringify({ from: "relay@example.com", to: "ops@example.com" }) },
+        ALERT_EMAIL: { send: async (m: unknown) => void sent.push(m) },
+      },
+    };
+  }
+  /** 取り込みが done を書いた後の記録から始める (確認段は取り込みの成功後にしか呼ばれない)。 */
+  function withDoneJob(store: Map<string, unknown>) {
+    store.set(`scrape-job:${JOB}`, { date: JOB, state: "done", accepted_at: "2026-11-25T16:00:00.000Z", upload_id: "up-1" });
+  }
 
-  it("zip の KUDGSIR.csv から tenant の行の run_date を書く", async () => {
+  it("成功: run_date を書き、結果を記録に残し (state は done のまま)、メールも送る", async () => {
     vi.useFakeTimers({ now: new Date("2026-11-26T00:00:00Z"), toFake: ["Date"] });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
-    const { d } = makeDo({ DTAKO_DB: db });
-    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE);
+    const { db, calls } = fakeD1([ROW]);
+    const m = mailEnv();
+    const { d, store } = makeDo({ DTAKO_DB: db, ...m.env });
+    withDoneJob(store);
+    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE, JOB);
     vi.useRealTimers();
     expect(calls[0]!.params).toEqual(["tenant-a"]);
     expect(calls[1]!.params.slice(0, 2)).toEqual(["2026-11-20", "U1"]);
     expect(log.mock.calls.flat().join("\n")).toContain('"status":"confirmed"');
-  });
-
-  it("DTAKO_DB が無い環境は skip (ログだけ、メールしない)", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const sent: unknown[] = [];
-    const { d } = makeDo({ DTAKO_DB: undefined, ALERT_EMAIL: { send: async (m: unknown) => void sent.push(m) } });
-    await d.confirmEtcRunsFromZip(ACCOUNT, new ArrayBuffer(4), RANGE);
-    expect(log.mock.calls.flat().join("\n")).toContain("DTAKO_DB 未設定");
-    expect(sent).toEqual([]);
-  });
-
-  it("ETC_CARD_REGISTER_MODE=off (staging / preview) は D1 を読まずに skip (ログだけ、メールしない)", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const sent: unknown[] = [];
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
-    const { d } = makeDo({
-      DTAKO_DB: db,
-      ETC_CARD_REGISTER_MODE: "off",
-      ALERT_EMAIL: { send: async (m: unknown) => void sent.push(m) },
+    expect(store.get(`scrape-job:${JOB}`)).toMatchObject({
+      state: "done",
+      upload_id: "up-1",
+      etc_confirm_state: "confirmed",
+      etc_confirm_counts: { found: 1, kept: 0, none: 0, multiple: 0 },
+      etc_confirm_non_etc_rows: 1,
     });
-    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE);
-    expect(calls).toEqual([]);
-    expect(sent).toEqual([]);
-    expect(log.mock.calls.flat().join("\n")).toContain("ETC_CARD_REGISTER_MODE=off");
+    expect(m.sent).toHaveLength(1);
   });
 
-  it("KUDGSIR.csv が無い日はログ 1 行で終わる (D1 を読まない)", async () => {
+  it("その読取日の記録が無ければ記録を作らない (取り込みの試行を名乗らない)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { d, store } = makeDo({ DTAKO_DB: fakeD1([]).db });
+    await expect(d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE, JOB)).resolves.toMatchObject({
+      etc_confirm_state: "confirmed",
+    });
+    expect(store.has(`scrape-job:${JOB}`)).toBe(false);
+  });
+
+  it("DTAKO_DB が無い環境は skip (記録に理由、メールしない)", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { db, calls } = fakeD1([]);
-    const { d } = makeDo({ DTAKO_DB: db });
-    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGURI.csv", CSV), RANGE);
-    expect(calls).toEqual([]);
-    expect(log.mock.calls.flat().join("\n")).toContain("no_kudgsir");
+    const m = mailEnv();
+    const { d, store } = makeDo({ DTAKO_DB: undefined, ...m.env });
+    withDoneJob(store);
+    await d.confirmEtcRunsFromZip(ACCOUNT, new ArrayBuffer(4), RANGE, JOB);
+    expect(log.mock.calls.flat().join("\n")).toContain("DTAKO_DB 未設定");
+    expect(store.get(`scrape-job:${JOB}`)).toMatchObject({ etc_confirm_state: "skipped", etc_confirm_detail: "DTAKO_DB 未設定" });
+    expect(m.sent).toEqual([]);
   });
 
-  it("失敗 (壊れた zip / 複数一致) は throw せずログとメールへ", async () => {
+  it("ETC_CARD_REGISTER_MODE=off (staging / preview) は D1 を読まずに skip (メールしない)", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const m = mailEnv();
+    const { db, calls } = fakeD1([ROW]);
+    const { d, store } = makeDo({ DTAKO_DB: db, ETC_CARD_REGISTER_MODE: "off", ...m.env });
+    withDoneJob(store);
+    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", CSV), RANGE, JOB);
+    expect(calls).toEqual([]);
+    expect(m.sent).toEqual([]);
+    expect(log.mock.calls.flat().join("\n")).toContain("ETC_CARD_REGISTER_MODE=off");
+    expect(store.get(`scrape-job:${JOB}`)).toMatchObject({ etc_confirm_state: "skipped", etc_confirm_detail: "ETC_CARD_REGISTER_MODE=off" });
+  });
+
+  it("KUDGSIR.csv が無い日は D1 を読まず、記録とメールに残す", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const m = mailEnv();
+    const { db, calls } = fakeD1([]);
+    const { d, store } = makeDo({ DTAKO_DB: db, ...m.env });
+    withDoneJob(store);
+    await d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGURI.csv", CSV), RANGE, JOB);
+    expect(calls).toEqual([]);
+    expect(store.get(`scrape-job:${JOB}`)).toMatchObject({ etc_confirm_state: "no_kudgsir" });
+    expect(m.sent).toHaveLength(1);
+  });
+
+  it("失敗 (壊れた zip / 複数一致) は throw せず、記録とメールへ", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const sent: string[] = [];
-    const mailEnv = {
-      DTAKO_CONFIG_KV: { get: async () => JSON.stringify({ from: "relay@example.com", to: "ops@example.com" }) },
-      ALERT_EMAIL: { send: async (m: unknown) => void sent.push(JSON.stringify(m)) },
-    };
-    const broken = makeDo({ DTAKO_DB: fakeD1([]).db, ...mailEnv }).d;
-    await expect(broken.confirmEtcRunsFromZip(ACCOUNT, new ArrayBuffer(4), RANGE)).resolves.toBeUndefined();
+    const m = mailEnv();
+    const broken = makeDo({ DTAKO_DB: fakeD1([]).db, ...m.env });
+    withDoneJob(broken.store);
+    await expect(broken.d.confirmEtcRunsFromZip(ACCOUNT, new ArrayBuffer(4), RANGE, JOB)).resolves.toMatchObject({ etc_confirm_state: "failed" });
     expect(err.mock.calls.flat().join("\n")).toContain("EOCD");
+    expect(broken.store.get(`scrape-job:${JOB}`)).toMatchObject({
+      state: "done",
+      etc_confirm_state: "failed",
+      etc_confirm_detail: expect.stringContaining("EOCD"),
+    });
 
     const multi = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\nU1,10001234,2026/11/20 01:00:00,1\nU2,20001234,2026/11/20 01:00:00,1\n");
-    const { db, calls } = fakeD1([{ id: 3, card_number: CARD, plate4: "1234", run_date: null, registration_date: null, received_at: "2026-11-01T00:00:00.000Z" }]);
-    await makeDo({ DTAKO_DB: db, ...mailEnv }).d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", multi), RANGE);
+    const { db, calls } = fakeD1([ROW]);
+    const second = makeDo({ DTAKO_DB: db, ...m.env });
+    withDoneJob(second.store);
+    await second.d.confirmEtcRunsFromZip(ACCOUNT, storedZip("KUDGSIR.csv", multi), RANGE, JOB);
     expect(calls[1]!.sql).toContain("status = 'failed'");
-    expect(sent).toHaveLength(2); // 壊れた zip・複数一致で 1 通ずつ
+    expect(second.store.get(`scrape-job:${JOB}`)).toMatchObject({
+      etc_confirm_counts: { found: 0, kept: 0, none: 0, multiple: 1 },
+    });
+    expect(m.sent).toHaveLength(2); // 壊れた zip・複数一致で 1 通ずつ
+  });
+});
+
+describe("POST /cron/dtako/etc-confirm (確認段の再実行)", () => {
+  const ACCOUNT = { comp_id: "c1", tenant_id: "tenant-a", user_name: "u", user_pass: "p" };
+  const CSV = new TextEncoder().encode("運行NO,車輌CD,終了日時,ETC利用\nU1,10001234,2026/11/20 01:00:00,1\n");
+  type Rerun = Priv & {
+    resolveAccount: (compId: string) => Promise<unknown>;
+    withTheearthLoginSession: (account: unknown, jobState: unknown, run: (jar: unknown) => Promise<unknown>) => Promise<unknown>;
+  };
+  function makeRerunDo(zip: () => Promise<ArrayBuffer>) {
+    const { d: base, store } = makeDo({ DTAKO_DB: fakeD1([]).db });
+    const d = base as Rerun;
+    d.resolveAccount = async (compId) => (compId === "c1" ? ACCOUNT : null);
+    const seen: string[] = [];
+    d.withTheearthLoginSession = async () => {
+      seen.push("login");
+      return zip();
+    };
+    return { d, store, seen };
+  }
+
+  it("読取日の zip を取り直して確認段を流し、結果を返して記録に重ねる (取り込みはしない)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { d, store, seen } = makeRerunDo(async () => storedZip("KUDGSIR.csv", CSV));
+    store.set("scrape-job:2026-11-26", { date: "2026-11-26", state: "done", accepted_at: "x" });
+    const res = await d.fetch(post("/cron/dtako/etc-confirm", { comp_id: "c1", reading_date: "2026-11-26" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      comp_id: "c1",
+      reading_date: "2026-11-26",
+      etc_confirm_state: "confirmed",
+      etc_confirm_counts: { found: 0, kept: 0, none: 0, multiple: 0 },
+      theearth_logins: 0,
+    });
+    expect(seen).toEqual(["login"]);
+    expect(store.get("scrape-job:2026-11-26")).toMatchObject({ state: "done", etc_confirm_state: "confirmed" });
+  });
+
+  it("reading_date の形が違えば 400、知らない comp_id は 500 (theearth を叩かない)", async () => {
+    const { d, seen } = makeRerunDo(async () => new ArrayBuffer(0));
+    expect((await d.fetch(post("/cron/dtako/etc-confirm", { comp_id: "c1", reading_date: "2026/11/26" }))).status).toBe(400);
+    expect((await d.fetch(post("/cron/dtako/etc-confirm", "not json"))).status).toBe(400);
+    expect((await d.fetch(post("/cron/dtako/etc-confirm", { comp_id: "zz", reading_date: "2026-11-26" }))).status).toBe(500);
+    expect(seen).toEqual([]);
+  });
+
+  it("zip が取れなければ 502 で、確認段は流さない", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { d, store } = makeRerunDo(async () => {
+      throw new Error("boom");
+    });
+    store.set("scrape-job:2026-11-26", { date: "2026-11-26", state: "done", accepted_at: "x" });
+    const res = await d.fetch(post("/cron/dtako/etc-confirm", { comp_id: "c1", reading_date: "2026-11-26" }));
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toContain("boom");
+    expect(store.get("scrape-job:2026-11-26")).not.toHaveProperty("etc_confirm_state");
   });
 });
 

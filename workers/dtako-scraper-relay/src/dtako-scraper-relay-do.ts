@@ -41,6 +41,7 @@ import { PromiseQueue } from "./promise-queue";
 import {
   createCookieJar,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  downloadCsvZip,
   login,
   scrapeViaHttp,
   TheearthClientError,
@@ -87,7 +88,8 @@ import {
   readEtcAccountStates,
   resolveCardRegisterMode,
   type EtcAccountRecord,
-  type RunConfirmResult,
+  countRunConfirmKinds,
+  type RunConfirmOutcome,
 } from "./etc-card-register";
 import { readZipFile } from "./zip-entry";
 import {
@@ -163,6 +165,7 @@ import {
   countFoldStates,
   popNextScrapeQueueItem,
   pushScrapeQueueItem,
+  recordEtcConfirm,
   recordFoldProgress,
   recordScrapeJob,
   recoverOrphan,
@@ -171,6 +174,7 @@ import {
   SCRAPE_QUEUE_KEY,
   setRunningPointer,
   type QueuedScrapeItem,
+  type ScrapeJobEtcConfirmPatch,
   type ScrapeJobFoldPatch,
   type ScrapeJobRecord,
 } from "./scrape-queue";
@@ -1329,6 +1333,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/cron/dtako/operation-zip" && request.method === "POST") {
       return this.handleCronDtakoOperationZip(request);
     }
+    // ETC カード追加登録の確認段の再実行 (Refs #1287)。読取日の zip を自前ログインで取り直して
+    // 確認段だけを流す (alc への取り込みはしない)。D1 の run_date を書くので書き込みの口 —
+    // 書き込み権限の関門は kyuyo-mcp の tool (`mcp.write`)、認証は index.ts の
+    // /kintai-relay/etc-confirm (X-Alc-Proxy-Secret) が持つ
+    if (url.pathname === "/cron/dtako/etc-confirm" && request.method === "POST") {
+      return this.handleCronDtakoEtcConfirm(request);
+    }
     // スクレイプ失敗の原本 (`{DTAKO_SCRAPE_R2_PREFIX}-errors/`) を**読むだけ**の 2 口
     // (Refs #1052)。`/cron/dtako/operation-zip` の隣に同じ流儀で置く — 認証は
     // index.ts の `/kintai-relay/scrape-error{s,-object}` 側 (X-Alc-Proxy-Secret) が
@@ -1829,7 +1840,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
       // ETC カード追加登録の確認段 (Refs #1287)。取り込みは上で記録済み。この呼び出しは
       // 例外を外へ出さない (`confirmEtcRunsFromZip` の doc) — 取り込みの結果を道連れにしない。
-      await this.confirmEtcRunsFromZip(account, zip, range);
+      await this.confirmEtcRunsFromZip(account, zip, range, jobKey);
       // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
       // 何をしようと、上の記録は変わらない (条件3: fold 失敗が取り込みを道連れ
       // にしない)。cron 経路は元々 ctx.waitUntil の中なので、ここで await して
@@ -2466,6 +2477,59 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       freshEntry.lastUsedAt = Date.now();
       return result;
     }
+  }
+
+  /**
+   * POST /cron/dtako/etc-confirm — body `{comp_id, reading_date}` (Refs #1287)。ETC カード追加登録の
+   * 確認段 ([`confirmEtcRunsFromZip`]) を、その読取日の zip を theearth から取り直して流し直す。
+   * **alc への取り込みはしない** (日次 cron の取り込みは済んでいて、確認段だけが落ちた回の
+   * やり直し用)。relay は zip を保存しないので、取り直すしか材料が無い。
+   *
+   * 結果は日次 cron と同じく `scrape-job:{読取日}` の `etc_confirm_*` に重ね (その読取日の記録が
+   * あるときだけ)、メールも送る。応答にも同じ値を返す。`scrapeQueue` で直列化する (同一 comp_id の
+   * theearth セッションロック、[`handleCronDtakoOperationZip`] と同じ)。
+   */
+  private async handleCronDtakoEtcConfirm(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; reading_date?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
+    const readingDate = typeof body.reading_date === "string" ? body.reading_date : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(readingDate)) {
+      return Response.json({ error: "reading_date は YYYY-MM-DD で渡してください" }, { status: 400 });
+    }
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    return this.enqueueScrape(async () => {
+      const jobState = this.makeTheearthLoginJobState();
+      const range = { startDate: readingDate, endDate: readingDate };
+      let zip: ArrayBuffer;
+      try {
+        zip = await this.withTheearthLoginSession(account, jobState, (jar) => downloadCsvZip(jar, range));
+      } catch (err) {
+        if (err instanceof VenusSessionExpiredError) {
+          return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
+        }
+        const message =
+          err instanceof TheearthClientError ? err.message : `csvdata.zip の取得に失敗しました (${describeUnknownError(err)})`;
+        console.error(JSON.stringify({ etc_confirm: "zip_failed", comp_id: account.comp_id, reading_date: readingDate, message }));
+        return Response.json({ error: message }, { status: 502 });
+      }
+      const patch = await this.confirmEtcRunsFromZip(account, zip, range, scrapeJobKey(readingDate, readingDate));
+      return Response.json({
+        ok: true,
+        comp_id: account.comp_id,
+        reading_date: readingDate,
+        ...patch,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
+    });
   }
 
   /**
@@ -4072,51 +4136,76 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * **ここで何が起きても取り込み (upload) の結果は変えない** — 例外は全部ここで受け、
    * ログとメールに出すだけ。KUDGSIR.csv が無い日 (料金所を通っていない) はログ 1 行で終わる。
    */
+  /**
+   * ETC カード追加登録の確認段 (Refs #1287)。zip の `KUDGSIR.csv` で走行待ちのカードの走行日を確かめ、
+   * **結果を `scrape-job:{jobKey}` に重ね ([`recordEtcConfirm`]、`state` は動かさない)、動いた回は
+   * 成功でも何も無い日でも毎回メールする** (止めている環境 = staging・preview・D1 無しはメールしない)。
+   * 例外を外へ出さない — 取り込みの結果を道連れにしない。呼び手は日次 cron (取り込み直後) と
+   * 再実行の口 (`/cron/dtako/etc-confirm`)。戻り値は記録に重ねた patch。
+   */
   private async confirmEtcRunsFromZip(
     account: DtakoAccountEntry,
     zip: ArrayBuffer,
     range: { startDate: string; endDate: string },
-  ): Promise<void> {
+    jobKey: string,
+  ): Promise<ScrapeJobEtcConfirmPatch> {
     const logBase = { cron: "etc-card-confirm", comp_id: account.comp_id, reading_date: range.startDate };
-    // staging / preview (D1 を本番と共有) は確認段も止める — 本番の行に run_date を書かない
-    if (resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE) === "off") {
-      console.log(JSON.stringify({ ...logBase, status: "skipped", reason: "ETC_CARD_REGISTER_MODE=off" }));
-      return;
+    // staging / preview (D1 を本番と共有) は確認段も止める — 本番の行に run_date を書かない。
+    // D1 の binding が無い環境 (登録簿が無い) は機能ごと無い扱い
+    const reason =
+      resolveCardRegisterMode(this.env.ETC_CARD_REGISTER_MODE) === "off"
+        ? "ETC_CARD_REGISTER_MODE=off"
+        : !this.env.DTAKO_DB
+          ? "DTAKO_DB 未設定"
+          : null;
+    if (reason !== null) {
+      console.log(JSON.stringify({ ...logBase, status: "skipped", reason }));
+      const patch: ScrapeJobEtcConfirmPatch = { etc_confirm_state: "skipped", etc_confirm_detail: reason };
+      await recordEtcConfirm(this.ctx.storage, jobKey, patch);
+      return patch;
     }
-    // D1 の binding が無い環境 (登録簿が無い) は機能ごと無い扱い — 毎日の取り込みメールに混ぜない
-    const db = this.env.DTAKO_DB;
-    if (!db) {
-      console.log(JSON.stringify({ ...logBase, status: "skipped", reason: "DTAKO_DB 未設定" }));
-      return;
-    }
-    let results: RunConfirmResult[] = [];
-    let failure: string | null = null;
+    const db = this.env.DTAKO_DB!;
+    let outcome: RunConfirmOutcome;
     try {
       const csv = await readZipFile(zip, "KUDGSIR.csv");
       if (!csv) {
         console.log(JSON.stringify({ ...logBase, status: "no_kudgsir" }));
-        return;
+        outcome = { state: "no_kudgsir" };
+      } else {
+        const report = await confirmRunsFromTollCsv(
+          { db: db as unknown as CardRegisterDb, now: new Date() },
+          account.tenant_id,
+          decodeCsvBytes(csv),
+        );
+        console.log(
+          JSON.stringify({
+            ...logBase,
+            status: "confirmed",
+            non_etc_rows: report.nonEtcRows,
+            results: report.results.map((r) => ({ id: r.id, kind: r.kind, run_date: r.runDate ?? null })),
+          }),
+        );
+        outcome = { state: "confirmed", results: report.results, nonEtcRows: report.nonEtcRows };
       }
-      const report = await confirmRunsFromTollCsv(
-        { db: db as unknown as CardRegisterDb, now: new Date() },
-        account.tenant_id,
-        decodeCsvBytes(csv),
-      );
-      results = report.results;
-      console.log(
-        JSON.stringify({
-          ...logBase,
-          status: "confirmed",
-          non_etc_rows: report.nonEtcRows,
-          results: results.map((r) => ({ id: r.id, kind: r.kind, run_date: r.runDate ?? null })),
-        }),
-      );
     } catch (err) {
-      failure = describeUnknownError(err);
-      console.error(JSON.stringify({ ...logBase, status: "error", error: failure }));
+      const error = describeUnknownError(err);
+      console.error(JSON.stringify({ ...logBase, status: "error", error }));
+      outcome = { state: "failed", error };
     }
-    const mail = buildRunConfirmEmail(results, failure, range.startDate);
-    if (mail) await sendScrapeAlertEmail(scrapeAlertEmailDeps(this.env), mail.subject, mail.body, logBase);
+    const patch: ScrapeJobEtcConfirmPatch =
+      outcome.state === "confirmed"
+        ? {
+            etc_confirm_state: "confirmed",
+            etc_confirm_counts: countRunConfirmKinds(outcome.results),
+            etc_confirm_non_etc_rows: outcome.nonEtcRows,
+          }
+        : outcome.state === "failed"
+          ? { etc_confirm_state: "failed", etc_confirm_detail: outcome.error }
+          : { etc_confirm_state: "no_kudgsir" };
+    await recordEtcConfirm(this.ctx.storage, jobKey, patch);
+    const mail = buildRunConfirmEmail(outcome, range.startDate);
+    await sendScrapeAlertEmail(scrapeAlertEmailDeps(this.env), mail.subject, mail.body, logBase);
+    return patch;
   }
 
   /** ETC スクレイプ本体 (login → 検索 → CSV) + R2 保存。cron (無人実行、waitUntil +

@@ -14,6 +14,7 @@ import {
   handleDtakoAlcUpload,
   handleNet780Archive,
   handleNetprintRun,
+  handleEtcConfirm,
   handleScrapeErrors,
   handleScrapeErrorObject,
   type RelayWorkerEnv,
@@ -803,5 +804,31 @@ describe("handleScrapeErrors / handleScrapeErrorObject (read-only、Refs #1052)"
     );
     expect(res.status).toBe(400);
     expect(await jsonOf(res)).toEqual(payload);
+  });
+});
+
+// ── ETC カード追加登録の確認段の再実行 (Refs #1287) ───────────────────────────
+describe("handleEtcConfirm (POST /kintai-relay/etc-confirm)", () => {
+  it("X-Alc-Proxy-Secret が不一致だと401 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv();
+    const res = await handleEtcConfirm(
+      post("https://relay.internal/kintai-relay/etc-confirm", { reading_date: "2026-11-26" }, { "X-Alc-Proxy-Secret": "wrong" }),
+      env,
+    );
+    expect(res.status).toBe(401);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("/cron/dtako/etc-confirm へ、body を組み直さず転送する", async () => {
+    const { env, doFetch } = fakeEnv();
+    await handleEtcConfirm(
+      post("https://relay.internal/kintai-relay/etc-confirm", { comp_id: "75700192", reading_date: "2026-11-26" }),
+      env,
+    );
+    expect(doFetch.mock.calls[0][0]).toBe("https://relay.internal/cron/dtako/etc-confirm");
+    expect(JSON.parse((doFetch.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      comp_id: "75700192",
+      reading_date: "2026-11-26",
+    });
   });
 });

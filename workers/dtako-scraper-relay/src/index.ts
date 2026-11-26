@@ -277,6 +277,13 @@ export default {
       return handleOperationZip(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/etc-confirm" && request.method === "POST") {
+      // ETC カード追加登録の確認段の再実行 (Refs #1287)。読取日の zip を取り直して確認段だけを流す
+      // (alc への取り込みはしない)。D1 の run_date を書く書き込みの口 — 書き込み権限の関門は
+      // kyuyo-mcp 側 (`mcp.write`)。ここは他の /kintai-relay/* と同じ secret 検証と comp_id の解決だけ
+      return handleEtcConfirm(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/scrape-errors" && request.method === "POST") {
       // スクレイプ失敗の原本 (`{DTAKO_SCRAPE_R2_PREFIX}-errors/`) の一覧 (Refs #1052)。
       // **読むだけ** — `/kintai-relay/operation-zip` と同じ read-only 診断の型
@@ -1052,6 +1059,17 @@ async function forwardReadOnlyToRelayDo(
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * `POST /kintai-relay/etc-confirm` — body `{reading_date, comp_id?}` (Refs #1287)。DO の
+ * `/cron/dtako/etc-confirm` へ。認証・`comp_id` フォールバック・body 素通しは
+ * [`forwardReadOnlyToRelayDo`] をそのまま使う (この helper は読み書きを区別しない — 名前の
+ * 「読むだけ」は既存の 2 口の性質。この口は D1 を書くので、書き込み権限は kyuyo-mcp の
+ * `mcp.write` が見る)。
+ */
+export function handleEtcConfirm(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardReadOnlyToRelayDo(request, env, "/cron/dtako/etc-confirm");
 }
 
 /**

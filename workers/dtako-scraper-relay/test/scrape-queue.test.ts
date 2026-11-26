@@ -8,6 +8,7 @@ import {
   popNextScrapeQueueItem,
   pushScrapeQueueItem,
   decideFoldRecord,
+  recordEtcConfirm,
   recordFoldProgress,
   recordScrapeJob,
   recoverOrphan,
@@ -615,6 +616,46 @@ describe("recordFoldProgress", () => {
       await expect(
         recordFoldProgress(storage, "2026-06-07", { fold_state: "failed", fold_error: "x" }),
       ).resolves.toBe("error");
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Error: boom"));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe("recordEtcConfirm (ETC カード追加登録の確認段、Refs #1287)", () => {
+  it("既存レコードに重ね、state は動かさず、前回の etc_confirm_* は捨てる", async () => {
+    const storage = new FakeStorage();
+    await recordScrapeJob(storage, "2026-11-26", { state: "done", upload_id: "u1" });
+    await recordEtcConfirm(storage, "2026-11-26", {
+      etc_confirm_state: "confirmed",
+      etc_confirm_counts: { found: 1, kept: 0, none: 0, multiple: 0 },
+      etc_confirm_non_etc_rows: 2,
+    });
+    await expect(
+      recordEtcConfirm(storage, "2026-11-26", { etc_confirm_state: "failed", etc_confirm_detail: "boom" }),
+    ).resolves.toBe("written");
+    const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-11-26");
+    expect(record).toMatchObject({ state: "done", upload_id: "u1", etc_confirm_state: "failed", etc_confirm_detail: "boom" });
+    expect(record?.etc_confirm_counts).toBeUndefined();
+    expect(record?.etc_confirm_non_etc_rows).toBeUndefined();
+  });
+
+  it("レコードが無ければ書かない (skipped_no_record)", async () => {
+    const storage = new FakeStorage();
+    await expect(recordEtcConfirm(storage, "2026-11-27", { etc_confirm_state: "no_kudgsir" })).resolves.toBe(
+      "skipped_no_record",
+    );
+    expect(storage.hasKey(SCRAPE_JOB_KEY_PREFIX + "2026-11-27")).toBe(false);
+  });
+
+  it("storage が失敗しても投げず error を返す", async () => {
+    const storage = new FakeStorage();
+    await recordScrapeJob(storage, "2026-11-28", { state: "done" });
+    storage.poisonPutOnce(new Error("boom"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(recordEtcConfirm(storage, "2026-11-28", { etc_confirm_state: "skipped" })).resolves.toBe("error");
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Error: boom"));
     } finally {
       errSpy.mockRestore();

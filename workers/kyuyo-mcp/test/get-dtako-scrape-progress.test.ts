@@ -30,6 +30,14 @@ describe("get_dtako_scrape_progress (ohishi-exp/rust-ichibanboshi#205 の 43)", 
   // **応答に載るのに説明に無い**フィールドを潰す (Refs #958)。#945 は fold_pages /
   // fold_drivers_written を「今回の途中経過」と読んで誤診した — 説明にそう書いていな
   // かったので、読み手には気づく手段が無かった。
+  it("説明で etc_confirm_* の 4 値と、やり直しの口が読める (Refs #1287)", () => {
+    const d = getDtakoScrapeProgressTool.description;
+    for (const v of ["etc_confirm_state", "confirmed", "no_kudgsir", "etc_confirm_detail", "etc_confirm_counts", "etc_confirm_non_etc_rows"]) {
+      expect(d).toContain(v);
+    }
+    expect(d).toContain("run_etc_run_confirm");
+  });
+
   it("**説明で fold_* の意味と「別の試行の値が残り得る」ことが読める** (Refs #958)", () => {
     const d = getDtakoScrapeProgressTool.description;
     // 値そのものと、「失敗ではない」区別が読めること

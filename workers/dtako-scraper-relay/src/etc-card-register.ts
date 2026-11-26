@@ -449,24 +449,64 @@ export interface RunConfirmResult {
   detail?: string;
 }
 
+/** 確認段の結果を `kind` ごとに数える (メールと進捗記録の `etc_confirm_counts`)。0 件の種類も 0 と書く。 */
+export function countRunConfirmKinds(
+  results: readonly RunConfirmResult[],
+): Record<RunConfirmResult["kind"], number> {
+  const counts = { found: 0, kept: 0, none: 0, multiple: 0 };
+  for (const r of results) counts[r.kind] += 1;
+  return counts;
+}
+
+/** 確認段が動いた回の結果 (止めている環境で飛ばした回は含まない)。 */
+export type RunConfirmOutcome =
+  | { state: "confirmed"; results: readonly RunConfirmResult[]; nonEtcRows: number }
+  | { state: "failed"; error: string }
+  | { state: "no_kudgsir" };
+
 /**
- * 確認段 (dtako の zip 登録時) のメール。**人が見るべきもの (車両が複数一致・処理の失敗) が
- * あるときだけ**。走行日を書けた行は翌朝の登録のメールに載るので、ここでは送らない。
+ * 確認段 (dtako の zip 登録時) のメール。**確認段が動いた回は毎回送る** — 成功も、確かめる行が
+ * 無い日も、料金所 CSV が無い日も (Refs #1287)。失敗だけを送っていたときは、届かない日が
+ * 「通った」のか「動いていない」のか分からなかった。件名で要対応 (車両が複数一致・処理の失敗)
+ * かどうかを分ける。
  */
 export function buildRunConfirmEmail(
-  results: readonly RunConfirmResult[],
-  failure: string | null,
+  outcome: RunConfirmOutcome,
   readingDate: string,
-): { subject: string; body: string } | null {
-  const multiple = results.filter((r) => r.kind === "multiple");
-  if (multiple.length === 0 && failure === null) return null;
-  const lines = multiple.map(
-    (r) => `id ${r.id} カード ${maskCardNumber(r.cardNumber)}: 失敗 — ${r.detail}`,
-  );
-  if (failure !== null) lines.push(`走行日の確認が失敗: ${failure}`);
+): { subject: string; body: string } {
+  const head = `【ETC カード追加登録】読取日 ${readingDate} の zip 登録時の走行日の確認`;
+  if (outcome.state === "failed") {
+    return {
+      subject: `[dtako] ETC カードの走行日の確認で要対応 (読取日 ${readingDate})`,
+      body: [head, `走行日の確認が失敗: ${outcome.error}`].join("\n"),
+    };
+  }
+  if (outcome.state === "no_kudgsir") {
+    return {
+      subject: `[dtako] ETC カードの走行日の確認 料金所 CSV なし (読取日 ${readingDate})`,
+      body: [head, "zip に料金所 CSV (KUDGSIR.csv) が無いので、確かめる走行がありませんでした。"].join("\n"),
+    };
+  }
+  const { results, nonEtcRows } = outcome;
+  const c = countRunConfirmKinds(results);
+  const lines = [
+    head,
+    `走行待ちのカード ${results.length} 件: 走行日を書いた ${c.found} / 既に新しい走行日 ${c.kept} / ` +
+      `走行なし ${c.none} / 車両が複数一致 ${c.multiple}`,
+    `ETC利用でない料金所の行 ${nonEtcRows} 件は数えていません。`,
+    ...results.map((r) => {
+      const card = `id ${r.id} カード ${maskCardNumber(r.cardNumber)}`;
+      if (r.kind === "found") return `${card}: 走行日 ${r.runDate}`;
+      if (r.kind === "multiple") return `${card}: 失敗 — ${r.detail}`;
+      return null;
+    }),
+  ].filter((l): l is string => l !== null);
   return {
-    subject: `[dtako] ETC カードの走行日の確認で要対応 (読取日 ${readingDate})`,
-    body: [`【ETC カード追加登録】読取日 ${readingDate} の zip 登録時の走行日の確認`, ...lines].join("\n"),
+    subject:
+      c.multiple > 0
+        ? `[dtako] ETC カードの走行日の確認で要対応 (読取日 ${readingDate})`
+        : `[dtako] ETC カードの走行日の確認 完了 (読取日 ${readingDate})`,
+    body: lines.join("\n"),
   };
 }
 
