@@ -1404,3 +1404,17 @@ branches = true
 [[files]]
 path = "app/utils/ichiban-check.ts"
 branches = true
+
+# ETC コーポレートカード発行明細書 (Refs #1287)。複合機の WebDAV の受け口 (`/dav/**`) の判定と、
+# OCR 結果・手直しの正規化 (区分・カード番号・車載器番号・ナンバー下 4 桁)、D1 の読み書き。
+[[files]]
+path = "app/utils/etc-cards.ts"
+branches = true
+
+[[files]]
+path = "server/utils/etc-scan.ts"
+branches = true
+
+[[files]]
+path = "server/utils/etc-scan-dav.ts"
+branches = true

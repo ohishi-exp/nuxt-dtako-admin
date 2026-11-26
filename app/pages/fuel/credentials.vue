@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * 給油データ USB アップローダー (Windows アプリ) の資格情報 (purpose `fuel-utran`) の発行・一覧・
- * rotate・失効 (Refs yhonda-ohishi/nginx#814)。以前は nuxt-leave の設定画面 (purpose `leave-scan` 固定)
+ * rotate・失効 (Refs yhonda-ohishi/nginx#814)。用途の選択で複合機の `etc-scan` (ETC コーポレートカード
+ * 発行明細書のスキャン送信、Refs #1287) も扱う。既定は `fuel-utran` で、選ばなければ従来どおり。以前は nuxt-leave の設定画面 (purpose `leave-scan` 固定)
  * にしか発行の口が無かった。
  *
  * auth-worker を画面のブラウザから直接呼ぶ (`useMachineCredentialApi`)。password は発行・rotate の
@@ -9,18 +10,24 @@
  */
 import {
   LABEL_MAX,
-  ISSUE_GUIDE,
-  ONE_TIME_NOTICE,
+  PURPOSE,
+  PURPOSES,
+  PURPOSE_TEXT,
   credentialErrorText,
   formatIssuedDate,
   issueErrorText,
   labelError,
   sortCredentials,
+  toPurpose,
   type IssuedCredential,
   type MachineCredential,
+  type Purpose,
 } from '~/utils/machine-credentials'
 
-const api = useMachineCredentialApi()
+const purpose = ref<Purpose>(PURPOSE)
+const text = computed(() => PURPOSE_TEXT[purpose.value])
+const purposeItems = PURPOSES.map(p => ({ label: PURPOSE_TEXT[p].label, value: p }))
+const api = useMachineCredentialApi(() => purpose.value)
 
 const creds = ref<MachineCredential[]>([])
 const loading = ref(false)
@@ -40,22 +47,26 @@ const pending = ref<Pending | null>(null)
 const acting = ref(false)
 
 async function load() {
+  // 読み込み中に用途を変えたら、古い用途の結果は捨てる (後から来た一覧で上書きしない)
+  const asked = purpose.value
   loading.value = true
   listError.value = null
   try {
-    creds.value = sortCredentials(await api.list())
+    const rows = sortCredentials(await api.list())
+    if (asked === purpose.value) creds.value = rows
   }
   catch (e) {
+    if (asked !== purpose.value) return
     creds.value = []
     listError.value = credentialErrorText(e, 'ページを再読み込みしてください')
   }
   finally {
-    loading.value = false
+    if (asked === purpose.value) loading.value = false
   }
 }
 
 async function issue() {
-  newLabelError.value = labelError(newLabel.value)
+  newLabelError.value = labelError(newLabel.value, text.value.nameLabel)
   if (newLabelError.value) return
   issuing.value = true
   actionError.value = null
@@ -109,27 +120,45 @@ function closeShown() {
   copied.value = null
 }
 
+/** 用途を変えたら一覧を読み直す (入力中の名前と誤りの表示は捨てる) */
+watch(purpose, () => {
+  newLabel.value = ''
+  newLabelError.value = null
+  actionError.value = null
+  load()
+})
+
 onMounted(load)
 </script>
 
 <template>
   <div class="space-y-4">
     <div class="flex flex-wrap items-center gap-3">
-      <h2 class="text-xl font-bold mr-auto">給油アップローダーの資格情報</h2>
+      <h2 class="text-xl font-bold mr-auto">送信用の資格情報 (アップローダー・複合機)</h2>
       <UButton to="/fuel/intank" icon="i-lucide-fuel" variant="outline" label="インタンク燃料確認" />
     </div>
 
+    <UFormField label="用途">
+      <USelect
+        :model-value="purpose"
+        :items="purposeItems"
+        class="w-96"
+        data-testid="purpose-select"
+        @update:model-value="(v: unknown) => { purpose = toPurpose(v) }"
+      />
+    </UFormField>
+
     <p class="text-sm text-muted">
-      Windows アプリ (給油データ USB アップローダー) が送信に使う username / password です。PC ごとに発行してください。
+      {{ text.label }} が送信に使う username / password です。{{ purpose === 'etc-scan' ? '機器' : 'PC ' }}ごとに発行してください。
     </p>
 
     <UAlert v-if="listError" color="error" variant="subtle" icon="i-lucide-alert-triangle" title="資格情報の一覧を読めませんでした" :description="listError" />
     <UAlert v-if="actionError" color="error" variant="subtle" icon="i-lucide-alert-triangle" :description="actionError" />
 
-    <p class="text-sm text-muted">{{ ISSUE_GUIDE }}</p>
+    <p class="text-sm text-muted">{{ text.guide }}</p>
     <div class="flex flex-wrap items-end gap-2">
-      <UFormField label="PC 名" :error="newLabelError ?? undefined" :description="`どの PC 用か分かる名前 (${LABEL_MAX} 文字まで)`">
-        <UInput v-model="newLabel" placeholder="例: 本社 給油室の PC" class="w-64" />
+      <UFormField :label="text.nameLabel" :error="newLabelError ?? undefined" :description="`どの${purpose === 'etc-scan' ? '機器' : ' PC '}用か分かる名前 (${LABEL_MAX} 文字まで)`">
+        <UInput v-model="newLabel" :placeholder="text.namePlaceholder" class="w-64" />
       </UFormField>
       <UButton label="発行" icon="i-lucide-key-round" :loading="issuing" @click="issue" />
     </div>
@@ -140,7 +169,7 @@ onMounted(load)
     <div v-else class="overflow-x-auto">
       <table class="fuel-table">
         <thead>
-          <tr><th>PC 名</th><th>username</th><th>作成日</th><th>状態</th><th /></tr>
+          <tr><th>{{ text.nameLabel }}</th><th>username</th><th>作成日</th><th>状態</th><th /></tr>
         </thead>
         <tbody>
           <tr v-for="c in creds" :key="c.username" :class="{ 'text-dimmed': c.revoked }">
@@ -171,10 +200,10 @@ onMounted(load)
         <div v-if="pending" class="p-6 space-y-4">
           <h3 class="text-lg font-bold">{{ pending.kind === 'rotate' ? 'パスワードの再発行' : '資格情報の失効' }}</h3>
           <p v-if="pending.kind === 'rotate'" class="text-muted">
-            {{ pending.cred.label }} ({{ pending.cred.username }}) のパスワードを作り直しますか？今のパスワードはすぐ使えなくなり、PC に新しいパスワードを入れ直すまで送信できません。
+            {{ pending.cred.label }} ({{ pending.cred.username }}) のパスワードを作り直しますか？今のパスワードはすぐ使えなくなり、{{ purpose === 'etc-scan' ? '複合機' : 'PC' }}に新しいパスワードを入れ直すまで送信できません。
           </p>
           <p v-else class="text-muted">
-            {{ pending.cred.label }} ({{ pending.cred.username }}) を失効しますか？この PC からは送信できなくなります。この操作は取り消せません。
+            {{ pending.cred.label }} ({{ pending.cred.username }}) を失効しますか？この{{ purpose === 'etc-scan' ? '複合機' : ' PC ' }}からは送信できなくなります。この操作は取り消せません。
           </p>
           <div class="flex justify-end gap-2">
             <UButton label="キャンセル" variant="outline" @click="pending = null" />
@@ -194,7 +223,7 @@ onMounted(load)
       <template #content>
         <div v-if="shown" class="p-6 space-y-4">
           <h3 class="text-lg font-bold">資格情報</h3>
-          <UAlert color="warning" variant="subtle" icon="i-lucide-triangle-alert" :description="ONE_TIME_NOTICE" />
+          <UAlert color="warning" variant="subtle" icon="i-lucide-triangle-alert" :description="text.notice" />
           <dl class="space-y-2">
             <div v-for="key in (['username', 'password'] as const)" :key="key" class="flex items-center gap-2">
               <dt class="w-24 text-sm text-muted">{{ key }}</dt>

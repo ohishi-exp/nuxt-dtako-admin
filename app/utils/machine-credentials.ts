@@ -1,6 +1,7 @@
 /**
  * 給油データ USB アップローダー (Windows アプリ ohishi-exp/fuel-usb-uploader) が Basic で名乗る
  * 資格情報 (purpose `fuel-utran`) の型・呼び出し・表示用の変換 (Refs yhonda-ohishi/nginx#814)。
+ * 複合機の `etc-scan` (ETC コーポレートカード発行明細書のスキャン送信、Refs #1287) も同じ画面で選べる。
  *
  * 管理 API は auth-worker にあり、画面のブラウザから `{authWorkerUrl}/api/machine-credentials` を
  * 直接 (cross-origin で) 叩く。Bearer は dtako の browser JWT。管理者 (role=admin) 以外は 403。
@@ -14,12 +15,42 @@ import { caughtErrorStatus, describeCaughtError } from '~/utils/api-error'
 
 export const PURPOSE = 'fuel-utran'
 
+/**
+ * 画面で選べる用途 (Refs #1287)。既定は {@link PURPOSE} (`fuel-utran`) で、選ばなければ従来どおり。
+ * `etc-scan` は複合機 (ETC コーポレートカード発行明細書のスキャン送信) が名乗る資格情報。
+ * 用途の allowlist の正本は auth-worker の `MACHINE_CRED_PURPOSES`。
+ */
+export const PURPOSES = ['fuel-utran', 'etc-scan'] as const
+export type Purpose = (typeof PURPOSES)[number]
+
+/** 用途ごとの表示 (選択肢の名前・発行の説明・password の注意・名前の欄) */
+export const PURPOSE_TEXT: Record<Purpose, { label: string, guide: string, notice: string, nameLabel: string, namePlaceholder: string }> = {
+  'fuel-utran': {
+    label: '給油データ USB アップローダー (Windows アプリ)',
+    guide: '発行すると username と password が 1 回だけ表示されます。Windows アプリのトレイのアイコンを右クリック →『資格情報を設定』に入れてください',
+    notice: 'この表示を閉じると password は二度と見られません。Windows アプリ (給油データ USB アップローダー) の『資格情報を設定』に入れてください',
+    nameLabel: 'PC 名',
+    namePlaceholder: '例: 本社 給油室の PC',
+  },
+  'etc-scan': {
+    label: 'ETC カード明細書のスキャン (複合機)',
+    guide: '発行すると username と password が 1 回だけ表示されます。複合機の送信先 (WebDAV) の認証情報に入れてください',
+    notice: 'この表示を閉じると password は二度と見られません。複合機の送信先 (WebDAV) の認証情報に入れてください',
+    nameLabel: '機器名',
+    namePlaceholder: '例: 本社 2F の複合機',
+  },
+}
+
+/** 選択の値を用途にする (知らない値は既定の `fuel-utran`) */
+export function toPurpose(v: unknown): Purpose {
+  return (PURPOSES as readonly unknown[]).includes(v) ? v as Purpose : PURPOSE
+}
+
 /** 名前 (label) の最大長 (auth-worker の MACHINE_CRED_LABEL_MAX と同じ) */
 export const LABEL_MAX = 64
 
 /** 発行・rotate の直後に password と並べて出す文 */
-export const ONE_TIME_NOTICE
-  = 'この表示を閉じると password は二度と見られません。Windows アプリ (給油データ USB アップローダー) の『資格情報を設定』に入れてください'
+export const ONE_TIME_NOTICE = PURPOSE_TEXT['fuel-utran'].notice
 
 /** fetch の実体 ($fetch と同じ形の部分集合) */
 export type Fetcher = <T>(url: string, options?: {
@@ -71,13 +102,13 @@ export function toCredentialList(res: unknown): MachineCredential[] {
   return (rows as MachineCredential[]).filter(r => r && typeof r.username === 'string')
 }
 
-export function createMachineCredentialApi(fetcher: Fetcher, authWorkerUrl: string) {
+export function createMachineCredentialApi(fetcher: Fetcher, authWorkerUrl: string, purpose: Purpose = PURPOSE) {
   return {
     async list(): Promise<MachineCredential[]> {
-      return toCredentialList(await fetcher<unknown>(listUrl(authWorkerUrl), { query: { purpose: PURPOSE } }))
+      return toCredentialList(await fetcher<unknown>(listUrl(authWorkerUrl), { query: { purpose } }))
     },
     issue(label: string): Promise<IssuedCredential> {
-      return fetcher<IssuedCredential>(listUrl(authWorkerUrl), { method: 'POST', body: { purpose: PURPOSE, label: label.trim() } })
+      return fetcher<IssuedCredential>(listUrl(authWorkerUrl), { method: 'POST', body: { purpose, label: label.trim() } })
     },
     revoke(username: string): Promise<unknown> {
       return fetcher(revokeUrl(authWorkerUrl, username), { method: 'POST' })
@@ -91,11 +122,11 @@ export function createMachineCredentialApi(fetcher: Fetcher, authWorkerUrl: stri
 
 export type MachineCredentialApi = ReturnType<typeof createMachineCredentialApi>
 
-/** 名前の問題を文にする (問題なしは null) */
-export function labelError(raw: string): string | null {
+/** 名前の問題を文にする (問題なしは null)。`name` は欄の名前 (既定 `PC 名`) */
+export function labelError(raw: string, name = 'PC 名'): string | null {
   const v = raw.trim()
-  if (v === '') return 'PC 名を入れてください'
-  if (v.length > LABEL_MAX) return `PC 名は ${LABEL_MAX} 文字以内にしてください`
+  if (v === '') return `${name}を入れてください`
+  if (v.length > LABEL_MAX) return `${name}は ${LABEL_MAX} 文字以内にしてください`
   return null
 }
 
@@ -144,8 +175,7 @@ export function issueErrorText(e: unknown): string {
 }
 
 /** 発行の前に入力欄の上に出す説明 */
-export const ISSUE_GUIDE
-  = '発行すると username と password が 1 回だけ表示されます。Windows アプリのトレイのアイコンを右クリック →『資格情報を設定』に入れてください'
+export const ISSUE_GUIDE = PURPOSE_TEXT['fuel-utran'].guide
 
 /** 作成日を `YYYY-MM-DD` (日本時間) で出す。読めなければそのまま */
 export function formatIssuedDate(iso: string): string {

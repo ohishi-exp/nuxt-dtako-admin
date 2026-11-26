@@ -93,6 +93,20 @@ service = "ichibanboshi-kyuyo"
 binding = "ICHIBAN_DB"
 service = "ichibanboshi-ichiban"
 
+# 複合機の ETC コーポレートカード発行明細書 (Refs #1287)。`/dav/**` の受け口が使う auth-worker の RPC 2 本。
+# AUTH_MCRED: Basic を照合して tenant を返す (`issueTicket`、用途 `etc-scan`)。
+# ALC_REDACT: 明細書の PDF を OCR する (`extractEtcCard`)。どちらも entrypoint ごとに別 class (呼べるメソッドが閉じる)。
+# 受け付ける tenant は secret `ETC_SCAN_TENANT_IDS` (カンマ区切り、未設定は全拒否)。public repo なのでここに書かない。
+[[services]]
+binding = "AUTH_MCRED"
+service = "auth-worker"
+entrypoint = "MachineCredentialEntrypoint"
+
+[[services]]
+binding = "ALC_REDACT"
+service = "auth-worker"
+entrypoint = "AlcRedactEntrypoint"
+
 [vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
@@ -167,6 +181,17 @@ service = "ichibanboshi-kyuyo"
 binding = "ICHIBAN_DB"
 service = "ichibanboshi-ichiban"
 
+# named env は top-level binding を継承しないので再宣言する (Refs #1287)。
+[[env.staging.services]]
+binding = "AUTH_MCRED"
+service = "auth-worker-staging"
+entrypoint = "MachineCredentialEntrypoint"
+
+[[env.staging.services]]
+binding = "ALC_REDACT"
+service = "auth-worker-staging"
+entrypoint = "AlcRedactEntrypoint"
+
 [env.staging.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
@@ -233,6 +258,17 @@ service = "ichibanboshi-kyuyo"
 [[env.preview.services]]
 binding = "ICHIBAN_DB"
 service = "ichibanboshi-ichiban"
+
+# named env は top-level binding を継承しないので再宣言する (Refs #1287)。
+[[env.preview.services]]
+binding = "AUTH_MCRED"
+service = "auth-worker-staging"
+entrypoint = "MachineCredentialEntrypoint"
+
+[[env.preview.services]]
+binding = "ALC_REDACT"
+service = "auth-worker-staging"
+entrypoint = "AlcRedactEntrypoint"
 
 [env.preview.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
@@ -309,6 +345,17 @@ service = "ichibanboshi-kyuyo"
 [[env.dev.services]]
 binding = "ICHIBAN_DB"
 service = "ichibanboshi-ichiban"
+
+# named env は top-level binding を継承しないので再宣言する (Refs #1287)。
+[[env.dev.services]]
+binding = "AUTH_MCRED"
+service = "auth-worker"
+entrypoint = "MachineCredentialEntrypoint"
+
+[[env.dev.services]]
+binding = "ALC_REDACT"
+service = "auth-worker"
+entrypoint = "AlcRedactEntrypoint"
 
 [env.dev.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
