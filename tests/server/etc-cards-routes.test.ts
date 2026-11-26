@@ -53,7 +53,6 @@ const relayFetch = vi.fn()
 function env(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     INTERNAL_SHARED_SECRET: SECRET,
-    ETC_SCAN_TENANT_IDS: 't1',
     AUTH_MCRED: { issueTicket },
     ALC_REDACT: { extractEtcCard },
     DTAKO_DB: db,
@@ -123,10 +122,12 @@ describe('/dav/**', () => {
     expect(logged).not.toContain(ROW_OK.card_number)
   })
 
-  it('ETC_SCAN_TENANT_IDS 未設定は 403', async () => {
-    const e = event({ method: 'PUT', req: put({ 'authorization': 'Basic x', 'x-internal-shared-secret': SECRET }), env: env({ ETC_SCAN_TENANT_IDS: undefined }) })
+  it('中継された PUT でも issueTicket が null (auth-worker の APP_TENANT_ACL で拒否を含む) なら 401 で保存しない', async () => {
+    issueTicket.mockResolvedValueOnce(null)
+    const e = event({ method: 'PUT', req: put({ 'authorization': 'Basic x', 'x-internal-shared-secret': SECRET }) })
     await call(davHandler, e)
-    expect(e.res.status).toBe(403)
+    expect(e.res.status).toBe(401)
+    expect(db.rows('SELECT sha256 FROM etc_card_scans')).toEqual([])
   })
 
   it('binding が欠けていれば 503 (本文は読まない)', async () => {

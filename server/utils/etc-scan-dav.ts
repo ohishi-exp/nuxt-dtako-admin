@@ -7,7 +7,8 @@
  *
  * 認可の順 (どれか外れたら止める):
  *   ① 中継の印 → 404  ② PUT 以外は {@link planReply}  ③ `issueTicket` が null → 401
- *   ④ 返った tenantId が `ETC_SCAN_TENANT_IDS` に無い → 403 (未設定も 403 = fail-closed)
+ * tenant の照合は auth-worker の `issueTicket` が `APP_TENANT_ACL` (dtako の origin) で行う (Refs #1287)。
+ * 返った tenantId はそのまま `etc_card_scans.tenant_id` に保存する (relay と画面の tenant 絞り込みが使う)。
  * 通ったら: `%PDF-` で始まらなければ 415 → scan を保存 → OCR → 行の作成。
  * OCR に失敗しても scan は残して 201 (複合機に再送させない。画面の「再 OCR」でやり直す)。
  *
@@ -21,7 +22,7 @@
  * ログに Authorization・共有秘密・本文・カード番号は出さない (sha256 の先頭 12 桁・行数・status だけ)。
  */
 import type { D1DatabaseLite } from './kyuyo-master-db'
-import { insertScan, parseTenantList, runOcr, shaPrefix, type AlcRedactRpc } from './etc-scan'
+import { insertScan, runOcr, shaPrefix, type AlcRedactRpc } from './etc-scan'
 import { sha256Hex } from './profit-r2-io'
 
 /**
@@ -50,7 +51,6 @@ export type DavKind =
   | 'empty'
   | 'too_large'
   | 'rejected'
-  | 'forbidden_tenant'
   | 'not_pdf'
   | 'duplicate'
   | 'stored'
@@ -84,8 +84,6 @@ export interface EtcScanDeps {
   mcred: MachineCredentialRpc
   redact: AlcRedactRpc
   db: D1DatabaseLite
-  /** `ETC_SCAN_TENANT_IDS` の生の値 (未設定は null) */
-  allowedTenants: string | null
   now: () => string
 }
 
@@ -228,9 +226,6 @@ export async function handlePut(
     sha = await sha256Hex(body)
     const issued = await deps.mcred.issueTicket(authorization, PURPOSE, sha)
     if (!issued) return { ...unauthorized(), kind: 'rejected', log: { sha: shaPrefix(sha) } }
-    if (!parseTenantList(deps.allowedTenants).has(issued.tenantId)) {
-      return { kind: 'forbidden_tenant', reply: { status: 403, headers: {} }, log: { sha: shaPrefix(sha) } }
-    }
     if (!isPdf(body)) return { kind: 'not_pdf', reply: { status: 415, headers: {} }, log: { sha: shaPrefix(sha) } }
 
     const now = deps.now()

@@ -41,11 +41,6 @@ export function shaPrefix(sha256: string): string {
   return sha256.slice(0, 12)
 }
 
-/** `ETC_SCAN_TENANT_IDS` (カンマ区切り) を集合にする。空・未設定は空集合 (= 誰も通さない) */
-export function parseTenantList(raw: string | null | undefined): Set<string> {
-  return new Set((raw ?? '').split(',').map(s => s.trim()).filter(s => s !== ''))
-}
-
 export type ExtractOutcome =
   | { ok: true, rows: EtcCardFields[] }
   | { ok: false, error: string }
