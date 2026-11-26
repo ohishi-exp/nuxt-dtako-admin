@@ -24,7 +24,7 @@ type Priv = {
   fetch(req: Request): Promise<Response>;
   confirmEtcRunsFromZip: (account: unknown, zip: ArrayBuffer, range: { startDate: string; endDate: string }) => Promise<void>;
   env: Record<string, unknown>;
-  ctx: { waitUntil(p: Promise<unknown>): void };
+  ctx: { waitUntil(p: Promise<unknown>): void; storage: { get(k: string): Promise<unknown>; put(k: string, v: unknown): Promise<void> } };
   scrapeQueue: PromiseQueue;
   runCronEtcScrape: (account: unknown) => Promise<void>;
   runEtcCardRegister: (account: unknown, target: unknown) => Promise<unknown>;
@@ -35,13 +35,29 @@ const ACCOUNTS = JSON.stringify([
   { user_id: "etc-other", password: "pw-o" },
 ]);
 
-function makeDo(env: Record<string, unknown> = {}) {
+/** `ownType` = この DO の storage に記録済みの種別、`others` = 他の DO (`etc-{user_id}`) が返す種別。 */
+function makeDo(
+  env: Record<string, unknown> = {},
+  opts: { ownType?: string; others?: Record<string, string | null> } = {},
+) {
   const d = Object.create(DtakoScraperRelayDO.prototype) as Priv;
   const waits: Promise<unknown>[] = [];
-  d.ctx = { waitUntil: (p) => waits.push(p) };
-  d.env = { ETC_ACCOUNTS: ACCOUNTS, ETC_CARD_REGISTER_USER_ID: "etc-reg", DTAKO_R2: {}, ...env };
+  const store = new Map<string, unknown>(opts.ownType ? [["etc_account_type", opts.ownType]] : []);
+  d.ctx = {
+    waitUntil: (p) => waits.push(p),
+    storage: { get: async (k) => store.get(k), put: async (k, v) => void store.set(k, v) },
+  };
+  const relayFetch = vi.fn(async (name: string, url: string) => {
+    expect(url).toBe("https://relay.internal/internal/etc-account-type");
+    return Response.json({ account_type: opts.others?.[name.replace(/^etc-/, "")] ?? null });
+  });
+  const RELAY = {
+    idFromName: (name: string) => name,
+    get: (name: string) => ({ fetch: (url: string) => relayFetch(name, url) }),
+  };
+  d.env = { ETC_ACCOUNTS: ACCOUNTS, DTAKO_R2: {}, RELAY, ...env };
   d.scrapeQueue = new PromiseQueue();
-  return { d, waits };
+  return { d, waits, store, relayFetch };
 }
 
 const post = (path: string, body: unknown) =>
@@ -53,8 +69,7 @@ afterEach(() => {
 });
 
 describe("/cron/etc の登録の印", () => {
-  it("登録用アカウントに印が来たら、CSV 取得の後に同じキューで登録を回す", async () => {
-    const { d, waits } = makeDo();
+  function track(d: Priv) {
     const order: string[] = [];
     d.runCronEtcScrape = async () => {
       order.push("scrape");
@@ -63,27 +78,56 @@ describe("/cron/etc の登録の印", () => {
       order.push(`register:${(account as { user_id: string }).user_id}:${JSON.stringify(target)}`);
       return { notFound: false, results: [] };
     };
+    return order;
+  }
+
+  it("並び順で最初の法人アカウントなら、CSV 取得の後に同じキューで登録を回す", async () => {
+    const { d, waits, relayFetch } = makeDo({}, { ownType: "corporate" });
+    const order = track(d);
     const res = await d.fetch(post("/cron/etc", { user_id: "etc-reg", card_register: "1" }));
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ accepted: true, user_id: "etc-reg", card_register: true });
     await Promise.all(waits);
     expect(order).toEqual(["scrape", 'register:etc-reg:{"kind":"cron"}']);
+    expect(relayFetch).not.toHaveBeenCalled(); // 先頭なので他の DO は読まない
   });
 
-  it("印が無い / 登録用でないアカウントには登録を積まない", async () => {
-    for (const body of [{ user_id: "etc-reg" }, { user_id: "etc-other", card_register: "1" }]) {
-      const { d, waits } = makeDo();
-      d.runCronEtcScrape = async () => {};
-      d.runEtcCardRegister = vi.fn();
-      const res = await d.fetch(post("/cron/etc", body));
-      expect((await res.json()) as unknown).toMatchObject({ card_register: false });
-      await Promise.all(waits);
-      expect(d.runEtcCardRegister).not.toHaveBeenCalled();
-    }
+  it("前のアカウントが個人なら、後ろの法人が登録する", async () => {
+    const { d, waits, relayFetch } = makeDo({}, { ownType: "corporate", others: { "etc-reg": "personal" } });
+    const order = track(d);
+    await d.fetch(post("/cron/etc", { user_id: "etc-other", card_register: "1" }));
+    await Promise.all(waits);
+    expect(order).toEqual(["scrape", 'register:etc-other:{"kind":"cron"}']);
+    expect(relayFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["前に法人が居る", { ownType: "corporate", others: { "etc-reg": "corporate" } }, "etc-other"],
+    ["前のアカウントの種別が未記録", { ownType: "corporate", others: {} }, "etc-other"],
+    ["自分が個人", { ownType: "personal" }, "etc-reg"],
+    ["自分の種別が未記録", {}, "etc-reg"],
+  ])("%s なら登録しない (ログに出す)", async (_l, opts, userId) => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { d, waits, relayFetch } = makeDo({}, opts);
+    const order = track(d);
+    await d.fetch(post("/cron/etc", { user_id: userId, card_register: "1" }));
+    await Promise.all(waits);
+    expect(order).toEqual(["scrape"]);
+    expect(log.mock.calls.flat().join("\n")).toContain('"status":"skipped"');
+    if ((opts as { ownType?: string }).ownType !== "corporate") expect(relayFetch).not.toHaveBeenCalled(); // 個人は他の DO を読まない
+  });
+
+  it("印が無ければ登録段を積まない", async () => {
+    const { d, waits } = makeDo({}, { ownType: "corporate" });
+    const order = track(d);
+    const res = await d.fetch(post("/cron/etc", { user_id: "etc-reg" }));
+    expect((await res.json()) as unknown).toMatchObject({ card_register: false });
+    await Promise.all(waits);
+    expect(order).toEqual(["scrape"]);
   });
 
   it("登録が throw してもキューを止めず console.error に出す", async () => {
-    const { d, waits } = makeDo();
+    const { d, waits } = makeDo({}, { ownType: "corporate" });
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     d.runCronEtcScrape = async () => {};
     d.runEtcCardRegister = async () => {
@@ -92,6 +136,15 @@ describe("/cron/etc の登録の印", () => {
     await d.fetch(post("/cron/etc", { user_id: "etc-reg", card_register: "1" }));
     await Promise.all(waits);
     expect(err.mock.calls.flat().join("\n")).toContain("etc-card-register");
+  });
+});
+
+describe("GET /internal/etc-account-type", () => {
+  it("記録済みの種別を返す。未記録・不正な値は null", async () => {
+    const get = () => new Request("https://relay.internal/internal/etc-account-type");
+    expect(await (await makeDo({}, { ownType: "corporate" }).d.fetch(get())).json()).toEqual({ account_type: "corporate" });
+    expect(await (await makeDo({}, { ownType: "weird" }).d.fetch(get())).json()).toEqual({ account_type: null });
+    expect(await (await makeDo().d.fetch(get())).json()).toEqual({ account_type: null });
   });
 });
 
@@ -107,17 +160,29 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
     expect(d.runEtcCardRegister).not.toHaveBeenCalled();
   });
 
-  it("登録用アカウントが未設定 / ETC_ACCOUNTS に無ければ 503", async () => {
-    for (const env of [{ ETC_CARD_REGISTER_USER_ID: undefined }, { ETC_CARD_REGISTER_USER_ID: "nobody" }]) {
-      const { d } = makeDo(env);
-      expect((await d.fetch(post("/internal/etc-card-register", { id: 1 }))).status).toBe(503);
+  it("user_id が無い / ETC_ACCOUNTS に無ければ 503", async () => {
+    for (const body of [{ id: 1 }, { id: 1, user_id: "nobody" }]) {
+      const { d } = makeDo();
+      d.runEtcCardRegister = vi.fn();
+      expect((await d.fetch(post("/internal/etc-card-register", body))).status).toBe(503);
+      expect(d.runEtcCardRegister).not.toHaveBeenCalled();
     }
+  });
+
+  it("転送されてきた user_id のアカウントで回す", async () => {
+    const { d } = makeDo();
+    d.runEtcCardRegister = vi.fn(async () => ({ notFound: false, conflict: false, results: [] }));
+    expect((await d.fetch(post("/internal/etc-card-register", { id: 1, user_id: "etc-other" }))).status).toBe(200);
+    expect(d.runEtcCardRegister).toHaveBeenCalledWith(
+      { user_id: "etc-other", password: "pw-o" },
+      { kind: "one", id: 1 },
+    );
   });
 
   it("走行日が未確認なら 409", async () => {
     const { d } = makeDo();
     d.runEtcCardRegister = async () => ({ notFound: false, conflict: true, results: [] });
-    const res = await d.fetch(post("/internal/etc-card-register", { id: 1 }));
+    const res = await d.fetch(post("/internal/etc-card-register", { id: 1, user_id: "etc-reg" }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "走行日が未確認 (次の zip 登録で確認される)" });
   });
@@ -125,7 +190,7 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
   it("対象が無ければ 404、あれば結果 (カード番号は末尾 5 桁)、例外は 500", async () => {
     const { d } = makeDo();
     d.runEtcCardRegister = async () => ({ notFound: true, results: [] });
-    expect((await d.fetch(post("/internal/etc-card-register", { id: 1 }))).status).toBe(404);
+    expect((await d.fetch(post("/internal/etc-card-register", { id: 1, user_id: "etc-reg" }))).status).toBe(404);
 
     d.runEtcCardRegister = async (_a, target) => ({
       notFound: false,
@@ -135,7 +200,7 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
         { id: 2, cardNumber: null, kind: "failed" },
       ],
     });
-    const ok = await d.fetch(post("/internal/etc-card-register", { id: 7 }));
+    const ok = await d.fetch(post("/internal/etc-card-register", { id: 7, user_id: "etc-reg" }));
     expect(ok.status).toBe(200);
     const text = await ok.text();
     expect(JSON.parse(text).results.map((r: { cardNumber: unknown }) => r.cardNumber)).toEqual(["*23333", null]);
@@ -144,7 +209,7 @@ describe("/internal/etc-card-register (手動 1 件)", () => {
     d.runEtcCardRegister = async () => {
       throw new Error("boom");
     };
-    expect((await d.fetch(post("/internal/etc-card-register", { id: 7 }))).status).toBe(500);
+    expect((await d.fetch(post("/internal/etc-card-register", { id: 7, user_id: "etc-reg" }))).status).toBe(500);
   });
 });
 

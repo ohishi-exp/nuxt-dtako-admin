@@ -120,7 +120,9 @@ describe("handleEtcRun — cron と同じ道", () => {
       ETC_CRON,
       { etcAccountsRaw: ETC_ACCOUNTS },
       cronDoCall,
-      new Date("2026-09-03T21:00:00Z"),
+      // 21 時 (UTC) の tick は cron だけが登録の印 (`card_register`) を載せる (Refs #1287。手動の
+      // etc-run は登録しない) ので、比べるのは印の無い tick
+      new Date("2026-09-03T22:00:00Z"),
     );
 
     const { env, calls } = fakeEnv();

@@ -1122,6 +1122,34 @@ describe('scrapeEtcCsv', () => {
     expect(result.bytes.byteLength).toBeGreaterThan(0)
   })
 
+  // Refs #1287: 明細 0 件の月でも「法人か」を記録できるよう、0 件の例外に種別を載せる
+  it('明細 0 件 (EtcMeisaiNoUsageError) にはログインで分かった種別を載せる', async () => {
+    const { fetch } = recordingFetch([
+      html(TOP_HTML),
+      html(LOGIN_PAGE_HTML),
+      redirect('/etc_corp_meisai/menu'),
+      html(MENU_HTML),
+      html(SEARCH_PAGE_HTML),
+      html(NO_USAGE_HTML),
+    ])
+    const err = await scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch, undefined, NOW).catch((e) => e)
+    expect(err).toBeInstanceOf(EtcMeisaiNoUsageError)
+    expect(err.accountType).toBe('corporate')
+  })
+
+  it('検索段の 0 件以外の例外はそのまま投げ直す', async () => {
+    const { fetch } = recordingFetch([
+      html(TOP_HTML),
+      html(LOGIN_PAGE_HTML),
+      redirect('/etc_user_meisai/menu'),
+      html(MENU_HTML),
+      html(SEARCH_PAGE_HTML),
+    ])
+    const err = await scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch, undefined, NOW).catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(EtcMeisaiNoUsageError)
+  })
+
   it('timeouts 未指定は既定値で動く', async () => {
     const { fetch } = recordingFetch([html('<html><body>MAINTENANCE</body></html>')])
     await expect(

@@ -69,6 +69,9 @@ export class EtcMeisaiClientError extends Error {
 /** 「当該月のご利用はありません」— 明細 0 件はエラーではなくこの typed error で
  * 区別する (cron 側は成功扱いで skip する)。 */
 export class EtcMeisaiNoUsageError extends EtcMeisaiClientError {
+  /** ログイン後に分かったアカウント種別。`scrapeEtcCsv` が載せる — 明細 0 件の月でも
+   * 「法人か」を記録できるように (ETC カード追加登録の担当判定、Refs #1287)。 */
+  accountType?: EtcAccountType;
   constructor() {
     super("当該月のご利用はありません (明細 0 件)");
     this.name = "EtcMeisaiNoUsageError";
@@ -1105,7 +1108,13 @@ export async function scrapeEtcCsv(
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
-  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now, onProgress);
+  let resultPage: EtcPage;
+  try {
+    resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now, onProgress);
+  } catch (err) {
+    if (err instanceof EtcMeisaiNoUsageError) err.accountType = session.accountType;
+    throw err;
+  }
 
   onProgress("download");
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);

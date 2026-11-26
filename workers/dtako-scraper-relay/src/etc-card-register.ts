@@ -422,3 +422,71 @@ export function buildRunConfirmEmail(
     body: [`【ETC カード追加登録】読取日 ${readingDate} の zip 登録時の走行日の確認`, ...lines].join("\n"),
   };
 }
+
+// ---------------------------------------------------------------------------
+// 登録を担当するアカウント
+// ---------------------------------------------------------------------------
+
+/** ETC アカウントの種別 (`etc-meisai-client.ts` の `EtcAccountType` と同じ値)。 */
+export type CardRegisterAccountType = "personal" | "corporate";
+
+/** 各 `etc-{user_id}` DO が、CSV 取得のログインで分かった種別を自分の storage に置くキー。 */
+export const ETC_ACCOUNT_TYPE_STORAGE_KEY = "etc_account_type";
+
+/** 種別を読む DO 内部 route (GET。storage を読むだけで、キューにもログインにも触れない)。 */
+export const ETC_ACCOUNT_TYPE_PATH = "/internal/etc-account-type";
+
+/** 手動口が担当を決められないときの文言 (503)。 */
+export const CARD_REGISTER_UNCONFIRMED_MESSAGE = "法人アカウントが未確認 (次の ETC cron で確認される)";
+
+export type CardRegisterAccountPick =
+  /** この user_id が担当 */
+  | { kind: "found"; userId: string }
+  /** この user_id の種別がまだ記録されておらず、それより後ろは決められない */
+  | { kind: "unconfirmed"; userId: string }
+  /** 全アカウントが個人 */
+  | { kind: "none" };
+
+/**
+ * カード追加登録を担当するアカウントを決める (Refs #1287)。**`ETC_ACCOUNTS` の並び順で最初の法人**。
+ *
+ * 登録に使うアカウントは、ETC cron が毎日ログインしている `ETC_ACCOUNTS` の中にある
+ * (手で入れる var を持たない)。カードの追加登録は法人 (`/etc_corp_meisai/`) にしか無いので、
+ * 個人は飛ばす。法人が 2 つ以上あっても登録するのは 1 つだけ (同じカードを二重に入れない)。
+ *
+ * 種別はログインするまで分からないので、各 DO が記録した値 (`readType`) を前から読む。
+ * **前に未記録のアカウントが居たら決めない** (`unconfirmed`) — そこが法人かもしれないのに
+ * 後ろの法人で登録すると、記録が揃った翌日から担当が入れ替わる。読み取りの失敗も未記録と同じ扱い。
+ */
+export async function pickCardRegisterAccount(
+  userIds: string[],
+  readType: (userId: string) => Promise<CardRegisterAccountType | null>,
+): Promise<CardRegisterAccountPick> {
+  for (const userId of userIds) {
+    const type = await readType(userId).catch(() => null);
+    if (type === "corporate") return { kind: "found", userId };
+    if (type !== "personal") return { kind: "unconfirmed", userId };
+  }
+  return { kind: "none" };
+}
+
+/** `fetchEtcAccountType` が使う DO namespace の形 (`DurableObjectNamespace` の部分)。 */
+export interface EtcAccountTypeNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): { fetch(url: string): Promise<Response> };
+}
+
+/** `etc-{userId}` の DO が記録した種別を読む。記録なし・異常応答は `null` (= 未確認)。 */
+export async function fetchEtcAccountType(
+  ns: EtcAccountTypeNamespace,
+  userId: string,
+): Promise<CardRegisterAccountType | null> {
+  const res = await ns.get(ns.idFromName(`etc-${userId}`)).fetch(`https://relay.internal${ETC_ACCOUNT_TYPE_PATH}`);
+  if (!res.ok) return null;
+  return parseAccountType(((await res.json()) as { account_type?: unknown } | null)?.account_type);
+}
+
+/** storage / 応答の値を種別に絞る。それ以外は `null`。 */
+export function parseAccountType(raw: unknown): CardRegisterAccountType | null {
+  return raw === "corporate" || raw === "personal" ? raw : null;
+}

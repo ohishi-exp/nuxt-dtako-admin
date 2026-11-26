@@ -24,6 +24,10 @@ import {
   runSearchWindow,
   splitCsvLine,
   type CardRegisterResult,
+  fetchEtcAccountType,
+  parseAccountType,
+  pickCardRegisterAccount,
+  type EtcAccountTypeNamespace,
 } from '../src/etc-card-register'
 
 // ★ 番号はすべて架空値 (public repo)。
@@ -289,5 +293,77 @@ describe('buildRunConfirmEmail (確認段)', () => {
       '走行日の確認が失敗: boom',
     ])
     expect(mail.body).not.toContain(CARD)
+  })
+})
+
+// 担当アカウント (Refs #1287)。user_id は架空値。
+describe('pickCardRegisterAccount', () => {
+  const reader = (types: Record<string, string | null | Error>) => async (id: string) => {
+    const t = types[id]
+    if (t instanceof Error) throw t
+    return parseAccountType(t)
+  }
+
+  it('並び順で最初の法人を返す (個人は飛ばす、後ろは読まない)', async () => {
+    const seen: string[] = []
+    const pick = await pickCardRegisterAccount(['a', 'b', 'c'], async (id) => {
+      seen.push(id)
+      return ({ a: 'personal', b: 'corporate', c: 'corporate' } as const)[id as 'a']
+    })
+    expect(pick).toEqual({ kind: 'found', userId: 'b' })
+    expect(seen).toEqual(['a', 'b'])
+  })
+
+  it('前に未記録 (読み取り失敗を含む) が居れば unconfirmed', async () => {
+    expect(await pickCardRegisterAccount(['a', 'b'], reader({ a: null, b: 'corporate' }))).toEqual({
+      kind: 'unconfirmed',
+      userId: 'a',
+    })
+    expect(await pickCardRegisterAccount(['a', 'b'], reader({ a: 'personal', b: new Error('x') }))).toEqual({
+      kind: 'unconfirmed',
+      userId: 'b',
+    })
+  })
+
+  it('全員個人・0 件は none', async () => {
+    expect(await pickCardRegisterAccount(['a'], reader({ a: 'personal' }))).toEqual({ kind: 'none' })
+    expect(await pickCardRegisterAccount([], reader({}))).toEqual({ kind: 'none' })
+  })
+})
+
+describe('fetchEtcAccountType', () => {
+  function ns(res: Response) {
+    const calls: string[] = []
+    const n: EtcAccountTypeNamespace = {
+      idFromName: (name) => `id:${name}`,
+      get: (id) => ({
+        fetch: async (url) => {
+          calls.push(`${String(id)} ${url}`)
+          return res
+        },
+      }),
+    }
+    return { n, calls }
+  }
+
+  it('etc-{user_id} の DO の種別を読む', async () => {
+    const { n, calls } = ns(Response.json({ account_type: 'corporate' }))
+    expect(await fetchEtcAccountType(n, 'u1')).toBe('corporate')
+    expect(calls).toEqual(['id:etc-u1 https://relay.internal/internal/etc-account-type'])
+  })
+
+  it('記録なし・不正な値・null 本文・異常応答は null', async () => {
+    expect(await fetchEtcAccountType(ns(Response.json({ account_type: null })).n, 'u')).toBeNull()
+    expect(await fetchEtcAccountType(ns(Response.json({ account_type: 'other' })).n, 'u')).toBeNull()
+    expect(await fetchEtcAccountType(ns(Response.json(null)).n, 'u')).toBeNull()
+    expect(await fetchEtcAccountType(ns(new Response('x', { status: 500 })).n, 'u')).toBeNull()
+  })
+})
+
+describe('parseAccountType', () => {
+  it('personal / corporate だけ通す', () => {
+    expect(parseAccountType('personal')).toBe('personal')
+    expect(parseAccountType('corporate')).toBe('corporate')
+    expect(parseAccountType(undefined)).toBeNull()
   })
 })
