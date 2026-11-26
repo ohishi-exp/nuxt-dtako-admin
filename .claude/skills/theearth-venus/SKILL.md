@@ -40,6 +40,7 @@ consumer 実装: `nuxt-dtako-admin/workers/dtako-scraper-relay/src/theearth-clie
 | NET780ダウンロード | `F-VOS3020` | `VehicleComDataDownLoad.aspx` |
 | 日報 | `F-NRS1010` | `DailyOperationReport.aspx` (作業時間の一括取得元) |
 | 拘束時間管理表 | `F-ERS2010` | `RestraintDataReport.aspx` |
+| 出力ファイル形式 (連動出力形式) | `ddlSystem` | F-NOS3010。日付範囲でも選択でも送る (KUDGSIR が欠ける) |
 
 横断検索は `scripts/xref.sh <語>` でも可 (スクリプト本体は別 PR で追加中)。
 
@@ -695,6 +696,30 @@ Worker 実装は「PageLoad を再現するのではなく、実ブラウザと�
 - 成功応答: `application/octet-stream` + `content-disposition: attachment; filename=csvdata.zip`、
   `PK\x03\x04` (実測 4〜6KB/運行、`KUDGIVT/KUDGURI/SokudoData(/KUDGFUL/KUDGSIR).csv` —
   同梱 CSV はその運行に存在するデータ種別によって増減する)
+
+### F-NOS3010 の出力ファイル形式 ddlSystem — 日付範囲モードでも「連動出力形式」を送る (2026-11-26 本番確定、Refs #1287 / #1296)
+
+> consumer: workers/dtako-scraper-relay/src/theearth-client.ts (downloadCsvZip / findCsvSystemValue)、
+> workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts (runCronDtakoScrape の `cron_zip_without_kudgsir`)
+
+- **症状 (黙って欠ける)**: 日次 cron の日付範囲の出力 (`downloadCsvZip`) が
+  `ctl00$MainContent$ddlSystem` (出力ファイル形式) を送っていなかったため、zip が
+  `KUDGFRY/KUDGIVT/KUDGURI/SokudoData` だけになり、**`KUDGSIR.csv` (料金所の通過記録) と
+  `KUDGFUL.csv` が入っていなかった** (本番の 11-01〜11-25 の取り込み 50 件すべて)。
+  エラーも空 ZIP も出ず、取り込みは通る — 気づける手がかりは zip の中身のファイル名だけ
+- **直し (#1296)**: stage1・stage2 の両方で `ctl00$MainContent$ddlSystem` を送る。value は
+  **その段で受けたページの option のうち、表示文字列が「連動出力形式」と完全一致するもの**から
+  拾う (決め打ちしない・前方一致は選ばない。`findCsvSystemValue`)
+  - GET のページ (stage1) に無ければ **loud fail** (`TheearthPageMismatchError`)。黙って別の形式で取らない
+  - 確認ページ (stage2) に無ければ GET の値で送り、警告 `confirm_page_without_csv_system`
+  - 取得後に zip に `KUDGSIR.csv` が無ければ警告 `cron_zip_without_kudgsir` (料金所を通らない日も
+    あるので失敗にはしない)
+- **本番確認 (2026-11-26)**: 読取日 2026-11-25 を取り直した zip に
+  `KUDGFRY/KUDGFUL/KUDGIVT/KUDGSIR/KUDGURI/SokudoData` が入った。`KUDGFRY` は形式ではなく
+  運行しだい (フェリーの運行だけ)
+- **上の節の stage 2 の罠とは別の現れ方**: 選択モードの確認ページへの再 POST で `ddlSystem` 等を
+  落とすと **22 バイトの空 ZIP** になる。こちら (日付範囲モードで最初から送らない) は
+  **空にならず、ファイルの種類が欠けるだけ**。空 ZIP 検査 (`isEmptyZip`) では捕まらない
 
 ### 「編集日時」タイムスタンプはどこにも無い (確定)
 
