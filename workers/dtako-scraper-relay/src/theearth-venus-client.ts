@@ -68,6 +68,8 @@ export async function callVenusBridgeMethod(
   methodName: string,
   body: Record<string, unknown>,
   fetchImpl: FetchLike = fetch,
+  /** 省略時は待ち続ける (既存の呼び出しはそのまま)。指定すると応答の遅れを loud fail にする。 */
+  timeoutMs?: number,
 ): Promise<unknown> {
   const url = `${BASE_URL}${VENUS_BRIDGE_PATH}/${methodName}`;
   const res = await fetchWithJar(
@@ -79,6 +81,8 @@ export async function callVenusBridgeMethod(
       body: JSON.stringify(body),
     },
     fetchImpl,
+    timeoutMs,
+    methodName,
   );
 
   if (!res.ok) {
@@ -904,12 +908,14 @@ export async function requestDvrDownloadPath(
   serialNo: string,
   fileName: string,
   fetchImpl: FetchLike = fetch,
+  timeoutMs?: number,
 ): Promise<DvrDownloadTarget> {
   const d = await callVenusBridgeMethod(
     jar,
     "Request_DvrFileDownload",
     { key1: serialNo, key2: fileName },
     fetchImpl,
+    timeoutMs,
   );
   if (!Array.isArray(d) || d.length < 2) {
     throw new TheearthClientError(
@@ -1025,13 +1031,30 @@ export async function validateVdfMagicStream(
   });
 }
 
-/** DVR `.vdf` を cookie 付き GET し、マジックバイト検証済みの stream を返す。 */
+/** DVR `.vdf` を cookie 付き GET し、マジックバイト検証済みの stream を返す。
+ * `headerTimeoutMs` は**応答ヘッダが届くまで**の上限 (本体の転送には掛けない —
+ * `AbortSignal.timeout` をそのまま渡すと、数十 MB の転送が途中で切られる)。 */
 export async function openDvrFileStream(
   jar: CookieJar,
   url: string,
   fetchImpl: FetchLike = fetch,
+  headerTimeoutMs?: number,
 ): Promise<ReadableStream<Uint8Array>> {
-  const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl);
+  const controller = headerTimeoutMs ? new AbortController() : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), headerTimeoutMs) : undefined;
+  let res: Response;
+  try {
+    res = await fetchWithJar(
+      jar,
+      url,
+      { method: "GET", signal: controller?.signal },
+      fetchImpl,
+      headerTimeoutMs,
+      "dvrData",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     throw new TheearthClientError(`DVR ファイル取得が HTTP ${res.status} を返しました`);
   }

@@ -19,13 +19,19 @@
  * ```
  * POST /api/dvr/notifications  → { inserted, skipped, pending: [{id, serial_no, file_name}] }
  * POST /api/dvr/files/{id}     → { id, file_status, size, r2_key }   (413 = 32MB 超)
+ * GET  /api/dvr/file?serial_no=&file_name= → 保存済みの `.vdf` (404 = まだ置いていない)
  * ```
  *
  * `pending` を rust が持つので relay 側にリトライ表は要らない — **1 回の cron で
  * 取りこぼしても次回に回る**。
  */
-import { sendViaAlcInternalProxy, type FetchLike } from "./alc-internal-upload";
-import type { DvrNotification } from "./theearth-venus-client";
+import {
+  AlcInternalUploadError,
+  INTERNAL_PROXY_BASE,
+  sendViaAlcInternalProxy,
+  type FetchLike,
+} from "./alc-internal-upload";
+import { validateVdfMagicStream, type DvrNotification } from "./theearth-venus-client";
 
 /** 通知メタデータの batch ingest。auth-worker の allowlist に shared-secret class で載る。 */
 export const DVR_NOTIFICATIONS_INGEST_PATH = "/alc-internal-proxy/api/dvr/notifications";
@@ -473,4 +479,44 @@ export function judgeDvrStaleness(
   if (Number.isNaN(at)) return { hoursSinceLastSuccess: null, stale: false };
   const hours = (now.getTime() - at) / 3_600_000;
   return { hoursSinceLastSuccess: hours, stale: hours >= thresholdHours };
+}
+
+/** 保存済み `.vdf` の読み返し口 (alc-dtako の `GET /dvr/file`)。 */
+export const DVR_FILE_READ_PATH = "/alc-internal-proxy/api/dvr/file";
+
+export interface StoredDvrFileInput {
+  sharedSecret: string;
+  /** **DTAKO_ACCOUNTS の `tenant_id`** (呼び出し元の申告ではない)。key はこのテナントで作られる。 */
+  tenantId: string;
+  serialNo: string;
+  fileName: string;
+}
+
+/**
+ * cron が R2 に置いた `.vdf` を読む (DVR 動画ビューアが theearth から取り直す前に見る)。
+ * **まだ置いていなければ null** (404)。それ以外の非 2xx は本文付きで throw する
+ * (呼び出し側が theearth へ落とすかを決める)。中身は theearth 経路と同じく NET780 の
+ * マジックを検証してから返す (取り違えた物を動画として流さない)。
+ */
+export async function getStoredDvrFile(
+  input: StoredDvrFileInput,
+  fetchImpl: FetchLike,
+): Promise<ReadableStream<Uint8Array> | null> {
+  const query = new URLSearchParams({ serial_no: input.serialNo, file_name: input.fileName });
+  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${DVR_FILE_READ_PATH}?${query.toString()}`, {
+    method: "GET",
+    headers: {
+      "X-Alc-Proxy-Secret": input.sharedSecret,
+      "X-Tenant-ID": input.tenantId,
+    },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok || !res.body) {
+    const text = await res.text();
+    throw new AlcInternalUploadError(
+      `alc-internal-proxy ${DVR_FILE_READ_PATH} failed (${res.status}): ${text.slice(0, 300)}`,
+      res.status,
+    );
+  }
+  return validateVdfMagicStream(res.body);
 }
