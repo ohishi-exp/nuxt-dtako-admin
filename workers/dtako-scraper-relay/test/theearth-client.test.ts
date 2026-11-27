@@ -1009,6 +1009,30 @@ describe('downloadCsvZip', () => {
     await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(VenusSessionExpiredError)
   })
 
+  it('maps a 302 to the login page on the initial GET to VenusSessionExpiredError, not a page mismatch (2026-11-28 comp 75700192)', async () => {
+    // 本番の原本: 本文は `Object moved` だけで txtPass が無い (redirect: "manual")。
+    const fetchImpl = sequenceFetch([redirect('/F-OES1010[Login].aspx?mode=timeout')])
+    const jar = createCookieJar()
+    const err = await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(VenusSessionExpiredError)
+    expect(err).not.toBeInstanceOf(TheearthPageMismatchError)
+  })
+
+  it('maps a 302 to the login page on the stage-1 POST to VenusSessionExpiredError', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), redirect('/F-OES1010[Login].aspx?mode=timeout')])
+    const jar = createCookieJar()
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(VenusSessionExpiredError)
+  })
+
+  it('does not treat a 302 elsewhere (or without Location) as a login redirect on the initial GET', async () => {
+    // 陰性対照: ログイン画面以外への転送は従来どおりページ違いとして原本を残す。
+    for (const location of ['/F-NOS3010[GeneralCsv].aspx', null]) {
+      const fetchImpl = sequenceFetch([redirect(location)])
+      const err = await downloadCsvZip(createCookieJar(), range, fetchImpl).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    }
+  })
+
   it('throws loudly when the stage-2 output button is missing', async () => {
     const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_OUTPUT_HTML)])
     const jar = createCookieJar()

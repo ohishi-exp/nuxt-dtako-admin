@@ -1753,6 +1753,17 @@ describe("downloadOperationCsvZip", () => {
     expect(bodies).toEqual([]);
   });
 
+  it("ログイン画面への 302 (GET / stage1) は VenusSessionExpiredError (張り直しの対象)", async () => {
+    const toLogin = () => new Response(null, { status: 302, headers: { location: "/F-OES1010[Login].aspx?mode=timeout" } });
+    const params = { opeNo: OPE_NO, startOpe: START_OPE };
+    await expect(downloadOperationCsvZip(createCookieJar(), params, sequenceFetch([toLogin()]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+    await expect(
+      downloadOperationCsvZip(createCookieJar(), params, sequenceFetch([html(csvSelectPageHtml()), toLogin()])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
   it("rejects malformed OpeNo / StartOpe", async () => {
     const jar = createCookieJar();
     await expect(downloadOperationCsvZip(jar, { opeNo: "bad", startOpe: START_OPE })).rejects.toThrow(ReportParamError);
