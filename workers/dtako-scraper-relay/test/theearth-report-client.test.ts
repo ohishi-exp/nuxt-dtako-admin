@@ -1639,7 +1639,7 @@ describe("withDisplayNarrow (readDate)", () => {
 // `ddlSystem` (連動出力形式) 等のフィールドを落とすと 22 バイトの空 ZIP が返る。
 
 function csvSelectPageHtml(opts: {
-  omit?: "rdoSelect0" | "txtOperationNo" | "txtStartDateTime" | "btnCsvSvr";
+  omit?: "rdoSelect0" | "txtOperationNo" | "txtStartDateTime" | "btnCsvSvr" | "ddlSystem";
   stage1ButtonValue?: string;
 } = {}): string {
   return `<html><body><form>
@@ -1648,7 +1648,7 @@ function csvSelectPageHtml(opts: {
     <input type="radio" id="rdoSelect1" name="ctl00$MainContent$SelectM" value="rdoSelect1" />
     ${opts.omit === "txtOperationNo" ? "" : `<input type="text" id="txtOperationNo" name="ctl00$MainContent$ucDataSelect$txtOperationNo" value="" />`}
     ${opts.omit === "txtStartDateTime" ? "" : `<input type="text" id="txtStartDateTime" name="ctl00$MainContent$ucDataSelect$txtStartDateTime" value="" />`}
-    <select name="ctl00$MainContent$ddlSystem"><option value="0">連動出力形式</option><option value="1" selected="selected">形式1</option></select>
+    ${opts.omit === "ddlSystem" ? "" : `<select name="ctl00$MainContent$ddlSystem"><option value="0">連動出力形式</option><option value="1" selected="selected">形式1</option></select>`}
     ${opts.omit === "btnCsvSvr" ? "" : `<input type="submit" id="btnCsvSvr" name="ctl00$MainContent$btnCsvSvr" value="${opts.stage1ButtonValue ?? "ダウンロード"}" />`}
   </form></body></html>`;
 }
@@ -1656,13 +1656,16 @@ function csvSelectPageHtml(opts: {
 function csvConfirmPageHtml(opts: {
   omitOutput?: boolean;
   outputButtonValue?: string;
+  /** 確認ページの「連動出力形式」の value (既定 "0")。null なら select ごと無い。 */
+  systemValue?: string | null;
 } = {}): string {
+  const systemValue = opts.systemValue === undefined ? "0" : opts.systemValue;
   return `<html><body><form>
     <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-CONFIRM" />
     <input type="radio" id="rdoSelect0" name="ctl00$MainContent$SelectM" value="rdoSelect0" checked="checked" />
     <input type="text" id="txtOperationNo" name="ctl00$MainContent$ucDataSelect$txtOperationNo" value="server-echo" />
     <input type="text" id="txtStartDateTime" name="ctl00$MainContent$ucDataSelect$txtStartDateTime" value="server-echo" />
-    <select name="ctl00$MainContent$ddlSystem"><option value="0">連動出力形式</option><option value="1" selected="selected">形式1</option></select>
+    ${systemValue === null ? "" : `<select name="ctl00$MainContent$ddlSystem"><option value="${systemValue}">連動出力形式</option><option value="1" selected="selected">形式1</option></select>`}
     ${opts.omitOutput ? "" : `<input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" value="${opts.outputButtonValue ?? "ダウンロード"}" />`}
   </form></body></html>`;
 }
@@ -1696,15 +1699,58 @@ describe("downloadOperationCsvZip", () => {
     expect(stage1.get("ctl00$MainContent$ucDataSelect$txtOperationNo")).toBe(OPE_NO);
     expect(stage1.get("ctl00$MainContent$ucDataSelect$txtStartDateTime")).toBe(START_OPE);
     expect(stage1.get("ctl00$MainContent$btnCsvSvr")).toBe("ダウンロード");
+    // ★ 出力ファイル形式は select の今の値 (形式1 = "1") ではなく「連動出力形式」の value を送る
+    // (Refs #1287 — 今の値のままだと zip に KUDGSIR.csv が入らない)
+    expect(stage1.get("ctl00$MainContent$ddlSystem")).toBe("0");
 
     // stage 2: 確認ページの全フィールド (ddlSystem 含む) + 選択フィールドの明示上書き。
     // これを落とすと空 ZIP が返る (2026-07-09 実測、Refs #203)
     const stage2 = new URLSearchParams(bodies[1]);
-    expect(stage2.get("ctl00$MainContent$ddlSystem")).toBe("1");
+    expect(stage2.get("ctl00$MainContent$ddlSystem")).toBe("0");
     expect(stage2.get("__VIEWSTATE")).toBe("VS-CONFIRM");
     expect(stage2.get("ctl00$MainContent$ucDataSelect$txtOperationNo")).toBe(OPE_NO); // server-echo を上書き
     expect(stage2.get("ctl00$MainContent$ucDataSelect$txtStartDateTime")).toBe(START_OPE);
     expect(stage2.get("ctl00$MainContent$btnCsvSvrOutput")).toBe("ダウンロード");
+  });
+
+  it("確認ページの「連動出力形式」の value は確認ページから拾い直す。確認ページに無ければ stage1 の値で warn 1 行", async () => {
+    const run = async (confirm: string) => {
+      const bodies: string[] = [];
+      const responses = [html(csvSelectPageHtml()), html(confirm), zipResponse()];
+      let call = 0;
+      const fetchImpl: FetchLike = async (_url, init) => {
+        if (init?.body) bodies.push(String(init.body));
+        return responses[call++]!;
+      };
+      await downloadOperationCsvZip(createCookieJar(), { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl);
+      return new URLSearchParams(bodies[1]).get("ctl00$MainContent$ddlSystem");
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await run(csvConfirmPageHtml({ systemValue: "9" }))).toBe("9");
+      expect(warn).not.toHaveBeenCalled();
+      expect(await run(csvConfirmPageHtml({ systemValue: null }))).toBe("0");
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(warn.mock.calls[0]![0]))).toMatchObject({
+        csv_request: "operation",
+        status: "confirm_page_without_csv_system",
+        value: "0",
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("GET のページに「連動出力形式」の選択肢が無ければ POST せずに throw (黙って別の形式で取らない)", async () => {
+    const bodies: string[] = [];
+    const fetchImpl: FetchLike = async (_url, init) => {
+      if (init?.body) bodies.push(String(init.body));
+      return html(csvSelectPageHtml({ omit: "ddlSystem" }));
+    };
+    await expect(downloadOperationCsvZip(createCookieJar(), { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl)).rejects.toThrow(
+      new TheearthClientError("CSV ダウンロードページに出力ファイル形式「連動出力形式」の選択肢 (name=ctl00$MainContent$ddlSystem) が見つかりません"),
+    );
+    expect(bodies).toEqual([]);
   });
 
   it("rejects malformed OpeNo / StartOpe", async () => {

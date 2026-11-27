@@ -34,12 +34,15 @@ import {
   BASE_URL,
   decodeHtmlEntities,
   CSV_PATH,
+  CSV_SYSTEM_LABEL,
+  CSV_SYSTEM_SELECT_NAME,
   DEFAULT_EXPORT_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
   downloadCsvZip,
   ensureZip,
   extractHiddenFields,
   fetchWithJar,
+  findCsvSystemValue,
   findFormFieldById,
   findTagById,
   postForm,
@@ -2088,6 +2091,18 @@ function isEmptyZip(buf: ArrayBuffer): boolean {
  * 空 ZIP が返る (実測。日付範囲モードの「stage 2 で日付欠落 → 空 ZIP」と同じ
  * 罠の選択モード版)。curated なフィールドリストではなく `serializeFormFields`
  * で丸ごと直列化する。
+ *
+ * **出力ファイル形式 (`ddlSystem`) は「連動出力形式」を明示して上書きする** (Refs #1287、`downloadCsvZip` と
+ * 同じ [`findCsvSystemValue`])。丸ごと直列化だけだと select の**今の選択値**がそのまま出るので、
+ * 連動出力形式にならない — 2026-11-27 の本番で「走行日を探し直す」が取った 20 運行の zip すべてに
+ * `KUDGSIR.csv` (料金所) が無かった。stage1 のページに選択肢が無ければ throw、確認ページに無ければ
+ * stage1 の値で warn 1 行 (日付範囲モードと同じ扱い)。
+ *
+ * 連動出力形式にすると zip に `KUDGFUL.csv`・`KUDGSIR.csv` が増える。下流は壊れない (2026-11-27 にコードで確認):
+ * 社内 CakePHP の autoload は元から `KUDGFUL` を探し、`DtakoFuel`/`DtakoEtc` の `importCsv` が
+ * `KUDGFUL`/`KUDGSIR` を運行NO ごとに消してから入れ直す (= 燃料・ETC の行が theearth の今の値で入れ替わる)。
+ * alc の取り込みは `KUDGURI`/`KUDGIVT` だけを読み、他の `.csv` は R2 に運行ごとに分けて置くだけ
+ * (日付範囲の zip は #1296 から同じ 2 ファイルを送っている)。
  */
 export async function downloadOperationCsvZip(
   jar: CookieJar,
@@ -2121,10 +2136,17 @@ export async function downloadOperationCsvZip(
     );
   }
 
+  const systemValue = findCsvSystemValue(html);
+  if (systemValue === null) {
+    throw new TheearthClientError(
+      `CSV ダウンロードページに出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢 (name=${CSV_SYSTEM_SELECT_NAME}) が見つかりません`,
+    );
+  }
   const selection: Record<string, string> = {
     [selectModeRadio.name]: selectModeRadio.value,
     [opNoField.name]: params.opeNo,
     [startDtField.name]: params.startOpe,
+    [CSV_SYSTEM_SELECT_NAME]: systemValue,
   };
 
   const stage1Body = new URLSearchParams({
@@ -2152,10 +2174,23 @@ export async function downloadOperationCsvZip(
     throw new TheearthClientError("CSV ダウンロードの2段階目ボタン (btnCsvSvrOutput) が見つかりません");
   }
   // 確認ページは選択フィールドをエコーバックするが、欠落 = 空 ZIP の事故を防ぐ
-  // ため選択フィールドはこちらの値で明示的に上書きする。
+  // ため選択フィールドはこちらの値で明示的に上書きする。出力ファイル形式は確認ページの option から
+  // 拾い直し、無ければ stage1 の値 (`selection` のまま) で warn 1 行。
+  const stage2SystemValue = findCsvSystemValue(stage1Html);
+  if (stage2SystemValue === null) {
+    console.warn(
+      JSON.stringify({
+        csv_request: "operation",
+        status: "confirm_page_without_csv_system",
+        message: `確認ページに出力ファイル形式「${CSV_SYSTEM_LABEL}」の選択肢が無いため、GET のページの値を送る`,
+        value: systemValue,
+      }),
+    );
+  }
   const stage2Body = new URLSearchParams({
     ...serializeFormFields(stage1Html),
     ...selection,
+    [CSV_SYSTEM_SELECT_NAME]: stage2SystemValue ?? systemValue,
     [outputButton.name]: outputButton.value || "ダウンロード",
   });
   const stage2Res = await postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs);
