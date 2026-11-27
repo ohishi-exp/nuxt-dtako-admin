@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import type { FuelIntankRow } from '~/types'
 import {
+  dvrNoTrackMessage,
+  findDvrVehicleState,
   startLabel,
   formatShortDatetime,
   formatQuantity,
@@ -448,5 +450,38 @@ describe('vehicleStateMarkerIndex', () => {
     expect(vehicleStateMarkerIndex(states, { vehicle: '' })).toBeNull()
     expect(vehicleStateMarkerIndex(states, { vehicle_name: '長崎100あ9999' })).toBeNull()
     expect(vehicleStateMarkerIndex([{ vehicleCd: '1', latitude: 1, longitude: null }], { vehicle: '1' })).toBeNull()
+  })
+})
+
+describe('findDvrVehicleState', () => {
+  const states = [
+    { vehicleCd: '0000002158', vehicleName: '長崎100あ2158' },
+    { vehicleCd: '2424', vehicleName: '長崎800か2424' },
+  ]
+  it('GPS の有無を問わず指定の車の行を返す (先頭ゼロ・車番の空白は無視)', () => {
+    expect(findDvrVehicleState(states, { vehicle: '2158' })).toBe(states[0])
+    expect(findDvrVehicleState(states, { vehicle_name: '長崎800か 2424' })).toBe(states[1])
+  })
+  it('居なければ null', () => {
+    expect(findDvrVehicleState(states, { vehicle: '9999' })).toBeNull()
+  })
+})
+
+describe('dvrNoTrackMessage', () => {
+  it('現在地一覧の最終データ時刻を添え、車輌CD の指定には車番も添える', () => {
+    expect(dvrNoTrackMessage({ vehicle: '2424' }, '2026-11-27', { vehicleName: '長崎800か2424', dataDatetime: '25/09/24 16:29' }))
+      .toBe('車両 2424 (長崎800か2424) の 2026-11-27 の位置データがありません (theearth の最終データ 25/09/24 16:29)')
+  })
+  it('車番の指定には車番を重ねない', () => {
+    expect(dvrNoTrackMessage({ vehicle_name: '長崎800か2424' }, '2026-11-27', { vehicleName: '長崎800か2424', dataDatetime: '25/09/24 16:29' }))
+      .toBe('車両 長崎800か2424 の 2026-11-27 の位置データがありません (theearth の最終データ 25/09/24 16:29)')
+  })
+  it('データ時刻が空の車は記録が無いと言う', () => {
+    expect(dvrNoTrackMessage({ vehicle: '72' }, '2026-11-27', { vehicleName: null, dataDatetime: null }))
+      .toBe('車両 72 の 2026-11-27 の位置データがありません (theearth に位置データの記録がありません)')
+  })
+  it('現在地一覧に居なければ理由は添えない', () => {
+    expect(dvrNoTrackMessage({ vehicle: '2424' }, '2026-11-27', null))
+      .toBe('車両 2424 の 2026-11-27 の位置データがありません')
   })
 })

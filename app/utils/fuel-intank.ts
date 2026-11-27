@@ -219,6 +219,34 @@ export function vehicleStateMarkerIndex(
   return idx >= 0 ? idx : null
 }
 
+/** 現在地一覧 (全事業所) のうち指定の車の行 (GPS の有無は問わない)。居なければ null */
+export function findDvrVehicleState<T extends { vehicleCd: string | null, vehicleName?: string | null }>(
+  states: ReadonlyArray<T>,
+  q: DvrVehicleQuery,
+): T | null {
+  return states.find(v => matchesDvrVehicle(v.vehicleCd, v.vehicleName, q)) ?? null
+}
+
+/**
+ * `/dvr-map?vehicle=…&at=…` で、その日の動態履歴が 0 点だったときの 1 文。
+ * theearth の DVR マスタ (`Request_NetDvrFuncInitValue`) には載らない車がある
+ * (2026-11-27 comp 27324455 実測: マスタ 173 台 / 現在地一覧 207 台、一覧にあってマスタに無い車 58 台。
+ * 見た 9 台 (車輌CD 2424 と先頭 8 台) はデータ時刻が 2025-09-24 か空)。
+ * 現在地一覧の行 (`state`) があれば、最後にデータが来た時刻を添えて「なぜ無いか」を示す
+ */
+export function dvrNoTrackMessage(
+  q: DvrVehicleQuery,
+  day: string,
+  state: { vehicleName?: string | null, dataDatetime: string | null } | null,
+): string {
+  const name = 'vehicle' in q && state?.vehicleName ? ` (${state.vehicleName})` : ''
+  const base = `車両 ${dvrVehicleLabel(q)}${name} の ${day} の位置データがありません`
+  if (!state) return base
+  return state.dataDatetime
+    ? `${base} (theearth の最終データ ${state.dataDatetime})`
+    : `${base} (theearth に位置データの記録がありません)`
+}
+
 /**
  * 「位置を見る」で開く `/dvr-map` の query。車の指定 ([`DvrVehicleQuery`]) と `at` (給油日時 `YYYY-MM-DDTHH:mm`)。
  * 車輌CD も車番も無い行は null (ボタンを出さない)。`at` の形は dvr-map 側が検査する。
