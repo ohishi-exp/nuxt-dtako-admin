@@ -46,6 +46,7 @@ import {
   findFormFieldById,
   findTagById,
   postForm,
+  redirectsToLogin,
   serializeFormFields,
   TheearthClientError,
   type CookieJar,
@@ -2118,7 +2119,9 @@ export async function downloadOperationCsvZip(
 
   const getRes = await fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
   const html = await getRes.text();
-  if (isLoginRedirect(html)) {
+  // ログイン画面への 302 も同じセッション切れ (`redirectsToLogin` の doc)。拾わないと
+  // 「CSV フォームの要素が見つかりません」に化け、`withTheearthLoginSession` が張り直せない。
+  if (isLoginRedirect(html) || redirectsToLogin(getRes)) {
     throw new VenusSessionExpiredError(
       "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています",
     );
@@ -2163,7 +2166,7 @@ export async function downloadOperationCsvZip(
   }
 
   const stage1Html = await stage1Res.text();
-  if (isLoginRedirect(stage1Html)) {
+  if (isLoginRedirect(stage1Html) || redirectsToLogin(stage1Res)) {
     throw new VenusSessionExpiredError(
       "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
     );

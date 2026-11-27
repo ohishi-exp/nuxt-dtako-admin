@@ -471,6 +471,18 @@ export function hasLoginForm(html: string): boolean {
   return findTagById(html, "txtPass") !== null;
 }
 
+/** 応答がログイン画面 (`F-OES1010[Login].aspx`) への 3xx 転送か。
+ *
+ * `fetchWithJar` は `redirect: "manual"` なので、セッションが切れたページを開くと
+ * 本文がログインフォームではなく `Object moved to /F-OES1010[Login].aspx?mode=timeout`
+ * だけの 302 が返る。[`hasLoginForm`] (本文の txtPass) では拾えず、「CSV フォームの要素
+ * (id=rdoSelect1) が見つかりません」に化けていた (2026-11-28 1:00 JST の日次 cron、comp
+ * 75700192 — ログイン成功から約 0.6 秒で切れていた。2026-09-26 の原本も同じ 152 bytes の 302)。 */
+export function redirectsToLogin(res: Response): boolean {
+  if (res.status < 300 || res.status >= 400) return false;
+  return (res.headers.get("location") ?? "").includes("F-OES1010");
+}
+
 /**
  * セッション重複プロンプトが「実際に発動しているか」を判定する。
  *
@@ -1040,13 +1052,14 @@ export async function downloadCsvZip(
     fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs, "csv_get"),
   );
   const html = await getRes.text();
-  // セッション切れの場合ここでログイン画面が返る。チェックせずに進むと
-  // 「CSV フォームの要素が見つかりません」という誤解を招く generic error に
-  // 化けて 502 に潰れてしまう (呼び出し側が 401 で再ログインを促せない、
+  // セッション切れの場合ここでログイン画面が返る (200 のログインフォームか、ログイン画面への
+  // 302 のどちらか)。チェックせずに進むと「CSV フォームの要素が見つかりません」という誤解を
+  // 招く generic error に化けて 502 に潰れてしまう (呼び出し側が 401 で再ログインを促せない、
   // Refs #169 — 日報編集の zip DL 経路で顕在化した HIGH バグ)。
-  if (hasLoginForm(html)) {
+  if (hasLoginForm(html) || redirectsToLogin(getRes)) {
     throw new VenusSessionExpiredError(
-      "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています",
+      "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています" +
+        " (同じアカウントで別の場所からログインされた可能性があります)",
     );
   }
   const hidden = extractHiddenFields(html);
@@ -1160,7 +1173,7 @@ export async function downloadCsvZip(
   // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + **日付範囲** + 出力ボタン
   // で再 POST。日付範囲を落とすと空 ZIP が返る (このフロー最大の落とし穴、上の doc 参照)。
   const stage1Html = await stage1Res.text();
-  if (hasLoginForm(stage1Html)) {
+  if (hasLoginForm(stage1Html) || redirectsToLogin(stage1Res)) {
     throw new VenusSessionExpiredError(
       "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
     );
