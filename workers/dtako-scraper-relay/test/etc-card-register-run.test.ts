@@ -5,7 +5,10 @@ import {
   findRescanTarget,
   RESCAN_MAX_OPERATIONS,
   RescanUpstreamError,
+  rescanNoteText,
   rescanRunsForRow,
+  writeRescanNote,
+  type RescanReport,
   runCardRegistrations,
   SELECT_RESCAN_TARGET_SQL,
   SELECT_WAITING_FOR_TENANT_SQL,
@@ -525,6 +528,47 @@ describe('rescanRunsForRow', () => {
     expect(report).toMatchObject({ operations: RESCAN_MAX_OPERATIONS + 1, skipped: RESCAN_MAX_OPERATIONS, truncated: true })
   })
 
+  it('shouldPause が真なら 1 運行進めて paused と途中経過を返し、progress を渡すと一覧を引き直さず続きから進める', async () => {
+    const { db } = routedDb([{ ...TARGET, plate4: '1234' }], WAITING)
+    const ops = [
+      op('2611250900000010001234', '10001234'),
+      op('abc', '10001234'),
+      op('2611200534040000001234', '10001234'),
+    ]
+    const alcGet = alcList({ '1': { total: 3, operations: ops } })
+    const fetchTollCsv = vi.fn(async (o: { opeNo22: string }) =>
+      o.opeNo22.startsWith('261125') ? null : tollCsv(o.opeNo22, '2026/11/20'),
+    )
+    const deps = { db, now: NOW, alcGet, fetchTollCsv }
+    const first = await rescanRunsForRow(deps, 'tenant-a', 7, { shouldPause: () => true })
+    expect(first).toEqual({
+      kind: 'paused',
+      progress: {
+        from: '2026-11-10',
+        to: '2026-11-26',
+        unkoNos: ops.map((o) => o.unko_no),
+        next: 1,
+        operations: 3,
+        truncated: false,
+        fetched: 0,
+        skipped: 1,
+        failed: 0,
+        firstError: null,
+      },
+    })
+    expect(fetchTollCsv).toHaveBeenCalledTimes(1)
+    // storage を通った体で JSON を往復させてから続きを渡す
+    const progress = JSON.parse(JSON.stringify((first as { progress: unknown }).progress))
+    const second = await rescanRunsForRow(deps, 'tenant-a', 7, { progress, shouldPause: () => false })
+    expect(alcGet).toHaveBeenCalledTimes(1)
+    expect(fetchTollCsv).toHaveBeenCalledTimes(2)
+    expect(second).toMatchObject({ kind: 'done', operations: 3, fetched: 1, skipped: 2, result: { kind: 'found', runDate: '2026-11-20' } })
+    // 続きの途中で行が走行待ちでなくなっていたら not_found (theearth は叩かない)
+    const gone = await rescanRunsForRow({ ...deps, db: routedDb([], []).db }, 'tenant-a', 7, { progress })
+    expect(gone).toEqual({ kind: 'not_found' })
+    expect(fetchTollCsv).toHaveBeenCalledTimes(2)
+  })
+
   it('行が無い・tenant が違えば not_found で alc も theearth も叩かない。未来の登録日は 0 件で終わる', async () => {
     const alcGet = vi.fn()
     const fetchTollCsv = vi.fn()
@@ -574,5 +618,90 @@ describe('rescanRunsForRow', () => {
     )
     expect(odd).toMatchObject({ operations: 1, skipped: 1, fetched: 0 })
     expect(base.fetchTollCsv).not.toHaveBeenCalled()
+  })
+})
+
+describe('writeRescanNote / rescanNoteText (探し直しの結果を画面の「最後の誤り」に残す)', () => {
+  const AT = new Date('2026-11-27T03:04:00Z') // 12:04 JST
+  const done = (over: Partial<Extract<RescanReport, { kind: 'done' }>> = {}): RescanReport => ({
+    kind: 'done',
+    id: 3,
+    cardNumber: CARD,
+    from: '2026-11-10',
+    to: '2026-11-27',
+    operations: 4,
+    fetched: 3,
+    skipped: 1,
+    failed: 0,
+    firstError: null,
+    truncated: false,
+    result: null,
+    ...over,
+  })
+
+  it('waiting_run の行にだけ書く (確認段が failed にした行の理由・先へ進んだ行は上書きしない)', async () => {
+    const { db, updates } = fakeDb([])
+    await writeRescanNote(db, 3, 'x', AT)
+    expect(updates).toEqual([
+      {
+        sql: "UPDATE etc_card_registrations SET last_error = ?, updated_at = ? WHERE id = ? AND status = 'waiting_run'",
+        params: ['x', AT.toISOString(), 3],
+      },
+    ])
+  })
+
+  it.each([
+    ['受付', { kind: 'queued' as const, acceptedAt: AT }, '走行日を探し直し中 (11-27 12:04 受付)。数分後に再読み込みしてください'],
+    [
+      '再起動で中断',
+      { kind: 'interrupted' as const, acceptedAt: new Date('2026-11-27T02:59:00Z') },
+      '走行日の探し直し (11-27 12:04): 中断しました (relay の再起動。11-27 11:59 受付分)。もう一度「走行日を探し直す」を押してください',
+    ],
+    ['例外', { kind: 'error' as const, error: new RescanUpstreamError('運行の一覧を読めません (503): down') }, '走行日の探し直し (11-27 12:04): 失敗しました: 運行の一覧を読めません (503): down'],
+    ['Error でない例外', { kind: 'error' as const, error: 'plain' }, '走行日の探し直し (11-27 12:04): 失敗しました: plain'],
+    [
+      '途中',
+      {
+        kind: 'report' as const,
+        report: {
+          kind: 'paused' as const,
+          progress: { from: 'a', to: 'b', unkoNos: ['1', '2', '3'], next: 2, operations: 3, truncated: false, fetched: 1, skipped: 1, failed: 0, firstError: null },
+        },
+      },
+      '走行日を探し直し中 (11-27 12:04 時点で 2/3 運行まで見ました)。数分後に再読み込みしてください',
+    ],
+    ['対象外', { kind: 'report' as const, report: { kind: 'not_found' as const } }, '走行日の探し直し (11-27 12:04): 対象の行ではありません (会社が違う・走行待ちでない・下 4 桁が無い)'],
+    [
+      '見つけた',
+      { kind: 'report' as const, report: done({ result: { id: 3, cardNumber: CARD, kind: 'found', runDate: '2026-11-20' } }) },
+      '走行日の探し直し (11-27 12:04): 走行日 2026-11-20 を見つけました',
+    ],
+    [
+      '記録済み',
+      { kind: 'report' as const, report: done({ result: { id: 3, cardNumber: CARD, kind: 'kept', runDate: '2026-11-21' } }) },
+      '走行日の探し直し (11-27 12:04): 走行日 2026-11-21 は記録済みです (それより新しい走行はありません)',
+    ],
+    ['範囲が空', { kind: 'report' as const, report: done({ from: '2026-11-28', operations: 0, fetched: 0, skipped: 0 }) }, '走行日の探し直し (11-27 12:04): 探す範囲が空です (登録日 2026-11-28 が今日より後)'],
+    [
+      '見つからない',
+      { kind: 'report' as const, report: done() },
+      '走行日の探し直し (11-27 12:04): 見つかりませんでした (範囲 2026-11-10..2026-11-27・車両の運行 4 件・料金所 CSV を読めた 3 件・CSV 無し 1 件)',
+    ],
+    [
+      '見つからない (上限・失敗あり)',
+      { kind: 'report' as const, report: done({ truncated: true, operations: 21, skipped: 0, failed: 2, firstError: 'e'.repeat(300) }) },
+      `走行日の探し直し (11-27 12:04): 見つかりませんでした (範囲 2026-11-10..2026-11-27・車両の運行 ${RESCAN_MAX_OPERATIONS} 件超 (新しい方から ${RESCAN_MAX_OPERATIONS} 件だけ見ました)・料金所 CSV を読めた 3 件・取得失敗 2 件 (${'e'.repeat(120)}))`,
+    ],
+  ])('%s', (_l, outcome, text) => {
+    expect(rescanNoteText(outcome, AT)).toBe(text)
+  })
+
+  it('車両が複数一致は書かない (確認段が failed と理由を書いている)。例外の文は 200 字まで', () => {
+    expect(
+      rescanNoteText({ kind: 'report', report: done({ result: { id: 3, cardNumber: CARD, kind: 'multiple', detail: 'd' } }) }, AT),
+    ).toBeNull()
+    expect(rescanNoteText({ kind: 'error', error: new Error('x'.repeat(500)) }, AT)).toBe(
+      `走行日の探し直し (11-27 12:04): 失敗しました: ${'x'.repeat(200)}`,
+    )
   })
 })

@@ -165,6 +165,10 @@ export async function findRescanTarget(db: CardRegisterDb, id: number): Promise<
 /** 1 回に zip を取る運行の上限 (operation-zip の items と同じ 20)。超えたら新しい方から 20 件、`truncated`。 */
 export const RESCAN_MAX_OPERATIONS = 20;
 
+/** 探し直しを alarm 1 回で進める時間の目安。過ぎたら次の運行の前で止め、続きは次の alarm (Refs #1287)。
+ * alarm 1 回の上限 (Cloudflare の文書では 15 分) より十分短くし、1 運行の zip が長引いても収まるようにする。 */
+export const RESCAN_ALARM_BUDGET_MS = 5 * 60 * 1000;
+
 /** 運行の一覧の 1 ページの件数 (alc-dtako-worker の `MAX_PER_PAGE`)。 */
 export const RESCAN_LIST_PER_PAGE = 200;
 
@@ -227,33 +231,82 @@ export type RescanReport =
  *    (`deriveOpeNoFromUnkoNo`) zip の KUDGSIR を読み、確認段と同じ判定に行 id で絞って通す
  * 3. 走行日が見つかったら (`none` 以外) 残りの運行は取らない
  *
+ * **途中で止めて続きから進められる** (`opts`)。1 運行の zip は長く、`alarm()` 1 回の時間に 20 運行が
+ * 収まる保証が無いので、`shouldPause()` が真なら (今回 1 件は進めた上で) `paused` と途中経過を返す。
+ * 呼び手はそれを storage に積み直し、次の回に `progress` で渡す (一覧は引き直さない)。
+ *
  * - `tenantId` (呼び手の theearth アカウントの tenant) と行の tenant が違えば `not_found`
  * - 1 運行の取得の失敗は数えて次へ進む。一覧が読めなければ {@link RescanUpstreamError}
  *
  * 呼び手は theearth の同じ会社への同時ログインを避けるため、DO の `enqueueScrape` の中から呼ぶこと。
  */
-export async function rescanRunsForRow(deps: RescanDeps, tenantId: string, id: number): Promise<RescanReport> {
+export async function rescanRunsForRow(
+  deps: RescanDeps,
+  tenantId: string,
+  id: number,
+  opts: { progress?: RescanProgress; shouldPause?: () => boolean } = {},
+): Promise<RescanStep> {
   const target = await findRescanTarget(deps.db, id);
   if (!target || target.tenant_id !== tenantId) return { kind: "not_found" };
-  const window = runSearchWindow(deps.now, effectiveRegistrationDate(target.registration_date, target.received_at));
-  const report = {
-    kind: "done" as const,
-    id,
-    cardNumber: target.card_number,
-    from: window.from,
-    to: window.to,
-    operations: 0,
-    fetched: 0,
-    skipped: 0,
-    failed: 0,
-    firstError: null as string | null,
-    truncated: false,
-    result: null as RunConfirmResult | null,
-  };
-  if (window.from > window.to) return report;
+  const progress = opts.progress ?? (await listRescanOperations(deps, tenantId, target));
+  let result: RunConfirmResult | null = null;
+  const start = progress.next;
+  for (let i = start; i < progress.unkoNos.length; i++) {
+    // 1 運行ぶんの zip は長い (stage 2)。alarm 1 回の時間に収まらなければ、ここまでを storage に残して
+    // 次の alarm で続きから (呼び手が `paused` を積み直す)。今回の 1 件目は必ず進める。
+    if (i > start && opts.shouldPause?.()) return { kind: "paused", progress };
+    progress.next = i + 1;
+    const op = deriveOpeNoFromUnkoNo(progress.unkoNos[i]!);
+    if (!op) {
+      progress.skipped++;
+      continue;
+    }
+    let csv: string | null;
+    try {
+      csv = await deps.fetchTollCsv(op);
+    } catch (err) {
+      progress.failed++;
+      progress.firstError ??= `${op.opeNo22}: ${errorMessage(err)}`;
+      continue;
+    }
+    if (csv === null) {
+      progress.skipped++;
+      continue;
+    }
+    progress.fetched++;
+    const found = (await confirmRunsFromTollCsv(deps, tenantId, csv, id)).results[0];
+    if (found && found.kind !== "none") {
+      result = found;
+      break;
+    }
+  }
+  const { unkoNos: _unkoNos, next: _next, ...counts } = progress;
+  return { kind: "done", id, cardNumber: target.card_number, ...counts, result };
+}
 
+/** 探し直しの途中経過。`alarm()` をまたいで storage (キューの item) に持つ。 */
+export interface RescanProgress {
+  from: string;
+  to: string;
+  /** zip を取る運行 NO (新しい順、最大 {@link RESCAN_MAX_OPERATIONS} 件)。 */
+  unkoNos: string[];
+  /** 次に取る `unkoNos` の位置。 */
+  next: number;
+  operations: number;
+  truncated: boolean;
+  fetched: number;
+  skipped: number;
+  failed: number;
+  firstError: string | null;
+}
+
+export type RescanStep = RescanReport | { kind: "paused"; progress: RescanProgress };
+
+/** 手順 1: 運行の一覧を全ページ引いて、zip を取る運行を決める。 */
+async function listRescanOperations(deps: RescanDeps, tenantId: string, target: RescanTarget): Promise<RescanProgress> {
+  const window = runSearchWindow(deps.now, effectiveRegistrationDate(target.registration_date, target.received_at));
   const unkoNos: string[] = [];
-  for (let page = 1; ; page++) {
+  for (let page = 1; window.from <= window.to; page++) {
     const q = new URLSearchParams({
       date_from: window.from,
       date_to: window.to,
@@ -277,35 +330,73 @@ export async function rescanRunsForRow(deps: RescanDeps, tenantId: string, id: n
     const total = typeof body.total === "number" ? body.total : 0;
     if (unkoNos.length > RESCAN_MAX_OPERATIONS || items.length === 0 || page * RESCAN_LIST_PER_PAGE >= total) break;
   }
-  report.operations = unkoNos.length;
-  report.truncated = unkoNos.length > RESCAN_MAX_OPERATIONS;
+  return {
+    from: window.from,
+    to: window.to,
+    unkoNos: unkoNos.slice(0, RESCAN_MAX_OPERATIONS),
+    next: 0,
+    operations: unkoNos.length,
+    truncated: unkoNos.length > RESCAN_MAX_OPERATIONS,
+    fetched: 0,
+    skipped: 0,
+    failed: 0,
+    firstError: null,
+  };
+}
 
-  for (const unko of unkoNos.slice(0, RESCAN_MAX_OPERATIONS)) {
-    const op = deriveOpeNoFromUnkoNo(unko);
-    if (!op) {
-      report.skipped++;
-      continue;
-    }
-    let csv: string | null;
-    try {
-      csv = await deps.fetchTollCsv(op);
-    } catch (err) {
-      report.failed++;
-      report.firstError ??= `${op.opeNo22}: ${errorMessage(err)}`;
-      continue;
-    }
-    if (csv === null) {
-      report.skipped++;
-      continue;
-    }
-    report.fetched++;
-    const result = (await confirmRunsFromTollCsv(deps, tenantId, csv, id)).results[0];
-    if (result && result.kind !== "none") {
-      report.result = result;
-      break;
-    }
+/**
+ * 「走行日を探し直す」の今の状態・結果を、行の `last_error` (画面の「最後の誤り」列) に 1 文で残す
+ * (Refs #1287)。**結果がログ 1 行にしか出ない間、「動いていない」と「見つからなかった」を画面から
+ * 見分けられなかった**ため。`waiting_run` の行だけに書く — 確認段が `failed` にした行 (車両が複数一致)
+ * の理由や、先へ進んだ行は上書きしない。登録段が通れば `last_error` は NULL に戻る。
+ */
+export async function writeRescanNote(db: CardRegisterDb, id: number, text: string, now: Date): Promise<void> {
+  await db
+    .prepare("UPDATE etc_card_registrations SET last_error = ?, updated_at = ? WHERE id = ? AND status = 'waiting_run'")
+    .bind(text, now.toISOString(), id)
+    .run();
+}
+
+/** `MM-DD HH:mm` (JST)。 */
+function jstMinute(at: Date): string {
+  return new Date(at.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(5, 16).replace("T", " ");
+}
+
+/** 探し直しの結末。`report` は {@link rescanRunsForRow} の戻り、`error` は投げられた例外。 */
+export type RescanOutcome =
+  | { kind: "queued"; acceptedAt: Date }
+  | { kind: "report"; report: RescanStep }
+  | { kind: "error"; error: unknown }
+  | { kind: "interrupted"; acceptedAt: Date };
+
+/** 行に残す文。`null` = 書かない (確認段が `failed` と理由を書いた `multiple`)。 */
+export function rescanNoteText(outcome: RescanOutcome, now: Date): string | null {
+  const head = `走行日の探し直し (${jstMinute(now)})`;
+  switch (outcome.kind) {
+    case "queued":
+      return `走行日を探し直し中 (${jstMinute(outcome.acceptedAt)} 受付)。数分後に再読み込みしてください`;
+    case "interrupted":
+      return `${head}: 中断しました (relay の再起動。${jstMinute(outcome.acceptedAt)} 受付分)。もう一度「走行日を探し直す」を押してください`;
+    case "error":
+      return `${head}: 失敗しました: ${errorMessage(outcome.error).slice(0, 200)}`;
   }
-  return report;
+  const r = outcome.report;
+  if (r.kind === "paused") {
+    return `走行日を探し直し中 (${jstMinute(now)} 時点で ${r.progress.next}/${r.progress.unkoNos.length} 運行まで見ました)。数分後に再読み込みしてください`;
+  }
+  if (r.kind === "not_found") return `${head}: 対象の行ではありません (会社が違う・走行待ちでない・下 4 桁が無い)`;
+  const result = r.result;
+  if (result?.kind === "multiple") return null;
+  if (result?.kind === "found") return `${head}: 走行日 ${result.runDate} を見つけました`;
+  if (result?.kind === "kept") return `${head}: 走行日 ${result.runDate} は記録済みです (それより新しい走行はありません)`;
+  if (r.from > r.to) return `${head}: 探す範囲が空です (登録日 ${r.from} が今日より後)`;
+  const parts = [
+    `車両の運行 ${r.truncated ? `${RESCAN_MAX_OPERATIONS} 件超 (新しい方から ${RESCAN_MAX_OPERATIONS} 件だけ見ました)` : `${r.operations} 件`}`,
+    `料金所 CSV を読めた ${r.fetched} 件`,
+  ];
+  if (r.skipped > 0) parts.push(`CSV 無し ${r.skipped} 件`);
+  if (r.firstError !== null) parts.push(`取得失敗 ${r.failed} 件 (${r.firstError.slice(0, 120)})`);
+  return `${head}: 見つかりませんでした (範囲 ${r.from}..${r.to}・${parts.join("・")})`;
 }
 
 // ---------------------------------------------------------------------------

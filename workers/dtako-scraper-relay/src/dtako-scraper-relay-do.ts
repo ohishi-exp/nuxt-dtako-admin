@@ -94,7 +94,11 @@ import {
 import { readZipFile } from "./zip-entry";
 import {
   confirmRunsFromTollCsv,
+  rescanNoteText,
   rescanRunsForRow,
+  writeRescanNote,
+  type RescanOutcome,
+  RESCAN_ALARM_BUDGET_MS,
   runCardRegistrations,
   type CardRegisterDb,
   type CardRegisterReport,
@@ -159,6 +163,7 @@ import { pickOnpremMonthOperations } from "./onprem-month-operations";
 import {
   annotateFoldStaleness,
   clearRunningPointer,
+  etcCardRescanJobKey,
   MAX_SCRAPE_JOB_RECORDS,
   migrateLegacyScrapeJobsOnce,
   reapStaleFolds,
@@ -173,6 +178,7 @@ import {
   SCRAPE_JOB_ORDER_KEY,
   SCRAPE_QUEUE_KEY,
   setRunningPointer,
+  type QueuedEtcCardRescanItem,
   type QueuedScrapeItem,
   type ScrapeJobEtcConfirmPatch,
   type ScrapeJobFoldPatch,
@@ -3925,9 +3931,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /**
    * POST /internal/etc-card-rescan — body {id, comp_id}。ETC カード 1 行の走行日を、この会社
    * (`scraper-comp-{comp_id}`) の theearth から運行 1 件ぶんの zip を取り直して探す (Refs #1287)。
-   * 1 件の zip でも stage 2 が長く、最大 20 運行取るので **202 で受け、dtako の取り込みと同じキュー
-   * (`enqueueScrape`) に載せて後で回す** (同じ会社の theearth へ同時にログインしない)。
-   * 結果は relay のログ 1 行だけ (メールは送らない)。
+   * 1 件の zip でも stage 2 が長く、最大 20 運行取るので **202 で受け、dtako の取り込みと同じ storage の
+   * キュー (`scrape-queue`) に積んで `alarm()` で回す** (同じ会社の theearth へ同時にログインしない)。
+   * **メモリ上の `waitUntil` に載せていた間は、DO の evict で完走も例外も記録されないまま消えていた**
+   * (2026-11-27 本番。tail に 20 分以上 0 行)。受けた時点で行の `last_error` に「探し直し中」を書き、
+   * 結果 (見つけた / 見つからなかった件数 / 失敗 / 再起動で中断) も同じ欄に書く (`rescanNoteText`)。
+   * メールは送らない。
    */
   private async handleInternalEtcCardRescan(request: Request): Promise<Response> {
     let body: { id?: unknown; comp_id?: unknown };
@@ -3950,14 +3959,50 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!account) {
       return Response.json({ error: "comp_id が DTAKO_ACCOUNTS に見つかりません" }, { status: 503 });
     }
-    this.ctx.waitUntil(
-      this.enqueueScrape(() => this.runEtcCardRescan(account, id)).catch((err) => {
-        console.error(
-          JSON.stringify({ cron: "etc-card-rescan", comp_id: account.comp_id, id, status: "error", error: describeUnknownError(err) }),
-        );
-      }),
-    );
+    // 「探し直し中」は積む前に書く — alarm は積んだ直後に起きうるので、後に書くと結果を上書きしかねない。
+    const acceptedAt = new Date();
+    await this.noteEtcCardRescan(id, { kind: "queued", acceptedAt });
+    await pushScrapeQueueItem(this.ctx.storage, {
+      kind: "etc_card_rescan",
+      jobKey: etcCardRescanJobKey(id),
+      compId: account.comp_id,
+      rescanId: id,
+      acceptedAt: acceptedAt.toISOString(),
+    });
+    console.log(JSON.stringify({ cron: "etc-card-rescan", comp_id: account.comp_id, id, status: "queued" }));
     return Response.json({ accepted: true, id, comp_id: account.comp_id }, { status: 202 });
+  }
+
+  /** 探し直しの状態・結果を D1 の行に書く。**観測のための書き込みなので、失敗しても止めない** (ログだけ)。 */
+  private async noteEtcCardRescan(id: number, outcome: RescanOutcome): Promise<void> {
+    const now = new Date();
+    const text = rescanNoteText(outcome, now);
+    if (text === null) return;
+    try {
+      await writeRescanNote(this.env.DTAKO_DB as unknown as CardRegisterDb, id, text, now);
+    } catch (err) {
+      console.error(
+        JSON.stringify({ cron: "etc-card-rescan", id, status: "note_failed", error: describeUnknownError(err) }),
+      );
+    }
+  }
+
+  /** `scrape-queue` から pop した探し直し 1 件 (`alarm()` から)。account は drain 時に引き直す。 */
+  private async runQueuedEtcCardRescan(item: QueuedEtcCardRescanItem): Promise<void> {
+    const logBase = { cron: "etc-card-rescan", comp_id: item.compId, id: item.rescanId };
+    const account = await this.resolveAccount(item.compId);
+    if (!account || !this.env.DTAKO_DB) {
+      const error = new Error(!account ? `comp_id=${item.compId} が DTAKO_ACCOUNTS に見つかりません` : "DTAKO_DB が未設定です");
+      console.error(JSON.stringify({ ...logBase, status: "error", error: describeUnknownError(error) }));
+      if (this.env.DTAKO_DB) await this.noteEtcCardRescan(item.rescanId, { kind: "error", error });
+      return;
+    }
+    try {
+      await this.enqueueScrape(() => this.runEtcCardRescan(account, item));
+    } catch (err) {
+      console.error(JSON.stringify({ ...logBase, status: "error", error: describeUnknownError(err) }));
+      await this.noteEtcCardRescan(item.rescanId, { kind: "error", error: err });
+    }
   }
 
   /**
@@ -3967,7 +4012,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * `downloadOperationCsvZip` (ログインは job で 1 回にまとめる)。**alc へは上げない**
    * (upload は has_kudgivt をリセットする)。
    */
-  private async runEtcCardRescan(account: DtakoAccountRaw, id: number): Promise<void> {
+  private async runEtcCardRescan(account: DtakoAccountRaw, item: QueuedEtcCardRescanItem): Promise<void> {
+    const id = item.rescanId;
+    const startedAt = Date.now();
     const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
     if (!sharedSecret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
     const authWorker = this.env.AUTH_WORKER;
@@ -3988,8 +4035,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       },
       account.tenant_id,
       id,
+      { progress: item.progress, shouldPause: () => Date.now() - startedAt >= RESCAN_ALARM_BUDGET_MS },
     );
     const logBase = { cron: "etc-card-rescan", comp_id: account.comp_id, id };
+    await this.noteEtcCardRescan(id, { kind: "report", report });
+    if (report.kind === "paused") {
+      // alarm 1 回の時間を使い切る前に、ここまでの途中経過ごと積み直す (次の alarm で続きから)。
+      await pushScrapeQueueItem(this.ctx.storage, { ...item, progress: report.progress });
+      console.log(
+        JSON.stringify({ ...logBase, status: "paused", next: report.progress.next, of: report.progress.unkoNos.length }),
+      );
+      return;
+    }
     if (report.kind === "not_found") {
       console.log(JSON.stringify({ ...logBase, status: "not_found" }));
       return;
@@ -12686,6 +12743,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * WS 手動は DO が死ねば接続も切れるので再開可能性は不要だが、生存中の排他は
    * これまで通り必要)。 */
   private async runQueuedScrapeJob(item: QueuedScrapeItem): Promise<void> {
+    if (item.kind === "etc_card_rescan") return this.runQueuedEtcCardRescan(item);
     const account = await this.resolveAccount(item.compId);
     if (!account) {
       await recordScrapeJob(this.ctx.storage, item.jobKey, {
@@ -12711,6 +12769,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 前回の alarm() 呼び出しが `scrape-running` をクリアする前に死んだ孤児が
     // あれば、ここで安全側に倒す (壊す前なら再投入、壊した後/不明なら failed)。
     const orphan = await recoverOrphan(this.ctx.storage);
+    if (orphan.interruptedRescan && this.env.DTAKO_DB) {
+      await this.noteEtcCardRescan(orphan.interruptedRescan.rescanId, {
+        kind: "interrupted",
+        acceptedAt: new Date(orphan.interruptedRescan.acceptedAt),
+      });
+    }
 
     let queueDrained: string | null = null;
     const next = await popNextScrapeQueueItem(this.ctx.storage);
@@ -12732,6 +12796,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         zip_remaining: zip.remaining,
         orphan_recovered: orphan.recovered,
         orphan_failed: orphan.failed,
+        orphan_rescan_interrupted: orphan.interruptedRescan?.jobKey ?? null,
         queue_drained: queueDrained,
         queue_remaining: queueRemaining,
       }),

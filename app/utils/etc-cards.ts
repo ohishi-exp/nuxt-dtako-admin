@@ -271,7 +271,7 @@ export function canRescan(r: Pick<EtcCardView, 'status' | 'plate4'>): boolean {
 }
 
 /** 「走行日を探し直す」を受け付けたときに行の下へ出す文 (relay は 202 で受けて後で回す) */
-export const RESCAN_ACCEPTED_TEXT = '探し直しを受け付けました。数分後に再読み込みしてください'
+export const RESCAN_ACCEPTED_TEXT = '探し直しを受け付けました。途中経過と結果は「最後の誤り」列に出ます (数分後に再読み込みしてください)'
 
 /** API の失敗を画面の文にする。404 は relay 側の口がまだ無い (未デプロイ) か、行が無い */
 export function etcCardErrorText(e: unknown, retry: string): string {

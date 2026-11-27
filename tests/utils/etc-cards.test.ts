@@ -153,7 +153,7 @@ describe('表示', () => {
     expect(canRescan({ status: 'waiting_run', plate4: '1234' })).toBe(true)
     expect(canRescan({ status: 'waiting_run', plate4: null })).toBe(false)
     expect(canRescan({ status: 'dry_run_ok', plate4: '1234' })).toBe(false)
-    expect(RESCAN_ACCEPTED_TEXT).toBe('探し直しを受け付けました。数分後に再読み込みしてください')
+    expect(RESCAN_ACCEPTED_TEXT).toBe('探し直しを受け付けました。途中経過と結果は「最後の誤り」列に出ます (数分後に再読み込みしてください)')
     expect(canRegister('needs_review')).toBe(false)
     expect(canRegister('registered')).toBe(false)
     expect(canRegister('waiting_run')).toBe(true)
