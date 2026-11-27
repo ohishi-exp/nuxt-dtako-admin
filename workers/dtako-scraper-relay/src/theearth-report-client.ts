@@ -31,6 +31,7 @@
  * 違えば早期に loud fail するので、staging 実機確認で修正する。
  */
 import {
+  assertNotLoginPage,
   BASE_URL,
   decodeHtmlEntities,
   CSV_PATH,
@@ -46,7 +47,6 @@ import {
   findFormFieldById,
   findTagById,
   postForm,
-  redirectsToLogin,
   serializeFormFields,
   TheearthClientError,
   type CookieJar,
@@ -294,14 +294,14 @@ export async function getExpenseForm(
   validateStartOpe(startOpe);
   const url = buildOperationExpenseUrl(opeNo, startOpe);
   const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  const html = await res.text();
+  assertNotLoginPage(
+    res,
+    html,
+    "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   if (!res.ok) {
     throw new TheearthClientError(`経費入力ページの取得が HTTP ${res.status} を返しました`);
-  }
-  const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
-    );
   }
   assertEditPageMatchesOperation(html, opeNo, "経費入力ページ");
   const fuelRows = parseFuelRows(html);
@@ -336,18 +336,23 @@ async function postButton(
   const hidden = extractHiddenFields(html);
   const body = new URLSearchParams({ ...hidden, ...extra, [buttonName]: buttonValue });
   const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const postHtml = await postRes.text();
+  assertNotLoginPage(
+    postRes,
+    postHtml,
+    "POST 後にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!postRes.ok) {
     // theearth の postback 500 は ASP.NET 例外 (yellow screen) の詳細を body に持つ。
     // 従来は本文を捨てていて原因が不明だったため、要約を log + エラーメッセージに載せて
     // 保存 500 の真因を追えるようにする (Refs #199、給油保存 500 の調査用)。
-    const rawBody = await postRes.text();
-    const detail = extractErrorSnippet(rawBody);
+    const detail = extractErrorSnippet(postHtml);
     // ASP.NET エラーページ本文をタグ除去して広めに (1200 字) log に出す。title だけ
     // だと「入力文字列の形式が正しくありません」までしか分からないが、本文には
     // 「例外の詳細 / ソース エラー / スタック トレース」があり、**theearth のどの
     // メソッドが parse に失敗したか** が分かる (= 真の原因フィールド特定)。エラー
     // ページ本文は viewstate を含まないので広めに出してよい (Refs #199)。
-    const bodyDump = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
+    const bodyDump = postHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
     // 送信した非 hidden フィールド (etxt 値等) も log に出す。値は frontend 入力
     // 由来なので改行/制御文字を escape + 長さ制限して log injection を防ぐ。
     const sanitize = (s: string) =>
@@ -361,12 +366,6 @@ async function postButton(
     );
     throw new TheearthClientError(
       `POST が HTTP ${postRes.status} を返しました${detail ? ` — ${detail}` : ""}`,
-    );
-  }
-  const postHtml = await postRes.text();
-  if (isLoginRedirect(postHtml)) {
-    throw new VenusSessionExpiredError(
-      "POST 後にログイン画面が返されました — theearth セッションが切れています",
     );
   }
   return postHtml;
@@ -426,14 +425,14 @@ export async function saveFuelRow(
   const url = buildOperationExpenseUrl(params.opeNo, params.startOpe);
 
   const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  const html = await getRes.text();
+  assertNotLoginPage(
+    getRes,
+    html,
+    "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   if (!getRes.ok) {
     throw new TheearthClientError(`経費入力ページの取得が HTTP ${getRes.status} を返しました`);
-  }
-  const html = await getRes.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
-    );
   }
   const rows = parseFuelRows(html);
   if (!rows.some((r) => r.ctrlIndex === params.ctrlIndex)) {
@@ -712,14 +711,14 @@ export async function releaseLoadedOperation(
     [button.name]: button.value || "解放",
   });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const html = await res.text();
+  assertNotLoginPage(
+    res,
+    html,
+    "読み込み運行の解放後にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!res.ok) {
     throw new TheearthClientError(`読み込み運行の解放 (btnRelece) が HTTP ${res.status} を返しました`);
-  }
-  const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "読み込み運行の解放後にログイン画面が返されました — theearth セッションが切れています",
-    );
   }
 }
 
@@ -737,11 +736,11 @@ async function fetchEditPageHtml(
     await throwGetError(pageLabel, res);
   }
   const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      `${pageLabel}がログイン画面を返しました — theearth セッションが切れています`,
-    );
-  }
+  assertNotLoginPage(
+    res,
+    html,
+    `${pageLabel}がログイン画面を返しました — theearth セッションが切れています`,
+  );
   return html;
 }
 
@@ -961,14 +960,14 @@ export async function startSystemLink(
   // 1. GET (最新 viewstate 取得)
   const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   console.log(`[link-sys] GET status=${getRes.status}`);
+  const html = await getRes.text();
+  assertNotLoginPage(
+    getRes,
+    html,
+    "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   if (!getRes.ok) {
     throw new TheearthClientError(`経費入力ページの取得が HTTP ${getRes.status} を返しました`);
-  }
-  const html = await getRes.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
-    );
   }
 
   // 2. 再集計 (btnScore) — システム連動の前提 (順序依存、skill 確定)
@@ -1060,11 +1059,11 @@ export async function unlockOperation(
     await throwGetError("運行データ入力一覧", getRes);
   }
   const html = await getRes.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    getRes,
+    html,
+    "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
+  );
 
   const button = findFormFieldById(html, "btnInitialize");
   if (!button) {
@@ -1095,14 +1094,14 @@ export async function unlockOperation(
     [button.name]: button.value || "編集制御解除",
   });
   const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const postHtml = await postRes.text();
+  assertNotLoginPage(
+    postRes,
+    postHtml,
+    "編集制御解除後にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!postRes.ok) {
     throw new TheearthClientError(`編集制御解除 POST が HTTP ${postRes.status} を返しました`);
-  }
-  const postHtml = await postRes.text();
-  if (isLoginRedirect(postHtml)) {
-    throw new VenusSessionExpiredError(
-      "編集制御解除後にログイン画面が返されました — theearth セッションが切れています",
-    );
   }
 }
 
@@ -1172,11 +1171,11 @@ export async function verifyReadNoDescending(
     await throwGetError("表示条件指定ページ", res);
   }
   const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "表示条件指定ページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    res,
+    html,
+    "表示条件指定ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   const orderSelected = extractSelectedOptionValueBySuffix(html, "ddlOrder0");
   const descChecked = isRadioCheckedBySuffix(html, "rdoDwOrder0");
   return orderSelected === "ReadNo" && descChecked;
@@ -1275,11 +1274,11 @@ async function fetchDisplayConfigHtml(
     await throwGetError("表示条件指定ページ", res);
   }
   const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "表示条件指定ページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    res,
+    html,
+    "表示条件指定ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   return html;
 }
 
@@ -1296,11 +1295,11 @@ async function fetchOperationListHtml(
     await throwGetError("運行データ入力一覧", res);
   }
   const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    res,
+    html,
+    "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
+  );
   return html;
 }
 
@@ -1325,14 +1324,14 @@ async function applyDisplayNarrowConfig(
   merged[applyButton.name] = applyButton.value || "適用";
   const body = new URLSearchParams(merged);
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const html = await res.text();
+  assertNotLoginPage(
+    res,
+    html,
+    "表示条件指定 (絞込) の適用後にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!res.ok) {
     throw new TheearthClientError(`表示条件指定 (絞込) の適用が HTTP ${res.status} を返しました`);
-  }
-  const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "表示条件指定 (絞込) の適用後にログイン画面が返されました — theearth セッションが切れています",
-    );
   }
 }
 
@@ -1359,14 +1358,14 @@ async function postOperationListUpdate(
     [updateButton.name]: updateButton.value || "更新",
   });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const html = await res.text();
+  assertNotLoginPage(
+    res,
+    html,
+    "運行データ入力一覧の更新後にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!res.ok) {
     throw new TheearthClientError(`運行データ入力一覧の更新 (btnUpdate) が HTTP ${res.status} を返しました`);
-  }
-  const html = await res.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "運行データ入力一覧の更新後にログイン画面が返されました — theearth セッションが切れています",
-    );
   }
   return html;
 }
@@ -1790,14 +1789,14 @@ async function postPagerSubmitButton(
   // (btnUpdate で実証済みの罠)。full form 直列化で現在値を保って送る。
   const body = new URLSearchParams({ ...serializeFormFields(html), [button.name]: button.value });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const nextHtml = await res.text();
+  assertNotLoginPage(
+    res,
+    nextHtml,
+    "運行データ入力一覧のページ送り中にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!res.ok) {
     throw new TheearthClientError(`運行データ入力一覧のページ送りが HTTP ${res.status} を返しました`);
-  }
-  const nextHtml = await res.text();
-  if (isLoginRedirect(nextHtml)) {
-    throw new VenusSessionExpiredError(
-      "運行データ入力一覧のページ送り中にログイン画面が返されました — theearth セッションが切れています",
-    );
   }
   return nextHtml;
 }
@@ -1820,14 +1819,14 @@ export async function postPagerLink(
     __EVENTARGUMENT: link.argument,
   });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  const nextHtml = await res.text();
+  assertNotLoginPage(
+    res,
+    nextHtml,
+    "運転日報のページ送り中にログイン画面が返されました — theearth セッションが切れています",
+  );
   if (!res.ok) {
     throw new TheearthClientError(`運転日報のページ送りが HTTP ${res.status} を返しました`);
-  }
-  const nextHtml = await res.text();
-  if (isLoginRedirect(nextHtml)) {
-    throw new VenusSessionExpiredError(
-      "運転日報のページ送り中にログイン画面が返されました — theearth セッションが切れています",
-    );
   }
   return nextHtml;
 }
@@ -1930,11 +1929,11 @@ async function harvestGrid<T extends GridRowBase>(
       await throwGetError("運転日報ページ", getRes);
     }
     html = await getRes.text();
-    if (isLoginRedirect(html)) {
-      throw new VenusSessionExpiredError(
-        "運転日報ページがログイン画面を返しました — theearth セッションが切れています",
-      );
-    }
+    assertNotLoginPage(
+      getRes,
+      html,
+      "運転日報ページがログイン画面を返しました — theearth セッションが切れています",
+    );
   }
 
   // 前回のページ位置が残っている可能性があるため、まず「最初」へ戻す
@@ -2121,11 +2120,11 @@ export async function downloadOperationCsvZip(
   const html = await getRes.text();
   // ログイン画面への 302 も同じセッション切れ (`redirectsToLogin` の doc)。拾わないと
   // 「CSV フォームの要素が見つかりません」に化け、`withTheearthLoginSession` が張り直せない。
-  if (isLoginRedirect(html) || redirectsToLogin(getRes)) {
-    throw new VenusSessionExpiredError(
-      "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    getRes,
+    html,
+    "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています",
+  );
 
   // フィールド名 (`ctl00$MainContent$...`) は実ページの id から都度解決する。
   const selectModeRadio = findFormFieldById(html, "rdoSelect0"); // 運行データ選択 (ページ既定)
@@ -2166,11 +2165,11 @@ export async function downloadOperationCsvZip(
   }
 
   const stage1Html = await stage1Res.text();
-  if (isLoginRedirect(stage1Html) || redirectsToLogin(stage1Res)) {
-    throw new VenusSessionExpiredError(
-      "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    stage1Res,
+    stage1Html,
+    "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   const outputButton = findFormFieldById(stage1Html, "btnCsvSvrOutput");
   if (!outputButton) {
     // 原因を断定しない (Refs #205-52) — 「ページ仕様が変更された」は確かめていない。

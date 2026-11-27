@@ -2874,6 +2874,13 @@ describe("releaseLoadedOperation", () => {
       releaseLoadedOperation(jar2, sequenceFetch([html(listWithRelece({ withValue: true })), html(LOGIN_REDIRECT_HTML)])),
     ).rejects.toThrow(VenusSessionExpiredError);
   });
+
+  it("maps a 302 to the login page on the release POST to VenusSessionExpiredError (not the generic !ok error)", async () => {
+    const toLogin = new Response(null, { status: 302, headers: { location: "/F-OES1010[Login].aspx?mode=timeout" } });
+    await expect(
+      releaseLoadedOperation(createCookieJar(), sequenceFetch([html(listWithRelece({ withValue: true })), toLogin])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
 });
 
 describe("getWorkForm", () => {
@@ -3672,6 +3679,20 @@ describe("getReviseFormPage", () => {
 });
 
 describe("throwGetError (GET 失敗時の ASP.NET エラー要約)", () => {
+  it("maps a 302 to the login page to VenusSessionExpiredError before reading the body", async () => {
+    const toLogin = new Response(null, { status: 302, headers: { location: "/F-OES1010[Login].aspx?mode=timeout" } });
+    await expect(verifyReadNoDescending(createCookieJar(), sequenceFetch([toLogin]))).rejects.toThrow(
+      new VenusSessionExpiredError("表示条件指定ページがログイン画面へ転送されました — theearth セッションが切れています"),
+    );
+  });
+
+  it("keeps a 302 elsewhere as the generic HTTP error", async () => {
+    const elsewhere = new Response(null, { status: 302, headers: { location: "/F-GOS0030[DataDisplayConfig].aspx" } });
+    await expect(verifyReadNoDescending(createCookieJar(), sequenceFetch([elsewhere]))).rejects.toThrow(
+      /HTTP 302 を返しました$/,
+    );
+  });
+
   it("appends the error snippet from the response body", async () => {
     const res = new Response("<html><head><title>Runtime Error</title></head><body>x</body></html>", { status: 500 });
     const jar = createCookieJar();

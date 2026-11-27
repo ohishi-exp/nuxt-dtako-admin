@@ -1100,6 +1100,19 @@ describe("getVehicleLogTrack", () => {
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 
+  it("maps a 302 to the login page on the GET and the final POST to VenusSessionExpiredError", async () => {
+    const jar = createCookieJar();
+    const okHidden = () => new Response('<input id="__VIEWSTATE" value="v" />', { status: 200 });
+    const toLogin = () =>
+      new Response(null, { status: 302, headers: { location: "/F-OES1010[Login].aspx?mode=timeout" } });
+    await expect(
+      getVehicleLogTrack(jar, "1802", "2026/07/03", "2026/07/03", sequenceFetch([toLogin()])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+    await expect(
+      getVehicleLogTrack(jar, "1802", "2026/07/03", "2026/07/03", sequenceFetch([okHidden(), okHidden(), toLogin()])),
+    ).rejects.toThrow(new VenusSessionExpiredError("動態履歴の表示がログイン画面を返しました — theearth セッションが切れています"));
+  });
+
   it("does not false-positive on incidental \"F-OES1010\" text without an actual txtPass field (Refs #169)", async () => {
     const jar = createCookieJar();
     const okHidden = () => new Response('<input id="__VIEWSTATE" value="v" />', { status: 200 });
