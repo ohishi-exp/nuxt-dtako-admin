@@ -875,8 +875,12 @@ export const CSV_SYSTEM_LABEL = "連動出力形式";
  *
  * これを送らないと、theearth は連動出力形式でない形式で zip を作る — 日次 cron の zip (alc に
  * 取り込まれた 50 件すべて) は `KUDGFRY/KUDGIVT/KUDGURI/SokudoData` だけで、画面で連動出力形式を
- * 選んで取った zip と運行 1 件の zip (`downloadOperationCsvZip`、全フィールドを送る) にある
- * `KUDGFUL.csv`・`KUDGSIR.csv` が無かった。
+ * 選んで取った zip にある `KUDGFUL.csv`・`KUDGSIR.csv` が無かった。
+ *
+ * **運行 1 件の zip (`downloadOperationCsvZip`) も同じ** — select の今の値を丸ごと送るだけでは連動出力形式に
+ * ならず、2026-11-27 の本番で「走行日を探し直す」が取った 20 運行の zip すべてに `KUDGSIR.csv` が無かった。
+ * 以前ここに書いていた「運行 1 件の zip には KUDGSIR がある」は、そのとき画面の既定値がたまたま
+ * 連動出力形式だっただけの観測と見ている。今は両方ともこの関数で value を拾って明示して送る。
  *
  * value は決め打ちせず、option の**表示文字列**で探す。見つからなければ null。
  *
@@ -886,7 +890,7 @@ export const CSV_SYSTEM_LABEL = "連動出力形式";
  *   あるかは実物で確かめていない (選択モードの確認ページの記録 #203 からの推定)。推定が外れたときに
  *   毎日の dtako の取り込みを丸ごと止めないため。
  */
-function findCsvSystemValue(html: string): string | null {
+export function findCsvSystemValue(html: string): string | null {
   const option = parseSelectOptions(html, "name", CSV_SYSTEM_SELECT_NAME)?.options.find(
     (o) => o.label === CSV_SYSTEM_LABEL,
   );
