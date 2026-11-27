@@ -12796,6 +12796,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         zip_remaining: zip.remaining,
         orphan_recovered: orphan.recovered,
         orphan_failed: orphan.failed,
+        orphan_after_ingest: orphan.interruptedAfterIngest,
         orphan_rescan_interrupted: orphan.interruptedRescan?.jobKey ?? null,
         queue_drained: queueDrained,
         queue_remaining: queueRemaining,

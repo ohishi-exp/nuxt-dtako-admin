@@ -13,6 +13,8 @@ import {
   recordFoldProgress,
   recordScrapeJob,
   recoverOrphan,
+  FOLD_INTERRUPTED_BY_ALARM_END,
+  ORPHAN_FAILED_CLOSED_MESSAGE,
   SCRAPE_JOB_KEY_PREFIX,
   SCRAPE_JOB_ORDER_KEY,
   SCRAPE_QUEUE_KEY,
@@ -236,7 +238,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
   it("running pointer が無ければ何もしない", async () => {
     const storage = new FakeStorage();
     const result = await recoverOrphan(storage);
-    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: null });
+    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: null, interruptedAfterIngest: null });
   });
 
   it("★ DO 再作成を模す: 壊す前 (pre_upload) に死んだ孤児はキュー先頭に積み直して pending に戻す", async () => {
@@ -264,7 +266,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
       errSpy.mockRestore();
     }
 
-    expect(result).toEqual({ recovered: "2026-06-14", failed: null, interruptedRescan: null });
+    expect(result).toEqual({ recovered: "2026-06-14", failed: null, interruptedRescan: null, interruptedAfterIngest: null });
     expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
     const queue = await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY);
     expect(queue).toEqual([item("2026-06-14")]);
@@ -297,7 +299,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
       errSpy.mockRestore();
     }
 
-    expect(result).toEqual({ recovered: null, failed: "2026-06-15", interruptedRescan: null });
+    expect(result).toEqual({ recovered: null, failed: "2026-06-15", interruptedRescan: null, interruptedAfterIngest: null });
     expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
     // **絶対にキューへ積み直さない** (二重取り込みの危険、受け入れ条件4)
     const queue = await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY);
@@ -321,7 +323,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
       errSpy.mockRestore();
     }
 
-    expect(result).toEqual({ recovered: "2026-06-20", failed: null, interruptedRescan: null });
+    expect(result).toEqual({ recovered: "2026-06-20", failed: null, interruptedRescan: null, interruptedAfterIngest: null });
     expect(await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY)).toEqual([item("2026-06-20")]);
   });
 
@@ -346,18 +348,108 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
     } finally {
       errSpy.mockRestore();
     }
-    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: rescan });
+    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: rescan, interruptedAfterIngest: null });
     expect(rescan.jobKey).toBe("etc-card-rescan:3");
     expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
     expect(await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY)).toEqual([]);
     expect(await storage.list({ prefix: SCRAPE_JOB_KEY_PREFIX })).toEqual(new Map());
   });
 
+  it("★ 取り込み (state: done) の後、fold の途中で alarm が切れた孤児は done のまま残し、fold を stale に倒す", async () => {
+    const storage = new FakeStorage();
+    await pushScrapeQueueItem(storage, item("2026-11-27"));
+    const popped = await popNextScrapeQueueItem(storage);
+    await setRunningPointer(storage, popped!);
+    // runCronDtakoScrape と同じ順: running(pre) → running(post) → done(+upload_id) → fold running
+    await recordScrapeJob(storage, popped!.jobKey, { state: "running", phase: "pre_upload" });
+    await recordScrapeJob(storage, popped!.jobKey, { state: "running", phase: "post_upload" });
+    await recordScrapeJob(storage, popped!.jobKey, { state: "done", upload_id: "u-1", split_failed: 0 });
+    await recordFoldProgress(storage, popped!.jobKey, {
+      fold_state: "running",
+      fold_started_at: "2026-11-27T16:01:45.838Z",
+      fold_months: ["2026-11"],
+    });
+    // ここで alarm が 15 分の上限で切れる — clearRunningPointer は呼ばれない
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof recoverOrphan>>;
+    try {
+      result = await recoverOrphan(storage);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: null, interruptedAfterIngest: "2026-11-27" });
+    expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
+    expect((await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY)) ?? []).toEqual([]);
+    const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-11-27");
+    expect(record?.state).toBe("done");
+    expect(record?.error).toBeUndefined();
+    expect(record?.upload_id).toBe("u-1");
+    expect(record?.fold_state).toBe("stale");
+    expect(record?.fold_error).toBe(FOLD_INTERRUPTED_BY_ALARM_END);
+    expect(record?.fold_error).toContain("15 分");
+  });
+
+  it("取り込み (state: done) の後で死んだが fold が終端を書き済みなら fold_* も触らない", async () => {
+    const storage = new FakeStorage();
+    await setRunningPointer(storage, item("2026-11-26"));
+    await recordScrapeJob(storage, "2026-11-26", { state: "done", upload_id: "u-2", phase: "post_upload" });
+    await recordFoldProgress(storage, "2026-11-26", { fold_state: "running", fold_months: ["2026-11"] });
+    await recordFoldProgress(storage, "2026-11-26", { fold_state: "done", fold_pages: 4, fold_drivers_written: 38 });
+    const before = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-11-26");
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof recoverOrphan>>;
+    try {
+      result = await recoverOrphan(storage);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(result.interruptedAfterIngest).toBe("2026-11-26");
+    expect(result.failed).toBeNull();
+    expect(await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-11-26")).toEqual(before);
+  });
+
+  it("取り込み (state: done) の後、fold に入る前 (ETC 確認・要再計算) で死んでも done のまま残す", async () => {
+    const storage = new FakeStorage();
+    await setRunningPointer(storage, item("2026-11-25"));
+    await recordScrapeJob(storage, "2026-11-25", { state: "done", upload_id: "u-3", phase: "post_upload" });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof recoverOrphan>>;
+    try {
+      result = await recoverOrphan(storage);
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(result.interruptedAfterIngest).toBe("2026-11-25");
+    const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-11-25");
+    expect(record?.state).toBe("done");
+    expect(record?.fold_state).toBeUndefined();
+  });
+
+  it("post_upload で死んだ fail-closed の文言は deploy / evict だけでなく alarm の上限超過も原因に挙げる", async () => {
+    const storage = new FakeStorage();
+    await setRunningPointer(storage, item("2026-06-18"));
+    await recordScrapeJob(storage, "2026-06-18", { state: "running", phase: "post_upload" });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await recoverOrphan(storage);
+    } finally {
+      errSpy.mockRestore();
+    }
+    const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-06-18");
+    expect(record?.error).toBe(ORPHAN_FAILED_CLOSED_MESSAGE);
+    expect(record?.error).toContain("deploy / evict");
+    expect(record?.error).toContain("15 分");
+  });
+
   it("running pointer はあるが対応する record が無い (evict 済み等) → fail-closed", async () => {
     const storage = new FakeStorage();
     await setRunningPointer(storage, item("2026-06-16"));
     const result = await recoverOrphan(storage);
-    expect(result).toEqual({ recovered: null, failed: "2026-06-16", interruptedRescan: null });
+    expect(result).toEqual({ recovered: null, failed: "2026-06-16", interruptedRescan: null, interruptedAfterIngest: null });
   });
 
   it("running pointer はあるが record に phase フィールドが無い (旧レコード) → fail-closed", async () => {
@@ -365,7 +457,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
     await setRunningPointer(storage, item("2026-06-17"));
     await recordScrapeJob(storage, "2026-06-17", { state: "running" });
     const result = await recoverOrphan(storage);
-    expect(result).toEqual({ recovered: null, failed: "2026-06-17", interruptedRescan: null });
+    expect(result).toEqual({ recovered: null, failed: "2026-06-17", interruptedRescan: null, interruptedAfterIngest: null });
   });
 });
 
