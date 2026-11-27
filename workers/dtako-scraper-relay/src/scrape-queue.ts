@@ -27,6 +27,8 @@
  * 応答待ち中に死んだケースを誤って「壊す前」に分類してしまう。
  */
 
+import type { RescanProgress } from "./etc-card-register-run";
+
 export type ScrapeJobState = "pending" | "running" | "done" | "failed";
 
 /** 破壊的操作 (`has_kudgivt` を `FALSE` に戻すアップロード) の前か後か。
@@ -128,11 +130,34 @@ export type EtcConfirmState = "confirmed" | "failed" | "no_kudgsir" | "skipped";
 /** storage に積む 1 件分。`account` (認証情報) は持たない — drain 時に
  * `compId` から都度解決させる (KV のローテーションを拾える・秘匿情報を
  * queue に長時間残さない、Refs #205-55 設計案)。 */
-export interface QueuedScrapeItem {
+export interface QueuedDtakoScrapeItem {
+  /** 省略 = dtako の取り込み (このフィールド追加前に積まれた item も含む)。 */
+  kind?: "dtako";
   jobKey: string;
   compId: string;
   startDate: string;
   endDate: string;
+}
+
+/** ETC カード 1 行の「走行日を探し直す」(Refs #1287)。**メモリ上の `waitUntil` に載せていた間、
+ * DO の evict で完走も例外も記録されないまま消えていた**ので、dtako の取り込みと同じ storage の
+ * キューに積み、`alarm()` で drain する。結果は D1 の行 (`last_error`) に残す。 */
+export interface QueuedEtcCardRescanItem {
+  kind: "etc_card_rescan";
+  /** `etc-card-rescan:{id}`。ログとキューの溢れの記録に使うだけ (`scrape-job:` レコードは作らない)。 */
+  jobKey: string;
+  compId: string;
+  rescanId: number;
+  /** 受け付けた時刻 (ISO)。 */
+  acceptedAt: string;
+  /** 前の alarm で時間切れになった途中経過 (無ければ最初から)。 */
+  progress?: RescanProgress;
+}
+
+export type QueuedScrapeItem = QueuedDtakoScrapeItem | QueuedEtcCardRescanItem;
+
+export function etcCardRescanJobKey(id: number): string {
+  return `etc-card-rescan:${id}`;
 }
 
 /** DO の `ctx.storage` (`DurableObjectStorage`) が満たす最小インターフェース。
@@ -421,6 +446,9 @@ export interface OrphanRecoveryResult {
   recovered: string | null;
   /** 壊した後 (`post_upload`) または phase 不明で fail-closed した jobKey。 */
   failed: string | null;
+  /** 走行中に DO が死んだ「走行日を探し直す」。**自動では積み直さない** (中断の原因が job 自身の
+   * 長さなら同じ所で死に続けるため)。呼び手が D1 の行に「中断しました」を書く。 */
+  interruptedRescan: QueuedEtcCardRescanItem | null;
 }
 
 /** 前回の `alarm()` 呼び出しが `scrape-running` をクリアする前に死んだ孤児を
@@ -435,7 +463,13 @@ export interface OrphanRecoveryResult {
  *   `state: "failed"` にして人手確認へ回す。絶対に自動で先へ進めない。 */
 export async function recoverOrphan(storage: QueueStorage): Promise<OrphanRecoveryResult> {
   const running = await storage.get<QueuedScrapeItem>(SCRAPE_RUNNING_KEY);
-  if (!running) return { recovered: null, failed: null };
+  if (!running) return { recovered: null, failed: null, interruptedRescan: null };
+
+  if (running.kind === "etc_card_rescan") {
+    await storage.delete(SCRAPE_RUNNING_KEY);
+    console.error(JSON.stringify({ scrape_orphan: "etc_card_rescan_interrupted", job: running.jobKey }));
+    return { recovered: null, failed: null, interruptedRescan: running };
+  }
 
   const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + running.jobKey);
   await storage.delete(SCRAPE_RUNNING_KEY);
@@ -446,7 +480,7 @@ export async function recoverOrphan(storage: QueueStorage): Promise<OrphanRecove
     await storage.put(SCRAPE_QUEUE_KEY, queue);
     await recordScrapeJob(storage, running.jobKey, { state: "pending" });
     console.error(JSON.stringify({ scrape_orphan: "recovered", job: running.jobKey, phase: "pre_upload" }));
-    return { recovered: running.jobKey, failed: null };
+    return { recovered: running.jobKey, failed: null, interruptedRescan: null };
   }
 
   await recordScrapeJob(storage, running.jobKey, {
@@ -457,7 +491,7 @@ export async function recoverOrphan(storage: QueueStorage): Promise<OrphanRecove
   console.error(
     JSON.stringify({ scrape_orphan: "failed_closed", job: running.jobKey, phase: record?.phase ?? "unknown" }),
   );
-  return { recovered: null, failed: running.jobKey };
+  return { recovered: null, failed: running.jobKey, interruptedRescan: null };
 }
 
 /** `scrapeJobKey` (`scrape-dispatch.ts`) の逆変換。`YYYY-MM-DD` または

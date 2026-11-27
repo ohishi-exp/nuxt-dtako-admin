@@ -39,7 +39,49 @@ vi.mock("../src/alc-internal-upload", async (importOriginal) => ({
 
 import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
 import { PromiseQueue } from "../src/promise-queue";
-import { SELECT_RESCAN_TARGET_SQL } from "../src/etc-card-register-run";
+import { RESCAN_ALARM_BUDGET_MS, SELECT_RESCAN_TARGET_SQL } from "../src/etc-card-register-run";
+import { SCRAPE_QUEUE_KEY, SCRAPE_RUNNING_KEY, type QueuedEtcCardRescanItem, type QueuedScrapeItem } from "../src/scrape-queue";
+
+/** `ctx.storage` の最小 fake (キューと alarm を本物の流れで通すため)。 */
+class MemStorage {
+  map = new Map<string, unknown>();
+  alarmAt: number | null = null;
+  async get<T>(k: string): Promise<T | undefined> {
+    return this.map.get(k) as T | undefined;
+  }
+  async put(k: string, v: unknown): Promise<void> {
+    this.map.set(k, structuredClone(v));
+  }
+  async delete(k: string): Promise<boolean> {
+    return this.map.delete(k);
+  }
+  async list<T>(o?: { prefix?: string }): Promise<Map<string, T>> {
+    return new Map([...this.map].filter(([k]) => !o?.prefix || k.startsWith(o.prefix))) as Map<string, T>;
+  }
+  async getAlarm(): Promise<number | null> {
+    return this.alarmAt;
+  }
+  async setAlarm(t: number | Date): Promise<void> {
+    this.alarmAt = typeof t === "number" ? t : t.getTime();
+  }
+  queue(): QueuedScrapeItem[] {
+    return (this.map.get(SCRAPE_QUEUE_KEY) as QueuedScrapeItem[] | undefined) ?? [];
+  }
+}
+
+/** キューが空になるまで alarm を回す (本番では alarm が `setAlarm(now)` で自分を起こし直す)。 */
+async function drain(d: Priv): Promise<number> {
+  let n = 0;
+  while (d.ctx.storage.queue().length > 0 && n < 10) {
+    await d.alarm();
+    n++;
+  }
+  return n;
+}
+
+/** D1 の行に書いた「最後の誤り」の文だけ。 */
+const notes = (calls: { sql: string; params: unknown[] }[]) =>
+  calls.filter((c) => c.sql.includes("SET last_error = ?, updated_at = ? WHERE id = ? AND status = 'waiting_run'")).map((c) => c.params[0]);
 
 /**
  * 「走行日を探し直す」の DO 配線 (Refs #1287)。判定は etc-card-register-run.test.ts の
@@ -50,10 +92,11 @@ import { SELECT_RESCAN_TARGET_SQL } from "../src/etc-card-register-run";
  */
 type Priv = {
   fetch(req: Request): Promise<Response>;
+  alarm(): Promise<void>;
   env: Record<string, unknown>;
-  ctx: { waitUntil(p: Promise<unknown>): void; storage: { get(k: string): Promise<unknown> } };
+  ctx: { waitUntil(p: Promise<unknown>): void; storage: MemStorage };
   scrapeQueue: PromiseQueue;
-  runEtcCardRescan: (account: unknown, id: number) => Promise<void>;
+  runEtcCardRescan: (account: unknown, item: QueuedEtcCardRescanItem) => Promise<void>;
   runDtakoAlcUploadJob: (account: unknown, input: { opeNo: string; startOpe: string }, secret: string) => Promise<Response>;
 };
 
@@ -114,7 +157,7 @@ function storedZip(name: string, data: Uint8Array): ArrayBuffer {
 function makeDo(env: Record<string, unknown> = {}) {
   const d = Object.create(DtakoScraperRelayDO.prototype) as Priv;
   const waits: Promise<unknown>[] = [];
-  d.ctx = { waitUntil: (p) => waits.push(p), storage: { get: async () => undefined } };
+  d.ctx = { waitUntil: (p) => waits.push(p), storage: new MemStorage() };
   d.env = { DTAKO_ACCOUNTS: ACCOUNTS, DTAKO_DB: fakeD1([], []).db, ...env };
   d.scrapeQueue = new PromiseQueue();
   return { d, waits };
@@ -146,6 +189,7 @@ describe("/internal/etc-card-rescan (関門)", () => {
     d.runEtcCardRescan = vi.fn();
     expect((await d.fetch(post(body))).status).toBe(status);
     expect(waits).toEqual([]);
+    expect(d.ctx.storage.queue()).toEqual([]);
     expect(d.runEtcCardRescan).not.toHaveBeenCalled();
   });
 
@@ -156,6 +200,7 @@ describe("/internal/etc-card-rescan (関門)", () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "この環境では ETC カード追加登録を止めています (ETC_CARD_REGISTER_MODE=off)" });
     expect(waits).toEqual([]);
+    expect(d.ctx.storage.queue()).toEqual([]);
   });
 
   it("DTAKO_DB が無ければ 503", async () => {
@@ -163,21 +208,92 @@ describe("/internal/etc-card-rescan (関門)", () => {
     expect((await d.fetch(post({ id: 1, comp_id: "c1" }))).status).toBe(503);
   });
 
-  it("202 で受け、同じキューで comp_id のアカウントで回す。throw してもキューを止めず console.error", async () => {
-    const { d, waits } = makeDo();
+  it("★ 202 で受けて storage のキューに積み (waitUntil には載せない)、行に「探し直し中」を書く。実行は alarm", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-27T03:04:00Z"), toFake: ["Date"] });
+    vi.spyOn(console, "log").mockImplementation(() => {});
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { db, calls } = fakeD1([], []);
+    const { d, waits } = makeDo({ DTAKO_DB: db });
     d.runEtcCardRescan = vi.fn(async () => {
       throw new Error("boom");
     });
     const res = await d.fetch(post({ id: 7, comp_id: "c1" }));
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ accepted: true, id: 7, comp_id: "c1" });
-    await Promise.all(waits);
-    expect(d.runEtcCardRescan).toHaveBeenCalledWith(
-      { comp_id: "c1", user_name: "u1", user_pass: "p1", tenant_id: "tenant-a" },
-      7,
-    );
-    expect(err.mock.calls.flat().join("\n")).toContain("etc-card-rescan");
+    expect(waits).toEqual([]);
+    expect(d.runEtcCardRescan).not.toHaveBeenCalled();
+    const item = { kind: "etc_card_rescan", jobKey: "etc-card-rescan:7", compId: "c1", rescanId: 7, acceptedAt: "2026-11-27T03:04:00.000Z" };
+    expect(d.ctx.storage.queue()).toEqual([item]);
+    expect(d.ctx.storage.alarmAt).toBe(Date.now());
+    expect(notes(calls)).toEqual(["走行日を探し直し中 (11-27 12:04 受付)。数分後に再読み込みしてください"]);
+
+    // alarm が拾って comp_id のアカウントで回す。throw してもキューを止めず、ログと行に残す
+    expect(await drain(d)).toBe(1);
+    expect(d.runEtcCardRescan).toHaveBeenCalledWith({ comp_id: "c1", user_name: "u1", user_pass: "p1", tenant_id: "tenant-a" }, item);
+    expect(err.mock.calls.flat().join("\n")).toContain('"status":"error"');
+    expect(notes(calls).at(-1)).toBe("走行日の探し直し (11-27 12:04): 失敗しました: boom");
+    expect(await d.ctx.storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
+  });
+
+  it("★ 走行中に DO が死んだ探し直しは、次の alarm で行に「中断しました」を書く (積み直さない)", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-27T03:10:00Z"), toFake: ["Date"] });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { db, calls } = fakeD1([], []);
+    const { d } = makeDo({ DTAKO_DB: db });
+    d.runEtcCardRescan = vi.fn();
+    await d.ctx.storage.put(SCRAPE_RUNNING_KEY, {
+      kind: "etc_card_rescan",
+      jobKey: "etc-card-rescan:3",
+      compId: "c1",
+      rescanId: 3,
+      acceptedAt: "2026-11-27T03:00:00.000Z",
+    });
+    await d.alarm();
+    expect(d.runEtcCardRescan).not.toHaveBeenCalled();
+    expect(d.ctx.storage.queue()).toEqual([]);
+    expect(calls.find((c) => c.sql.includes("last_error"))!.params).toEqual([
+      "走行日の探し直し (11-27 12:10): 中断しました (relay の再起動。11-27 12:00 受付分)。もう一度「走行日を探し直す」を押してください",
+      "2026-11-27T03:10:00.000Z",
+      3,
+    ]);
+
+    // DTAKO_DB が無ければ書かない (落ちない)
+    const bare = makeDo({ DTAKO_DB: undefined });
+    await bare.d.ctx.storage.put(SCRAPE_RUNNING_KEY, { kind: "etc_card_rescan", jobKey: "etc-card-rescan:3", compId: "c1", rescanId: 3, acceptedAt: "2026-11-27T03:00:00.000Z" });
+    await expect(bare.d.alarm()).resolves.toBeUndefined();
+  });
+
+  it("drain 時にアカウント / DTAKO_DB が引けなければ error (行に書けるときは書く)。行への書き込みが落ちてもログだけで止まらない", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const item = { kind: "etc_card_rescan", jobKey: "etc-card-rescan:7", compId: "gone", rescanId: 7, acceptedAt: "2026-11-27T03:00:00.000Z" };
+    const { db, calls } = fakeD1([], []);
+    const a = makeDo({ DTAKO_DB: db });
+    await a.d.ctx.storage.put(SCRAPE_QUEUE_KEY, [item]);
+    await a.d.alarm();
+    expect(notes(calls)[0]).toContain("失敗しました: comp_id=gone が DTAKO_ACCOUNTS に見つかりません");
+
+    const b = makeDo({ DTAKO_DB: undefined });
+    await b.d.ctx.storage.put(SCRAPE_QUEUE_KEY, [{ ...item, compId: "c1" }]);
+    await b.d.alarm();
+    expect(err.mock.calls.flat().join("\n")).toContain("DTAKO_DB が未設定です");
+
+    const broken = {
+      prepare: () => ({
+        bind: () => ({
+          all: async () => ({ results: [] }),
+          run: async () => {
+            throw new Error("d1 down");
+          },
+        }),
+      }),
+    };
+    const c = makeDo({ DTAKO_DB: broken });
+    c.d.runEtcCardRescan = vi.fn();
+    expect((await c.d.fetch(post({ id: 7, comp_id: "c1" }))).status).toBe(202);
+    expect(err.mock.calls.flat().join("\n")).toContain('"status":"note_failed"');
+    expect(c.d.ctx.storage.queue()).toHaveLength(1);
   });
 });
 
@@ -201,9 +317,9 @@ describe("runEtcCardRescan (配線)", () => {
       .mockResolvedValueOnce(storedZip("KUDGSIR.csv", CSV));
     const { db, calls } = fakeD1([TARGET], WAITING);
     const auth = authWorker();
-    const { d, waits } = makeDo({ DTAKO_DB: db, AUTH_WORKER: auth, INTERNAL_SHARED_SECRET: "sec" });
+    const { d } = makeDo({ DTAKO_DB: db, AUTH_WORKER: auth, INTERNAL_SHARED_SECRET: "sec" });
     expect((await d.fetch(post({ id: 7, comp_id: "c1" }))).status).toBe(202);
-    await Promise.all(waits);
+    expect(await drain(d)).toBe(1);
 
     expect(auth.fetch).toHaveBeenCalledTimes(1);
     const [url, init] = auth.fetch.mock.calls[0]!;
@@ -216,12 +332,18 @@ describe("runEtcCardRescan (配線)", () => {
       { opeNo: UNKO, startOpe: "2026/11/20 5:34:04" },
     ]);
     expect(uploadDtakoZipViaAlcInternalProxy).not.toHaveBeenCalled();
-    const update = calls.find((c) => c.sql.startsWith("UPDATE"))!;
+    const update = calls.find((c) => c.sql.startsWith("UPDATE etc_card_registrations SET run_date"))!;
     expect(update.params.slice(0, 2)).toEqual(["2026-11-20", UNKO]);
     expect(update.params.at(-1)).toBe(7);
 
-    const lines = log.mock.calls.flat().map(String).filter((l) => l.includes("etc-card-rescan"));
-    expect(lines).toHaveLength(1);
+    expect(notes(calls)).toEqual([
+      "走行日を探し直し中 (11-26 09:00 受付)。数分後に再読み込みしてください",
+      "走行日の探し直し (11-26 09:00): 走行日 2026-11-20 を見つけました",
+    ]);
+    const lines = log.mock.calls.flat().map(String).filter((l) => l.includes('"cron":"etc-card-rescan"'));
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]!)).toEqual({ cron: "etc-card-rescan", comp_id: "c1", id: 7, status: "queued" });
+    lines.shift();
     expect(JSON.parse(lines[0]!)).toEqual({
       cron: "etc-card-rescan",
       comp_id: "c1",
@@ -262,25 +384,61 @@ describe("runEtcCardRescan (配線)", () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     login.mockResolvedValue({ kicked: false });
     downloadOperationCsvZip.mockRejectedValue(new Error("x".repeat(500)));
-    const { d, waits } = makeDo({ DTAKO_DB: fakeD1([TARGET], WAITING).db, AUTH_WORKER: authWorker(), INTERNAL_SHARED_SECRET: "sec" });
+    const { d } = makeDo({ DTAKO_DB: fakeD1([TARGET], WAITING).db, AUTH_WORKER: authWorker(), INTERNAL_SHARED_SECRET: "sec" });
     await d.fetch(post({ id: 7, comp_id: "c1" }));
-    await Promise.all(waits);
-    const done = JSON.parse(log.mock.calls.flat().map(String).find((l) => l.includes("etc-card-rescan"))!);
+    await drain(d);
+    const done = JSON.parse(log.mock.calls.flat().map(String).find((l) => l.includes('"status":"done"'))!);
     expect(done).toMatchObject({ failed: 2, fetched: 0, kind: "none", run_date: null });
     expect(done.first_error).toHaveLength(200);
 
     log.mockClear();
     const none = makeDo({ DTAKO_DB: fakeD1([], []).db, AUTH_WORKER: authWorker(), INTERNAL_SHARED_SECRET: "sec" });
     await none.d.fetch(post({ id: 7, comp_id: "c1" }));
-    await Promise.all(none.waits);
-    expect(log.mock.calls.flat().map(String).filter((l) => l.includes("etc-card-rescan"))).toEqual([
+    await drain(none.d);
+    expect(log.mock.calls.flat().map(String).filter((l) => l.includes('"cron":"etc-card-rescan"') && !l.includes("queued"))).toEqual([
       JSON.stringify({ cron: "etc-card-rescan", comp_id: "c1", id: 7, status: "not_found" }),
     ]);
 
     const noSecret = makeDo({ DTAKO_DB: fakeD1([TARGET], WAITING).db, AUTH_WORKER: authWorker() });
     await noSecret.d.fetch(post({ id: 7, comp_id: "c1" }));
-    await Promise.all(noSecret.waits);
+    await drain(noSecret.d);
     expect(err.mock.calls.flat().join("\n")).toContain("INTERNAL_SHARED_SECRET が未設定です");
     expect(uploadDtakoZipViaAlcInternalProxy).not.toHaveBeenCalled();
+  });
+
+  it("★ alarm 1 回の時間を使い切ったら途中経過ごと積み直し、次の alarm で続きから (一覧は引き直さない・ログインは回ごと)", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-26T00:00:00Z"), toFake: ["Date"] });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    login.mockResolvedValue({ kicked: false });
+    // 1 件目の zip で時間を使い切る
+    downloadOperationCsvZip
+      .mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + RESCAN_ALARM_BUDGET_MS);
+        return storedZip("KUDGURI.csv", CSV);
+      })
+      .mockResolvedValueOnce(storedZip("KUDGSIR.csv", CSV));
+    const { db, calls } = fakeD1([TARGET], WAITING);
+    const auth = authWorker();
+    const { d } = makeDo({ DTAKO_DB: db, AUTH_WORKER: auth, INTERNAL_SHARED_SECRET: "sec" });
+    await d.fetch(post({ id: 7, comp_id: "c1" }));
+
+    await d.alarm();
+    expect(downloadOperationCsvZip).toHaveBeenCalledTimes(1);
+    const [again] = d.ctx.storage.queue() as QueuedEtcCardRescanItem[];
+    expect(again!.progress).toMatchObject({ next: 1, skipped: 1, unkoNos: ["2611250900000010001234", UNKO] });
+    expect(d.ctx.storage.alarmAt).not.toBeNull();
+    expect(notes(calls).at(-1)).toBe("走行日を探し直し中 (11-26 09:05 時点で 1/2 運行まで見ました)。数分後に再読み込みしてください");
+    expect(log.mock.calls.flat().map(String)).toContain(
+      JSON.stringify({ cron: "etc-card-rescan", comp_id: "c1", id: 7, status: "paused", next: 1, of: 2 }),
+    );
+
+    expect(await drain(d)).toBe(1);
+    expect(auth.fetch).toHaveBeenCalledTimes(1);
+    expect(downloadOperationCsvZip.mock.calls.map((c) => c[1])).toEqual([
+      { opeNo: "2611250900000010001234", startOpe: "2026/11/25 9:00:00" },
+      { opeNo: UNKO, startOpe: "2026/11/20 5:34:04" },
+    ]);
+    expect(notes(calls).at(-1)).toBe("走行日の探し直し (11-26 09:05): 走行日 2026-11-20 を見つけました");
+    expect(d.ctx.storage.queue()).toEqual([]);
   });
 });

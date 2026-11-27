@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   annotateFoldStaleness,
   clearRunningPointer,
+  etcCardRescanJobKey,
   MAX_SCRAPE_JOB_RECORDS,
   MAX_SCRAPE_QUEUE_LENGTH,
   migrateLegacyScrapeJobsOnce,
@@ -23,6 +24,7 @@ import {
   reapStaleFolds,
   FOLD_STATES,
   touchScrapeJobOrder,
+  type QueuedDtakoScrapeItem,
   type QueuedScrapeItem,
   type QueueStorage,
   type ScrapeJobRecord,
@@ -81,7 +83,7 @@ class FakeStorage implements QueueStorage {
   }
 }
 
-const item = (jobKey: string, overrides: Partial<QueuedScrapeItem> = {}): QueuedScrapeItem => ({
+const item = (jobKey: string, overrides: Partial<QueuedDtakoScrapeItem> = {}): QueuedDtakoScrapeItem => ({
   jobKey,
   compId: "0100",
   startDate: jobKey.split("..")[0]!,
@@ -234,7 +236,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
   it("running pointer が無ければ何もしない", async () => {
     const storage = new FakeStorage();
     const result = await recoverOrphan(storage);
-    expect(result).toEqual({ recovered: null, failed: null });
+    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: null });
   });
 
   it("★ DO 再作成を模す: 壊す前 (pre_upload) に死んだ孤児はキュー先頭に積み直して pending に戻す", async () => {
@@ -262,7 +264,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
       errSpy.mockRestore();
     }
 
-    expect(result).toEqual({ recovered: "2026-06-14", failed: null });
+    expect(result).toEqual({ recovered: "2026-06-14", failed: null, interruptedRescan: null });
     expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
     const queue = await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY);
     expect(queue).toEqual([item("2026-06-14")]);
@@ -295,7 +297,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
       errSpy.mockRestore();
     }
 
-    expect(result).toEqual({ recovered: null, failed: "2026-06-15" });
+    expect(result).toEqual({ recovered: null, failed: "2026-06-15", interruptedRescan: null });
     expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
     // **絶対にキューへ積み直さない** (二重取り込みの危険、受け入れ条件4)
     const queue = await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY);
@@ -319,15 +321,43 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
       errSpy.mockRestore();
     }
 
-    expect(result).toEqual({ recovered: "2026-06-20", failed: null });
+    expect(result).toEqual({ recovered: "2026-06-20", failed: null, interruptedRescan: null });
     expect(await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY)).toEqual([item("2026-06-20")]);
+  });
+
+  it("★ 走行中に死んだ「走行日を探し直す」は積み直さず interruptedRescan で返す (scrape-job: レコードは触らない)", async () => {
+    const storage = new FakeStorage();
+    const rescan = {
+      kind: "etc_card_rescan" as const,
+      jobKey: etcCardRescanJobKey(3),
+      compId: "c1",
+      rescanId: 3,
+      acceptedAt: "2026-11-27T03:00:00.000Z",
+    };
+    await pushScrapeQueueItem(storage, rescan);
+    const popped = await popNextScrapeQueueItem(storage);
+    expect(popped).toEqual(rescan);
+    await setRunningPointer(storage, popped!);
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof recoverOrphan>>;
+    try {
+      result = await recoverOrphan(storage);
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(result).toEqual({ recovered: null, failed: null, interruptedRescan: rescan });
+    expect(rescan.jobKey).toBe("etc-card-rescan:3");
+    expect(await storage.get(SCRAPE_RUNNING_KEY)).toBeUndefined();
+    expect(await storage.get<QueuedScrapeItem[]>(SCRAPE_QUEUE_KEY)).toEqual([]);
+    expect(await storage.list({ prefix: SCRAPE_JOB_KEY_PREFIX })).toEqual(new Map());
   });
 
   it("running pointer はあるが対応する record が無い (evict 済み等) → fail-closed", async () => {
     const storage = new FakeStorage();
     await setRunningPointer(storage, item("2026-06-16"));
     const result = await recoverOrphan(storage);
-    expect(result).toEqual({ recovered: null, failed: "2026-06-16" });
+    expect(result).toEqual({ recovered: null, failed: "2026-06-16", interruptedRescan: null });
   });
 
   it("running pointer はあるが record に phase フィールドが無い (旧レコード) → fail-closed", async () => {
@@ -335,7 +365,7 @@ describe("recoverOrphan — DO 再起動を跨いだ孤児回収 (受け入れ�
     await setRunningPointer(storage, item("2026-06-17"));
     await recordScrapeJob(storage, "2026-06-17", { state: "running" });
     const result = await recoverOrphan(storage);
-    expect(result).toEqual({ recovered: null, failed: "2026-06-17" });
+    expect(result).toEqual({ recovered: null, failed: "2026-06-17", interruptedRescan: null });
   });
 });
 
