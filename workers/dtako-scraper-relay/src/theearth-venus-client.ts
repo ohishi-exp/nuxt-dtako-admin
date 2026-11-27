@@ -42,11 +42,13 @@
  * 実機確定知見の正本は `theearth-venus` skill (`.claude/skills/theearth-venus/SKILL.md`)。
  */
 import {
+  assertNotLoginPage,
   BASE_URL,
   extractHiddenFields,
   fetchWithJar,
   hasLoginForm,
   postForm,
+  redirectsToLogin,
   TheearthClientError,
   VenusSessionExpiredError,
   type CookieJar,
@@ -831,11 +833,11 @@ export async function getVehicleLogTrack(
     await throwGetError("動態履歴ページ", getRes);
   }
   const html1 = await getRes.text();
-  if (isLoginRedirect(html1)) {
-    throw new VenusSessionExpiredError(
-      "動態履歴ページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    getRes,
+    html1,
+    "動態履歴ページがログイン画面を返しました — theearth セッションが切れています",
+  );
 
   // 1 段目: 全事業所で絞込 → ddlVehicle に全車輌をロード。
   const branchParams = new URLSearchParams({
@@ -870,14 +872,14 @@ export async function getVehicleLogTrack(
     btnDataDisp: "動態履歴",
   });
   const dispRes = await postForm(jar, url, dispParams, fetchImpl);
+  const html3 = await dispRes.text();
+  assertNotLoginPage(
+    dispRes,
+    html3,
+    "動態履歴の表示がログイン画面を返しました — theearth セッションが切れています",
+  );
   if (!dispRes.ok) {
     throw new TheearthClientError(`動態履歴の表示が HTTP ${dispRes.status} を返しました`);
-  }
-  const html3 = await dispRes.text();
-  if (isLoginRedirect(html3)) {
-    throw new VenusSessionExpiredError(
-      "動態履歴の表示がログイン画面を返しました — theearth セッションが切れています",
-    );
   }
   return parseVehicleLogRows(html3);
 }
@@ -1080,7 +1082,17 @@ function isNullKeySessionError(status: number, rawBody: string): boolean {
  * 載せて throw する (postback 版の postButton と同じ調査手法、Refs #199)。
  * F-GOS0030 / F-DES1011 が再ログイン後も HTTP 500 を返し続ける事象 (staging
  * 2026-07-10) の真因を Tail Worker log から追えるようにする。 */
-export async function throwGetError(pageLabel: string, res: { status: number; text: () => Promise<string> }): Promise<never> {
+export async function throwGetError(
+  pageLabel: string,
+  res: Pick<Response, "status" | "headers" | "text">,
+): Promise<never> {
+  // ログイン画面への 302 (`redirectsToLogin`) は `!res.ok` でここに来る。本文は "Object moved"
+  // だけなので、読む前に status/Location で見てセッション切れにする (張り直しの対象)。
+  if (redirectsToLogin(res)) {
+    throw new VenusSessionExpiredError(
+      `${pageLabel}がログイン画面へ転送されました — theearth セッションが切れています`,
+    );
+  }
   let detail = "";
   try {
     const rawBody = await res.text();

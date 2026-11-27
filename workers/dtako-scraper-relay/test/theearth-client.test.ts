@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  assertNotLoginPage,
   assertZipMagic,
   cookieHeader,
   createCookieJar,
@@ -1312,5 +1313,31 @@ describe('downloadCsvZip の出力ファイル形式 = 連動出力形式 (Refs 
     await downloadCsvZip(createCookieJar(), range, r.fetchImpl)
     spy.mockRestore()
     expect(warns).toEqual([])
+  })
+})
+
+describe('assertNotLoginPage (ログイン画面への 302 / 200 のログインフォームをセッション切れに)', () => {
+  const msg = 'X がログイン画面を返しました'
+
+  it('throws VenusSessionExpiredError on a 302 whose Location is F-OES1010', () => {
+    expect(() => assertNotLoginPage(redirect('/F-OES1010[Login].aspx?mode=timeout'), 'Object moved', msg)).toThrow(
+      new VenusSessionExpiredError(msg),
+    )
+  })
+
+  it('throws VenusSessionExpiredError when the body is the login form', () => {
+    expect(() => assertNotLoginPage(new Response(null, { status: 200 }), '<input id="txtPass" />', msg)).toThrow(
+      VenusSessionExpiredError,
+    )
+  })
+
+  it('does not throw on a 302 elsewhere or without Location', () => {
+    expect(() => assertNotLoginPage(redirect('/F-DES1010[OperationEdit].aspx'), '', msg)).not.toThrow()
+    expect(() => assertNotLoginPage(redirect(null), '', msg)).not.toThrow()
+  })
+
+  it('does not throw on a normal 200 page (incidental F-OES1010 text without txtPass)', () => {
+    const page = '<input id="__VIEWSTATE" value="v" /><a href="F-OES1010[Login].aspx">ログアウト</a>'
+    expect(() => assertNotLoginPage(new Response(null, { status: 200 }), page, msg)).not.toThrow()
   })
 })

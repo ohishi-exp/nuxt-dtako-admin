@@ -93,6 +93,7 @@
  * **F-NRS1010 の帳票の方が中身が揃っている** (作業時間・燃料込み) ため使わない。
  */
 import {
+  assertNotLoginPage,
   BASE_URL,
   DEFAULT_REQUEST_TIMEOUT_MS,
   fetchWithJar,
@@ -387,11 +388,12 @@ async function fetchPreviewDocument(
       return new Uint8Array(await res.arrayBuffer());
     }
     // ログイン画面が返ったら待っても変わらない (セッション切れ) ので即諦める。
-    if (lastContentType.includes("text/html") && isLoginRedirect(await res.text())) {
-      throw new VenusSessionExpiredError(
-        "運転日報 PDF の取得でログイン画面が返されました — theearth セッションが切れています",
-      );
-    }
+    // ログイン画面への 302 は本文が "Object moved" だけなので、本文と別に status/Location で見る。
+    assertNotLoginPage(
+      res,
+      lastContentType.includes("text/html") ? await res.text() : "",
+      "運転日報 PDF の取得でログイン画面が返されました — theearth セッションが切れています",
+    );
   }
   throw new TheearthClientError(
     `運転日報 PDF が ${maxAttempts} 回の試行で取得できませんでした ` +

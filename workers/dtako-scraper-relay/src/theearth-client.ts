@@ -478,9 +478,24 @@ export function hasLoginForm(html: string): boolean {
  * だけの 302 が返る。[`hasLoginForm`] (本文の txtPass) では拾えず、「CSV フォームの要素
  * (id=rdoSelect1) が見つかりません」に化けていた (2026-11-28 1:00 JST の日次 cron、comp
  * 75700192 — ログイン成功から約 0.6 秒で切れていた。2026-09-26 の原本も同じ 152 bytes の 302)。 */
-export function redirectsToLogin(res: Response): boolean {
+export function redirectsToLogin(res: Pick<Response, "status" | "headers">): boolean {
   if (res.status < 300 || res.status >= 400) return false;
   return (res.headers.get("location") ?? "").includes("F-OES1010");
+}
+
+/** セッション切れでログイン画面に戻されていたら `VenusSessionExpiredError(message)` を投げる。
+ *
+ * ログイン画面への 302 ([`redirectsToLogin`]) と 200 のログインフォーム ([`hasLoginForm`]) の
+ * 両方を見る。302 は `res.ok === false` なので、`!res.ok` の throw より**前**に呼ぶこと
+ * (後ろだと generic error で先に落ち、張り直しの対象にならない)。 */
+export function assertNotLoginPage(
+  res: Pick<Response, "status" | "headers">,
+  html: string,
+  message: string,
+): void {
+  if (redirectsToLogin(res) || hasLoginForm(html)) {
+    throw new VenusSessionExpiredError(message);
+  }
 }
 
 /**
@@ -1056,12 +1071,12 @@ export async function downloadCsvZip(
   // 302 のどちらか)。チェックせずに進むと「CSV フォームの要素が見つかりません」という誤解を
   // 招く generic error に化けて 502 に潰れてしまう (呼び出し側が 401 で再ログインを促せない、
   // Refs #169 — 日報編集の zip DL 経路で顕在化した HIGH バグ)。
-  if (hasLoginForm(html) || redirectsToLogin(getRes)) {
-    throw new VenusSessionExpiredError(
-      "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています" +
-        " (同じアカウントで別の場所からログインされた可能性があります)",
-    );
-  }
+  assertNotLoginPage(
+    getRes,
+    html,
+    "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています" +
+      " (同じアカウントで別の場所からログインされた可能性があります)",
+  );
   const hidden = extractHiddenFields(html);
 
   const fields = new Map<string, FormFieldRef>();
@@ -1173,11 +1188,11 @@ export async function downloadCsvZip(
   // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + **日付範囲** + 出力ボタン
   // で再 POST。日付範囲を落とすと空 ZIP が返る (このフロー最大の落とし穴、上の doc 参照)。
   const stage1Html = await stage1Res.text();
-  if (hasLoginForm(stage1Html) || redirectsToLogin(stage1Res)) {
-    throw new VenusSessionExpiredError(
-      "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
+  assertNotLoginPage(
+    stage1Res,
+    stage1Html,
+    "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
+  );
   const hidden2 = extractHiddenFields(stage1Html);
   const outputButton =
     findFormFieldById(stage1Html, "btnCsvSvrOutput") ?? findFormFieldById(stage1Html, "btnCsvOutput");
