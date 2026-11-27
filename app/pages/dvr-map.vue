@@ -8,7 +8,7 @@
  * relay 側で DDMM → 十進度に変換済み。
  */
 import type { DvrMapMarker } from '~/components/DvrMap.vue'
-import { dvrVehicleFromQuery, dvrVehicleLabel, matchesDvrVehicle, vehicleStateMarkerIndex } from '~/utils/fuel-intank'
+import { dvrNoTrackMessage, dvrVehicleFromQuery, dvrVehicleLabel, findDvrVehicleState, matchesDvrVehicle, vehicleStateMarkerIndex, type DvrVehicleQuery } from '~/utils/fuel-intank'
 
 
 interface VehicleStatePoint {
@@ -197,6 +197,25 @@ function selectStateFromRouteQuery() {
   selectedStateIndex.value = idx
 }
 
+/** URL の車を現在地一覧 (全事業所) から引く。居なければ null。失敗は trackError に出して null */
+async function loadRouteVehicleState(q: DvrVehicleQuery): Promise<VehicleStatePoint | null> {
+  try {
+    const res = await $fetch<{ vehicles: VehicleStatePoint[] }>('/dvr-api/vehicle-states', {
+      headers: authHeaders(),
+      query: { branch: ALL_BRANCHES },
+    })
+    return findDvrVehicleState(res.vehicles, q)
+  }
+  catch (e) {
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
+      return null
+    }
+    trackError.value = dvrErrorMessage(e)
+    return null
+  }
+}
+
 async function openFromRouteQuery() {
   const q = dvrVehicleFromQuery(route.query)
   const at = typeof route.query.at === 'string' ? route.query.at : ''
@@ -205,12 +224,22 @@ async function openFromRouteQuery() {
   routeQueryHandled = true
   const found = masters.value.vehicles.find(v => matchesDvrVehicle(v.code, v.name, q))
   activeTab.value = 'track'
-  if (!found) {
-    trackError.value = `車両 ${dvrVehicleLabel(q)} が見つかりません`
+  const day = at.slice(0, 10)
+  // DVR マスタに載らない車 (データの止まった車など) も現在地一覧 (全事業所) には居るので、
+  // そこで車輌CD を引く。履歴が 0 点のときは、最後のデータ時刻を添えるためにも引く (要るときだけ)。
+  let state = found ? undefined : await loadRouteVehicleState(q)
+  const vehicleCd = found?.code ?? state?.vehicleCd
+  if (!vehicleCd) {
+    if (!trackError.value) trackError.value = `車両 ${dvrVehicleLabel(q)} が見つかりません`
     return
   }
-  await openTrackForVehicle({ vehicleCd: found.code }, at.slice(0, 10))
-  if (trackError.value || track.value.length === 0) return
+  await openTrackForVehicle({ vehicleCd }, day)
+  if (trackError.value) return
+  if (track.value.length === 0) {
+    if (state === undefined) state = await loadRouteVehicleState(q)
+    if (!trackError.value) trackError.value = dvrNoTrackMessage(q, day, state)
+    return
+  }
   // parseTrackTs と同じ単位 (naive epoch 秒)
   onChartSeek(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) / 1000)
 }
