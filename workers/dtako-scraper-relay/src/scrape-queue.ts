@@ -449,12 +449,17 @@ export interface OrphanRecoveryResult {
   /** 走行中に DO が死んだ「走行日を探し直す」。**自動では積み直さない** (中断の原因が job 自身の
    * 長さなら同じ所で死に続けるため)。呼び手が D1 の行に「中断しました」を書く。 */
   interruptedRescan: QueuedEtcCardRescanItem | null;
+  /** 取り込み (`state: "done"`) を書いた後、後段 (ETC 確認・要再計算・fold) の途中で死んだ jobKey。
+   * `state` は done のまま残す (fail-closed の対象ではない)。 */
+  interruptedAfterIngest: string | null;
 }
 
 /** 前回の `alarm()` 呼び出しが `scrape-running` をクリアする前に死んだ孤児を
  * 回収する。**呼び出し元は、次に実行する job を pop するより前にこれを呼ぶこと。**
  *
- * 判定は phase だけを見る:
+ * 判定は phase と state を見る:
+ * - `state: "done"` (取り込みは記録済みで、後段の途中で死んだ) → state は動かさない。
+ *   fold が `running` のまま残っていれば `stale` に倒す
  * - `"pre_upload"` (まだ壊す前) → 安全。キュー先頭に積み直し、`state: "pending"`
  *   に戻して自動再実行させる
  * - `"post_upload"` または phase 欠落 (旧レコード・想定外) → **fail-closed**。
@@ -463,12 +468,12 @@ export interface OrphanRecoveryResult {
  *   `state: "failed"` にして人手確認へ回す。絶対に自動で先へ進めない。 */
 export async function recoverOrphan(storage: QueueStorage): Promise<OrphanRecoveryResult> {
   const running = await storage.get<QueuedScrapeItem>(SCRAPE_RUNNING_KEY);
-  if (!running) return { recovered: null, failed: null, interruptedRescan: null };
+  if (!running) return { recovered: null, failed: null, interruptedRescan: null, interruptedAfterIngest: null };
 
   if (running.kind === "etc_card_rescan") {
     await storage.delete(SCRAPE_RUNNING_KEY);
     console.error(JSON.stringify({ scrape_orphan: "etc_card_rescan_interrupted", job: running.jobKey }));
-    return { recovered: null, failed: null, interruptedRescan: running };
+    return { recovered: null, failed: null, interruptedRescan: running, interruptedAfterIngest: null };
   }
 
   const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + running.jobKey);
@@ -480,19 +485,53 @@ export async function recoverOrphan(storage: QueueStorage): Promise<OrphanRecove
     await storage.put(SCRAPE_QUEUE_KEY, queue);
     await recordScrapeJob(storage, running.jobKey, { state: "pending" });
     console.error(JSON.stringify({ scrape_orphan: "recovered", job: running.jobKey, phase: "pre_upload" }));
-    return { recovered: running.jobKey, failed: null, interruptedRescan: null };
+    return { recovered: running.jobKey, failed: null, interruptedRescan: null, interruptedAfterIngest: null };
+  }
+
+  // 取り込みは `state: "done"` (+ upload_id) を書いてから後段 (ETC 確認・要再計算・fold) へ
+  // 進むので、running pointer は後段の終わりまで残る。後段の途中で alarm が切れた孤児を
+  // failed に倒すと、**済んでいる取り込みを「済んだか不明」と書き換えてしまう**
+  // (27324455 で 11-16〜11-27 に 7 回。実際は alarm の 15 分上限超過で、alc 側は取り込み成功)。
+  // ⇒ done は動かさない。fold が running のまま残っていれば、ここで終端 (stale) に倒す。
+  if (record?.state === "done") {
+    if (record.fold_state === "running") {
+      await storage.put(SCRAPE_JOB_KEY_PREFIX + running.jobKey, {
+        ...record,
+        fold_state: "stale",
+        fold_error: FOLD_INTERRUPTED_BY_ALARM_END,
+      });
+    }
+    console.error(
+      JSON.stringify({
+        scrape_orphan: "interrupted_after_ingest",
+        job: running.jobKey,
+        fold_state: record.fold_state ?? null,
+      }),
+    );
+    return { recovered: null, failed: null, interruptedRescan: null, interruptedAfterIngest: running.jobKey };
   }
 
   await recordScrapeJob(storage, running.jobKey, {
     state: "failed",
-    error:
-      "DO 再起動 (deploy / evict) で中断しました。取り込み (has_kudgivt リセット) 済みかどうか不明なため自動リトライしません。手動で状態を確認してください。",
+    error: ORPHAN_FAILED_CLOSED_MESSAGE,
   });
   console.error(
     JSON.stringify({ scrape_orphan: "failed_closed", job: running.jobKey, phase: record?.phase ?? "unknown" }),
   );
-  return { recovered: null, failed: running.jobKey, interruptedRescan: null };
+  return { recovered: null, failed: running.jobKey, interruptedRescan: null, interruptedAfterIngest: null };
 }
+
+/** 中断の原因は alarm からは区別できないので、候補を全部書く。deploy / evict だけを書くと、
+ * deploy の無い時刻の中断 (実例は DO alarm の 15 分の実行時間上限) が誤った原因で記録される。 */
+const ALARM_END_CAUSES = "DO の再起動 (deploy / evict) または alarm の実行時間上限 (15 分) の超過";
+
+export const ORPHAN_FAILED_CLOSED_MESSAGE =
+  `${ALARM_END_CAUSES}で中断しました。取り込み (has_kudgivt リセット) 済みかどうか不明なため` +
+  "自動リトライしません。手動で状態を確認してください。";
+
+export const FOLD_INTERRUPTED_BY_ALARM_END =
+  `取り込みの後、fold の途中で alarm が終わりました (${ALARM_END_CAUSES})。` +
+  "取り込み (state: done) は記録済みです。fold は畳み切っていない可能性があります — 自動では回し直しません。";
 
 /** `scrapeJobKey` (`scrape-dispatch.ts`) の逆変換。`YYYY-MM-DD` または
  * `YYYY-MM-DD..YYYY-MM-DD` を分解する。 */
