@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord } from '~/utils/datr-log'
+import type { IchibanEmployeeRow } from '~/utils/employee-master'
+import { buildEmployeeNameMap, DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord } from '~/utils/datr-log'
 
 const MAX_ROWS = 2000
 /** 読み込み中に画面へ途中結果を出す間隔 (ms) */
@@ -36,6 +37,20 @@ function clearAll() {
   flush()
 }
 onBeforeUnmount(clearAll)
+
+// 一番星 社員ﾏｽﾀ: コード (= 社員C) → 氏名。取れなくても検索はできるので、失敗は注記だけ出す。
+// proxy の base に `/api` が含まれないため `/api/ichiban/api/employees` と二重に書く
+const employeeNames = shallowRef(new Map<string, string>())
+const employeeError = ref<string | null>(null)
+onMounted(async () => {
+  try {
+    const res = await $fetch<{ data: IchibanEmployeeRow[] }>('/api/ichiban/api/employees')
+    employeeNames.value = buildEmployeeNameMap(res.data ?? [])
+  }
+  catch (err) {
+    employeeError.value = err instanceof Error ? err.message : String(err)
+  }
+})
 
 const codeText = ref('')
 const from = ref('')
@@ -162,6 +177,9 @@ async function handleFileChange(e: Event) {
           {{ progress }} (読み込んだ分から検索できます)
         </span>
       </div>
+      <div v-if="employeeError" class="mt-3 text-sm text-amber-700 dark:text-amber-300">
+        一番星の社員マスタを読めなかったため、氏名は出ません ({{ employeeError }})。
+      </div>
       <div v-if="error" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
         <UIcon name="i-lucide-alert-circle" class="size-4 inline-block mr-1" />
         {{ error }}
@@ -207,7 +225,7 @@ async function handleFileChange(e: Event) {
             :key="c.code"
             class="px-2 py-0.5 rounded font-mono"
             :class="c.count === 0 ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300' : 'bg-gray-100 dark:bg-gray-800'"
-          >{{ c.code }}: {{ c.count }}</span>
+          >{{ [c.code, employeeNames.get(c.code)].filter(Boolean).join(' ') }}: {{ c.count }}</span>
         </div>
         <div v-if="missing.length > 0" class="mt-2 text-sm text-red-600">
           見つからなかったコード: {{ missing.join(', ') }}
@@ -233,6 +251,9 @@ async function handleFileChange(e: Event) {
                 コード
               </th>
               <th class="py-1 pr-4">
+                氏名 (一番星)
+              </th>
+              <th class="py-1 pr-4">
                 画像
               </th>
               <th class="py-1 pr-4">
@@ -256,6 +277,9 @@ async function handleFileChange(e: Event) {
               </td>
               <td class="py-1 pr-4 font-mono">
                 {{ r.code }}
+              </td>
+              <td class="py-1 pr-4">
+                {{ employeeNames.get(r.code) ?? '' }}
               </td>
               <td class="py-1 pr-4 font-mono">
                 <div class="flex items-center gap-2">

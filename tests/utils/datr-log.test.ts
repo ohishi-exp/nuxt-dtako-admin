@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
+import { buildEmployeeNameMap, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
 
 const L1 = '1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0'
 const L2 = '1026,0,43019,.1015856,"17101102261400001026.jpg","",0,0,0,0'
@@ -115,5 +115,18 @@ describe('searchDatr', () => {
   it('期間は両端を含む', () => {
     expect(searchDatr(records, { codes: [], from: '2017-10-12', to: '' }).hits.map(x => x.code)).toEqual(['1042'])
     expect(searchDatr(records, { codes: [], from: '', to: '2017-10-11' }).hits).toHaveLength(2)
+  })
+})
+
+describe('buildEmployeeNameMap', () => {
+  it('社員C → 氏名。氏名が空なら社員R、× 付き (退職) もそのまま、コードか名前が空の行は捨てる', () => {
+    const map = buildEmployeeNameMap([
+      { employee_code: ' 1029 ', employee_name: '甲 太郎', employee_r: '甲' },
+      { employee_code: '1026', employee_name: ' ', employee_r: '乙' },
+      { employee_code: '1005', employee_name: '×丙', employee_r: '丙' },
+      { employee_code: '', employee_name: '丁', employee_r: '丁' },
+      { employee_code: '1042', employee_name: '', employee_r: '' },
+    ])
+    expect([...map]).toEqual([['1029', '甲 太郎'], ['1026', '乙'], ['1005', '×丙']])
   })
 })

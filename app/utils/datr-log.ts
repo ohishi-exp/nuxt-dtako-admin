@@ -16,6 +16,8 @@
  * どのファイルに入っていたかは `sources` に残す。
  */
 
+import type { IchibanEmployeeRow } from './employee-master'
+
 export interface DatrRecord {
   code: string
   /** `yyyy-mm-dd` */
@@ -155,4 +157,22 @@ export function searchDatr(records: DatrRecord[], q: DatrQuery): DatrSearchResul
   for (const r of hits) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
   const perCode = q.codes.map(code => ({ code, count: counts.get(code) ?? 0 }))
   return { hits, perCode }
+}
+
+/**
+ * 一番星 社員ﾏｽﾀ (`GET /api/employees`) から「コード → 氏名」の表を作る。
+ * ログのコードは一番星の社員C と同じ番号体系 (dtako 乗務員CD と同じ。
+ * `app/utils/employee-master.ts` の `IchibanEmployeeRow` 参照)。
+ *
+ * 退職者は一番星で氏名の先頭に `×` が付くが、古いログはその人の記録なので落とさず
+ * そのまま出す。氏名が空なら表示名 (社員R) を使う。
+ */
+export function buildEmployeeNameMap(rows: IchibanEmployeeRow[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const row of rows) {
+    const code = row.employee_code.trim()
+    const name = row.employee_name.trim() || row.employee_r.trim()
+    if (code && name) map.set(code, name)
+  }
+  return map
 }
