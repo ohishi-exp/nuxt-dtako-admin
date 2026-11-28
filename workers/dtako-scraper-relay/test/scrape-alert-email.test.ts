@@ -148,6 +148,18 @@ describe("buildScrapeAlertEmail", () => {
     );
   });
 
+  it("成功の本文: 乗務員未登録の運行の行は畳み直しの行の後ろに足す。空なら本文は変わらない (Refs ippoan/alc-app#676)", () => {
+    const head = "【dtako スクレイプ】comp_id 12345678 の 2026/10/05分の自動取り込みに成功しました。";
+    const d0 = ["乗務員未登録のまま 10km 以上走った運行: 1 件", "・運行NO A / 車輌 X / 出庫 - / 帰庫 - / 10.0km"];
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", FOLD_CAPPED_MAIL_LINE, [])).toBe(
+      `${head}\n${FOLD_CAPPED_MAIL_LINE}`,
+    );
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", FOLD_CAPPED_MAIL_LINE, d0)).toBe(
+      [head, FOLD_CAPPED_MAIL_LINE, ...d0].join("\n"),
+    );
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", null, d0)).toBe([head, ...d0].join("\n"));
+  });
+
   it("成功の本文: 回していないなら理由の固定の語 (4 理由とも)", () => {
     expect(foldSkippedMailLine("no_upload")).toBe("勤怠の畳み直し: 回していない (取り込んだ運行が無い)");
     expect(foldSkippedMailLine("split_failed")).toBe("勤怠の畳み直し: 回していない (CSV 分割の失敗が残っている)");

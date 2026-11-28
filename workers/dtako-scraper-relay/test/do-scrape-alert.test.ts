@@ -78,8 +78,6 @@ function makeDO(
     pendingBody?: unknown;
     /** fold を回す (`KINTAI_COMP_ID` を対象会社にする)。`configured` で畳み先 (勤怠 Worker の binding) も置く。 */
     fold?: "not_configured" | "configured";
-    /** `DRIVER0_ALERT_TARGET` (乗務員未登録の運行の通知、Refs ippoan/alc-app#676)。既定は置かない。 */
-    driver0AlertTarget?: string;
     /** KV `dtako_accounts` に ACCOUNT を置く (`/cron/dtako` の受理と queue の drain が会社を引ける)。 */
     accounts?: boolean;
   } = {},
@@ -115,7 +113,6 @@ function makeDO(
       : "sharedSecret" in opts
         ? opts.sharedSecret
         : "shared-secret",
-    DRIVER0_ALERT_TARGET: opts.driver0AlertTarget,
     SCRAPE_ALERT_TARGET:
       "scrapeAlertTarget" in opts ? opts.scrapeAlertTarget : `{"channel_id":"${CHANNEL_ID}"}`,
     AUTH_WORKER: {
@@ -607,13 +604,13 @@ function storedZip(name: string, data: Uint8Array): ArrayBuffer {
 }
 
 /**
- * ★ 乗務員未登録の運行の通知 (Refs ippoan/alc-app#676) の**配線**。拾い方と文面は
- * `driver0-alert.ts` (100% gate) 側、ここは「取り込みが成功した後に、その zip の KUDGURI から送るか」だけ。
+ * ★ 乗務員未登録の運行を成功メールに載せる (Refs ippoan/alc-app#676) **配線**。拾い方と文面は
+ * `driver0-alert.ts` / `scrape-alert-email.ts` (100% gate) 側、ここは「日次の取り込みが成功した後に、
+ * その zip の KUDGURI から成功メールの本文へ足すか」だけ。
  * CSV は UTF-8 で渡す (Shift_JIS の判定は etc-card-register.test.ts の decodeCsvBytes が固定している)。
  */
-describe("取り込み成功の後に乗務員未登録の運行を知らせる (Refs ippoan/alc-app#676)", () => {
-  // 送るのは日次 cron から来た取り込み (`daily` = true) だけ。
-  const TARGET = `{"recipient_id":"${CHANNEL_ID}"}`;
+describe("取り込み成功のメールに乗務員未登録の運行を載せる (Refs ippoan/alc-app#676)", () => {
+  // 載せるのは日次 cron から来た取り込み (`daily` = true) だけ。
   const KUDGURI = new TextEncoder().encode(
     [
       "運行NO,事業所名,車輌名,対象乗務員CD,出庫日時,帰庫日時,総走行距離",
@@ -622,67 +619,71 @@ describe("取り込み成功の後に乗務員未登録の運行を知らせる 
       "U3,本社,テスト3号,1234,2026/08/28 7:00:00,2026/08/28 18:00:00,300",
     ].join("\r\n"),
   );
+  // 今の成功メールの本文 (KINTAI_COMP_ID を置いていないので畳み直しは回していない)
+  const BASE_BODY =
+    "【dtako スクレイプ】comp_id 27324455 の 2026/08/28分の自動取り込みに成功しました。\n勤怠の畳み直し: 回していない (設定が未設定)";
 
-  it("★ 該当があれば宛先へ 1 通 (10km 以上の乗務員CD=0 だけ)", async () => {
-    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+  it("★ 該当があれば成功メールの本文に件数と 1 運行 1 行を足す (10km 以上の乗務員CD=0 だけ)。LINE WORKS には送らない", async () => {
+    const { sent, mails, run } = makeDO();
     scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
     const errs = captureConsoleError();
     await run(ACCOUNT, RANGE, "job-d0-1", true);
     errs.restore();
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.secret).toBe("shared-secret");
-    expect(sent[0]!.body.recipient_id).toBe(CHANNEL_ID);
-    expect(sent[0]!.body.text).toBe(
+    expect(sent).toHaveLength(0);
+    expect(mails).toHaveLength(1);
+    expect(mailBody(mails[0]!.raw)).toBe(
       [
-        "【dtako 乗務員未登録】comp_id 27324455 の読取日 2026/08/28 に、乗務員未登録のまま 10km 以上走った運行が 1 件あります",
-        "・運行NO U1 / 本社 / テスト1号 / 始業(出庫) 2026/08/28 07:00 / 終業(帰庫) 2026/08/28 18:00 / 52.3km",
+        BASE_BODY,
+        "乗務員未登録のまま 10km 以上走った運行: 1 件",
+        "・運行NO U1 / 車輌 テスト1号 / 出庫 2026/08/28 07:00 / 帰庫 2026/08/28 18:00 / 52.3km",
       ].join("\n"),
     );
   });
 
-  it("★ 宛先が未設定なら送らず、送っていないことを console.error に出す (fail-closed)", async () => {
-    const { sent, run } = makeDO();
-    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
-    const errs = captureConsoleError();
-    await run(ACCOUNT, RANGE, "job-d0-2", true);
-    errs.restore();
-    expect(sent).toHaveLength(0);
-    expect(String(errs.find("driver0_alert_not_sent")?.reason)).toContain("DRIVER0_ALERT_TARGET が未設定");
-  });
-
-  it("★ 陰性対照: 該当が無い日は宛先があっても送らない", async () => {
-    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+  it("★ 陰性対照: 該当が無い日は本文が今のまま", async () => {
+    const { mails, run } = makeDO();
     const none = new TextEncoder().encode("運行NO,対象乗務員CD,総走行距離\r\nU3,1234,300");
     scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", none));
     const errs = captureConsoleError();
     await run(ACCOUNT, RANGE, "job-d0-3", true);
     errs.restore();
-    expect(sent).toHaveLength(0);
-    expect(errs.find("driver0_alert_not_sent")).toBeUndefined();
+    expect(mails).toHaveLength(1);
+    expect(mailBody(mails[0]!.raw)).toBe(BASE_BODY);
   });
 
-  it("★ zip に KUDGURI.csv が無ければ「確かめていない」と出す (0 件と分ける)", async () => {
-    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+  it("★ zip に KUDGURI.csv が無ければ「確かめていない」と出し、本文は今のまま (0 件と分ける)", async () => {
+    const { mails, run } = makeDO();
     scrapeViaHttp.mockResolvedValue(storedZip("KUDGIVT.csv", new Uint8Array()));
     const errs = captureConsoleError();
     await run(ACCOUNT, RANGE, "job-d0-4", true);
     errs.restore();
-    expect(sent).toHaveLength(0);
     expect(errs.find("driver0_alert_not_checked")).toBeDefined();
+    expect(mailBody(mails[0]!.raw)).toBe(BASE_BODY);
   });
 
-  it("★ 日次 cron でない取り込み (画面・MCP からの取り直し) では送らない — 同じ読取日を再送しない", async () => {
-    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+  it("★ KUDGURI の形が違えば「失敗」と出し、成功メールは今の本文で送る (throw しない)", async () => {
+    const { mails, stored, run } = makeDO();
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", new TextEncoder().encode("読取日\r\n2026/08/28")));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-5", true);
+    errs.restore();
+    expect(errs.find("driver0_alert_failed")).toBeDefined();
+    expect(mailBody(mails[0]!.raw)).toBe(BASE_BODY);
+    expect(stored.get(`${SCRAPE_JOB_KEY_PREFIX}job-d0-5`)).toMatchObject({ state: "done" });
+  });
+
+  it("★ 日次 cron でない取り込み (画面・MCP からの取り直し) の成功メールには載せない", async () => {
+    const { mails, run } = makeDO();
     scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
     const errs = captureConsoleError();
     await run(ACCOUNT, RANGE, "job-d0-6");
     errs.restore();
-    expect(sent).toHaveLength(0);
-    expect(errs.find("driver0_alert_not_sent")).toBeUndefined();
+    expect(mails).toHaveLength(1);
+    expect(mailBody(mails[0]!.raw)).toBe(BASE_BODY);
   });
 
-  it("★ 日次 cron の印 (origin) だけが queue の daily になり、drain した取り込みで送る", async () => {
-    const { sent, stored, fetch, runQueued } = makeDO({ driver0AlertTarget: TARGET, accounts: true });
+  it("★ 日次 cron の印 (origin) だけが queue の daily になり、drain した取り込みの成功メールに載る", async () => {
+    const { mails, stored, fetch, runQueued } = makeDO({ accounts: true });
     const post = (body: Record<string, string>) =>
       fetch(new Request("https://relay.internal/cron/dtako", { method: "POST", body: JSON.stringify(body) }));
     const base = { comp_id: ACCOUNT.comp_id, start_date: RANGE.startDate, end_date: RANGE.endDate };
@@ -697,20 +698,10 @@ describe("取り込み成功の後に乗務員未登録の運行を知らせる 
     scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
     const errs = captureConsoleError();
     await runQueued(manual);
-    expect(sent).toHaveLength(0);
     await runQueued(daily);
     errs.restore();
-    expect(sent).toHaveLength(1);
-  });
-
-  it("★ 送信が落ちても取り込みの記録は done のまま (throw しない)", async () => {
-    const { sent, stored, run } = makeDO({ driver0AlertTarget: TARGET, sendOk: false });
-    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
-    const errs = captureConsoleError();
-    await run(ACCOUNT, RANGE, "job-d0-5", true);
-    errs.restore();
-    expect(sent).toHaveLength(1);
-    expect(errs.find("driver0_alert_failed")).toBeDefined();
-    expect(stored.get(`${SCRAPE_JOB_KEY_PREFIX}job-d0-5`)).toMatchObject({ state: "done" });
+    expect(mails).toHaveLength(2);
+    expect(mailBody(mails[0]!.raw)).not.toContain("乗務員未登録");
+    expect(mailBody(mails[1]!.raw)).toContain("・運行NO U1 / ");
   });
 });
