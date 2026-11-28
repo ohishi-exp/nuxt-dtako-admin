@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
+import { DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
 
 const L1 = '1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0'
 const L2 = '1026,0,43019,.1015856,"17101102261400001026.jpg","",0,0,0,0'
@@ -103,6 +103,13 @@ describe('searchDatr', () => {
     const r = parseDatrFiles([{ name: 'a.dat', text: [L1, '1729,.062,46354,.2807871,"x.jpg","",0,0,0,0'].join('\n') }])
     const hits = searchDatr(r.records, { codes: [], from: '', to: '', alcoholOnly: true }).hits
     expect(hits.map(x => [x.code, x.date, x.time, x.alcohol])).toEqual([['1729', '2026-11-28', '06:44:20', '.062']])
+  })
+
+  it('excludeCodes のコードは外す (コード指定に入っていても外す)', () => {
+    const r = parseDatrFiles([{ name: 'a', text: [L1, '99999999,0,43022,.5420718,"x.jpg","",0,0,0,0'].join('\n') }])
+    expect(searchDatr(r.records, { codes: [], from: '', to: '' }).hits).toHaveLength(2)
+    expect(searchDatr(r.records, { codes: [], from: '', to: '', excludeCodes: DEFAULT_EXCLUDED_CODES }).hits.map(x => x.code)).toEqual(['1029'])
+    expect(searchDatr(r.records, { codes: ['99999999'], from: '', to: '', excludeCodes: DEFAULT_EXCLUDED_CODES }).hits).toEqual([])
   })
 
   it('期間は両端を含む', () => {

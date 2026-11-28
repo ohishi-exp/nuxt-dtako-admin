@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord } from '~/utils/datr-log'
+import { DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord } from '~/utils/datr-log'
 
 const MAX_ROWS = 2000
 /** 読み込み中に画面へ途中結果を出す間隔 (ms) */
@@ -41,9 +41,10 @@ const codeText = ref('')
 const from = ref('')
 const to = ref('')
 const alcoholOnly = ref(false)
+const excludeDefault = ref(true)
 
 const codes = computed(() => parseCodeList(codeText.value))
-const result = computed(() => searchDatr(records.value, { codes: codes.value, from: from.value, to: to.value, alcoholOnly: alcoholOnly.value }))
+const result = computed(() => searchDatr(records.value, { codes: codes.value, from: from.value, to: to.value, alcoholOnly: alcoholOnly.value, excludeCodes: excludeDefault.value ? DEFAULT_EXCLUDED_CODES : [] }))
 const missing = computed(() => result.value.perCode.filter(c => c.count === 0).map(c => c.code))
 // jpg は 1 年しか残らないので、古い行は写真が無いのが普通
 const noImage = computed(() => images.value.size === 0 ? 0 : result.value.hits.filter(r => !images.value.has(r.image)).length)
@@ -188,11 +189,10 @@ async function handleFileChange(e: Event) {
             <UInput v-model="to" type="date" />
           </UFormField>
         </div>
-        <UCheckbox
-          v-model="alcoholOnly"
-          class="md:col-span-2"
-          label="アルコール値が 0 でない行だけ"
-        />
+        <div class="md:col-span-2 flex flex-wrap gap-6">
+          <UCheckbox v-model="alcoholOnly" label="アルコール値が 0 でない行だけ" />
+          <UCheckbox v-model="excludeDefault" :label="`コード ${DEFAULT_EXCLUDED_CODES.join(', ')} を除外`" />
+        </div>
       </div>
     </UCard>
 
