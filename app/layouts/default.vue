@@ -14,6 +14,7 @@ const navigation = [
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
   { label: '映像確認', icon: 'i-lucide-video', to: '/vid-check' },
+  { label: 'datr 一括検索', icon: 'i-lucide-file-search', to: '/datr-search' },
   { label: 'NET780 ビューア', icon: 'i-lucide-file-archive', to: '/net780' },
   { label: 'NET780 履歴', icon: 'i-lucide-history', to: '/net780/history' },
   // 外部利用者向け standalone ページ (theearth credential ログイン、Refs #90)。
