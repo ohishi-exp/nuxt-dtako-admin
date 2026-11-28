@@ -1418,3 +1418,8 @@ branches = true
 [[files]]
 path = "server/utils/etc-scan-dav.ts"
 branches = true
+
+# .datr/.bakr 一括検索 (/datr-search) の純粋ロジック。
+[[files]]
+path = "app/utils/datr-log.ts"
+branches = true
