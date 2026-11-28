@@ -8,6 +8,10 @@ import {
   buildScrapeSuccessBody,
   buildScrapeSuccessSubject,
   dtakoCronAlertReason,
+  FOLD_CAPPED_MAIL_LINE,
+  FOLD_SKIP_REASON_TEXT,
+  foldDoneMailLine,
+  foldSkippedMailLine,
   parseScrapeAlertEmailConfig,
   recalcPendingAlertReason,
   SCRAPE_ALERT_EMAIL_SENDER_NAME,
@@ -118,6 +122,39 @@ describe("buildScrapeAlertEmail", () => {
     expect(buildScrapeSuccessSubject("2026-10-05", "2026-10-05")).toBe("[dtako] 取り込み成功 2026/10/05");
     expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-06")).toBe(
       "【dtako スクレイプ】comp_id 12345678 の 2026/10/05〜2026/10/06分の自動取り込みに成功しました。",
+    );
+  });
+
+  it("成功の本文: 畳み直しの 1 行が無い (null) ときは 1 行だけのまま (Refs #1322)", () => {
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", null)).toBe(
+      "【dtako スクレイプ】comp_id 12345678 の 2026/10/05分の自動取り込みに成功しました。",
+    );
+  });
+
+  it("成功の本文: 畳み直しが成功なら 2 行目に月・人数・呼び出し回数・所要 (秒に丸める)", () => {
+    const line = foldDoneMailLine({ months: ["2026-09", "2026-10"], driversWritten: 7, pages: 3, elapsedMs: 121_600 });
+    expect(line).toBe(
+      "勤怠の畳み直し: 成功 (2026-09, 2026-10、書き直し 7 人、勤怠 Worker の呼び出し 3 回、所要 122 秒)",
+    );
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", line)).toBe(
+      "【dtako スクレイプ】comp_id 12345678 の 2026/10/05分の自動取り込みに成功しました。\n" + line,
+    );
+  });
+
+  it("成功の本文: 打ち切りなら 2 行目に打ち切りと書く", () => {
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", FOLD_CAPPED_MAIL_LINE)).toBe(
+      "【dtako スクレイプ】comp_id 12345678 の 2026/10/05分の自動取り込みに成功しました。\n" +
+        "勤怠の畳み直し: 途中で打ち切り (ページ数の上限。続きは次回)",
+    );
+  });
+
+  it("成功の本文: 回していないなら理由の固定の語 (4 理由とも)", () => {
+    expect(foldSkippedMailLine("no_upload")).toBe("勤怠の畳み直し: 回していない (取り込んだ運行が無い)");
+    expect(foldSkippedMailLine("split_failed")).toBe("勤怠の畳み直し: 回していない (CSV 分割の失敗が残っている)");
+    expect(foldSkippedMailLine("out_of_scope")).toBe("勤怠の畳み直し: 回していない (勤怠の対象外の会社)");
+    expect(foldSkippedMailLine("not_configured")).toBe("勤怠の畳み直し: 回していない (設定が未設定)");
+    expect(Object.keys(FOLD_SKIP_REASON_TEXT).sort()).toEqual(
+      ["no_upload", "not_configured", "out_of_scope", "split_failed"],
     );
   });
 });

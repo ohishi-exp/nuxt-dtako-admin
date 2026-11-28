@@ -328,8 +328,9 @@ describe("runCronDtakoScrape の失敗を人へ届ける (Refs #967)", () => {
 
     expect(sent).toHaveLength(0);
     expect(mails).toHaveLength(1);
+    // 2 行目は畳み直しの結果 (KINTAI_COMP_ID を置いていないので回していない。Refs #1322)
     expect(mailBody(mails[0]!.raw)).toBe(
-      "【dtako スクレイプ】comp_id 27324455 の 2026/08/28分の自動取り込みに成功しました。",
+      "【dtako スクレイプ】comp_id 27324455 の 2026/08/28分の自動取り込みに成功しました。\n勤怠の畳み直し: 回していない (設定が未設定)",
     );
   });
 });
@@ -477,6 +478,25 @@ describe("取り込みの失敗をメールでも届ける (Refs #1206)", () => 
     expect(sent).toHaveLength(0);
     // 失敗のメールは出ない (出るのは成功の 1 通だけ)
     expect(mails.map((m) => mailBody(m.raw))).toEqual([expect.stringContaining("自動取り込みに成功しました")]);
+    // 成功メールの 2 行目に畳み直しの結果 (月・人数・呼び出し回数・所要) が載る (Refs #1322)
+    expect(mailBody(mails[0]!.raw).split("\n")[1]).toMatch(
+      /^勤怠の畳み直し: 成功 \(2026-08、書き直し 2 人、勤怠 Worker の呼び出し 1 回、所要 \d+ 秒\)$/,
+    );
+  });
+
+  it("★ 畳み直しが打ち切り (capped) なら、成功メールの 2 行目に打ち切りと書く (Refs #1322)", async () => {
+    const { mails, sent, run } = makeDO({ fold: "configured" });
+    scrapeViaHttp.mockResolvedValue(ZIP);
+    foldMonth.mockResolvedValue({ pages: 10, attemptedGateClose: false, driversWritten: 10, capped: true });
+    const errs = captureConsoleError();
+
+    await run(ACCOUNT, RANGE, "job-d3d");
+    errs.restore();
+
+    expect(sent).toHaveLength(0);
+    expect(mails.map((m) => mailBody(m.raw))).toEqual([
+      `【dtako スクレイプ】comp_id ${ACCOUNT.comp_id} の 2026/08/28分の自動取り込みに成功しました。\n勤怠の畳み直し: 途中で打ち切り (ページ数の上限。続きは次回)`,
+    ]);
   });
 
   it("★ D4: 要再計算が failed > 0 を返したら 1 通", async () => {

@@ -94,6 +94,7 @@ function makeDO(opts: Opts = {}) {
   const spyable = relay as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
   vi.spyOn(spyable, "foldAfterIngest").mockImplementation(async () => {
     order.push("fold");
+    return { alertReason: null, mailLine: null };
   });
   vi.spyOn(spyable, "resolveAccount").mockResolvedValue(ACCOUNT);
   return { order, pendingHeaders, stored, waits, priv, spyable };

@@ -82,7 +82,7 @@ function makeDO() {
   };
   const relay = new DtakoScraperRelayDO(ctx as never, env as never);
   const spyable = relay as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-  vi.spyOn(spyable, "foldAfterIngest").mockResolvedValue(undefined);
+  vi.spyOn(spyable, "foldAfterIngest").mockResolvedValue({ alertReason: null, mailLine: null });
   return { stored, priv: spyable };
 }
 
