@@ -159,12 +159,25 @@ export function searchDatr(records: DatrRecord[], q: DatrQuery): DatrSearchResul
   return { hits, perCode }
 }
 
-/** 読み込んだ全ログでのコードごとのアルコール検知 (値が 0 でない行) の件数 = 通算回数。
- * 期間などの絞り込みに関係なく数える。検知の無いコードは載らない */
-export function countAlcoholByCode(records: DatrRecord[]): Map<string, number> {
-  const counts = new Map<string, number>()
-  for (const r of records) if (hasAlcohol(r)) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
-  return counts
+/**
+ * 通算回数の元: 読み込んだ全ログで、コードごとにアルコール検知 (値が 0 でない行) のあった日の一覧
+ * (昇順・重複なし)。**同じ日に何回検知しても 1 回**と数えるため日単位にする。
+ * 期間などの絞り込みに関係なく作る。検知の無いコードは載らない
+ */
+export function alcoholDaysByCode(records: DatrRecord[]): Map<string, string[]> {
+  const days = new Map<string, Set<string>>()
+  for (const r of records) {
+    if (!hasAlcohol(r)) continue
+    const set = days.get(r.code) ?? new Set<string>()
+    set.add(r.date)
+    days.set(r.code, set)
+  }
+  return new Map([...days].map(([code, set]) => [code, [...set].sort()]))
+}
+
+/** `date` の日までに検知した日数 (その日を含む)。検知の無いコードは 0 */
+export function alcoholDayCountUntil(days: Map<string, string[]>, code: string, date: string): number {
+  return (days.get(code) ?? []).filter(d => d <= date).length
 }
 
 export interface EmployeeInfo {

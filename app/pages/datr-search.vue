@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { IchibanLeaveEmployeeRow } from '~/utils/employee-master'
-import { buildEmployeeInfoMap, countAlcoholByCode, DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord, type EmployeeInfo } from '~/utils/datr-log'
+import { alcoholDayCountUntil, alcoholDaysByCode, buildEmployeeInfoMap, DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord, type EmployeeInfo } from '~/utils/datr-log'
 
 const MAX_ROWS = 2000
 /** 読み込み中に画面へ途中結果を出す間隔 (ms) */
@@ -60,8 +60,8 @@ const excludeDefault = ref(true)
 
 const codes = computed(() => parseCodeList(codeText.value))
 const result = computed(() => searchDatr(records.value, { codes: codes.value, from: from.value, to: to.value, alcoholOnly: alcoholOnly.value, excludeCodes: excludeDefault.value ? DEFAULT_EXCLUDED_CODES : [] }))
-// 通算回数: 読み込んだ全ログでのアルコール検知の件数 (絞り込みに関係なく数える)
-const totals = computed(() => countAlcoholByCode(records.value))
+// 通算回数: 読み込んだ全ログでアルコール検知のあった日 (同じ日は 1 回。絞り込みに関係なく数える)
+const alcoholDays = computed(() => alcoholDaysByCode(records.value))
 const missing = computed(() => result.value.perCode.filter(c => c.count === 0).map(c => c.code))
 // jpg は 1 年しか残らないので、古い行は写真が無いのが普通
 const noImage = computed(() => images.value.size === 0 ? 0 : result.value.hits.filter(r => !images.value.has(r.image)).length)
@@ -124,7 +124,7 @@ async function handleFileChange(e: Event) {
       測定ログ (<code>.dat</code> / <code>.bak</code>、2017 年ごろは <code>.datr</code> / <code>.bakr</code>) と画像 <code>.jpg</code> をまとめて読み込み、
       コード (複数可)・期間・アルコール値の有無で検索します。アルコール値が 0 でない行は赤字です。
       「その他の列」は意味の分かっていない列をそのまま出したものです。
-      氏名・入社日・退職日は一番星の社員マスタから、通算回数は読み込んだログ全体でのそのコードのアルコール検知 (値が 0 でない行) の件数です (期間などの絞り込みに関係なく数えます)。
+      氏名・入社日・退職日は一番星の社員マスタから、通算回数は読み込んだログ全体で、そのコードがアルコール検知 (値が 0 でない行) をした日数です。同じ日に何回検知しても 1 回と数え、表の各行にはその日までの回数を出します (期間などの絞り込みに関係なく数えます)。
       同じ行が複数ファイルにある場合 (<code>.bak</code> は <code>.dat</code> の控え) は 1 件に畳みます。
       画像 (jpg フォルダはフォルダごと選べます) も読み込むと、ログの画像ファイル名と一致する写真を各行に表示します。
       ログと画像は別々に何回かに分けて選んでも足し込まれます。
@@ -229,7 +229,7 @@ async function handleFileChange(e: Event) {
             class="px-2 py-0.5 rounded font-mono"
             :class="c.count === 0 ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300' : 'bg-gray-100 dark:bg-gray-800'"
           >{{ [c.code, employees.get(c.code)?.name].filter(Boolean).join(' ') }}: {{ c.count }}
-            <span class="text-gray-500">(アルコール検知 通算 {{ totals.get(c.code) ?? 0 }} 回<template v-if="employees.get(c.code)?.hireDate">・入社 {{ employees.get(c.code)!.hireDate }}</template><template v-if="employees.get(c.code)?.retireDate">・退職 {{ employees.get(c.code)!.retireDate }}</template>)</span></span>
+            <span class="text-gray-500">(アルコール検知 通算 {{ alcoholDays.get(c.code)?.length ?? 0 }} 回<template v-if="employees.get(c.code)?.hireDate">・入社 {{ employees.get(c.code)!.hireDate }}</template><template v-if="employees.get(c.code)?.retireDate">・退職 {{ employees.get(c.code)!.retireDate }}</template>)</span></span>
         </div>
         <div v-if="missing.length > 0" class="mt-2 text-sm text-red-600">
           見つからなかったコード: {{ missing.join(', ') }}
@@ -295,7 +295,7 @@ async function handleFileChange(e: Event) {
                 {{ employees.get(r.code)?.name ?? '' }}
               </td>
               <td class="py-1 pr-4 font-mono text-right">
-                {{ totals.get(r.code) ?? 0 }}
+                {{ alcoholDayCountUntil(alcoholDays, r.code, r.date) }}
               </td>
               <td class="py-1 pr-4 font-mono">
                 {{ employees.get(r.code)?.hireDate ?? '' }}

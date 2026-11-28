@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildEmployeeInfoMap, countAlcoholByCode, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
+import { alcoholDayCountUntil, alcoholDaysByCode, buildEmployeeInfoMap, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
 
 const L1 = '1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0'
 const L2 = '1026,0,43019,.1015856,"17101102261400001026.jpg","",0,0,0,0'
@@ -118,15 +118,27 @@ describe('searchDatr', () => {
   })
 })
 
-describe('countAlcoholByCode', () => {
-  it('アルコール値が 0 でない行だけをコードごとに数え、検知の無いコードは載せない', () => {
-    const { records } = parseDatrFiles([{ name: 'a', text: [
-      L1, L2, L3,
-      L1.replace(',0,43019', ',.062,43021'),
-      L1.replace(',0,43019', ',.1,43022'),
-      L3.replace(',0,43020', ',.05,43023'),
-    ].join('\n') }])
-    expect([...countAlcoholByCode(records)].sort()).toEqual([['1029', 2], ['1042', 1]])
+describe('alcoholDaysByCode / alcoholDayCountUntil', () => {
+  const { records } = parseDatrFiles([{ name: 'a', text: [
+    L1, L2, L3,
+    // 1029: 2017-10-13 に 2 回、2017-10-14 に 1 回検知
+    L1.replace(',0,43019,8.215278E-02', ',.062,43021,.3'),
+    L1.replace(',0,43019,8.215278E-02', ',.05,43021,.4'),
+    L1.replace(',0,43019', ',.1,43022'),
+    L3.replace(',0,43020', ',.05,43023'),
+  ].join('\n') }])
+  const days = alcoholDaysByCode(records)
+
+  it('検知のあった日を重複なしで昇順に持ち、検知の無いコードは載せない', () => {
+    expect([...days].sort()).toEqual([['1029', ['2017-10-13', '2017-10-14']], ['1042', ['2017-10-15']]])
+  })
+
+  it('同じ日は 1 回、次の日に検知したら 2。その日までの回数を返す', () => {
+    expect(alcoholDayCountUntil(days, '1029', '2017-10-11')).toBe(0)
+    expect(alcoholDayCountUntil(days, '1029', '2017-10-13')).toBe(1)
+    expect(alcoholDayCountUntil(days, '1029', '2017-10-14')).toBe(2)
+    expect(alcoholDayCountUntil(days, '1029', '2030-01-01')).toBe(2)
+    expect(alcoholDayCountUntil(days, '1026', '2030-01-01')).toBe(0)
   })
 })
 
