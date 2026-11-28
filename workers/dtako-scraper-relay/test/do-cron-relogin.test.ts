@@ -79,7 +79,7 @@ function makeDO(upload: () => Response = () => new Response(JSON.stringify({ upl
   };
   const relay = new DtakoScraperRelayDO(ctx as never, env as never);
   const priv = relay as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-  vi.spyOn(priv, "foldAfterIngest").mockResolvedValue(undefined);
+  vi.spyOn(priv, "foldAfterIngest").mockResolvedValue({ alertReason: null, mailLine: null });
   const notify = vi.spyOn(priv, "notifyScrapeFailure").mockResolvedValue(undefined);
   vi.spyOn(priv, "recordCronScrapeHistory").mockResolvedValue(undefined);
   vi.spyOn(priv, "saveScrapeErrorArtifact").mockResolvedValue(null);

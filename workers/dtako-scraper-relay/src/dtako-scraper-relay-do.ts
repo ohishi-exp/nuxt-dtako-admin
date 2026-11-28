@@ -593,6 +593,9 @@ import {
   buildScrapeAlertSubject,
   buildScrapeSuccessBody,
   buildScrapeSuccessSubject,
+  FOLD_CAPPED_MAIL_LINE,
+  foldDoneMailLine,
+  foldSkippedMailLine,
   recalcPendingAlertReason,
   SCRAPE_ALERT_EMAIL_KV_KEY,
   sendScrapeAlertEmail,
@@ -955,6 +958,13 @@ const FOLD_SKIP_STATE: Record<
   out_of_scope: "skipped_out_of_scope",
   not_configured: "not_configured",
 };
+
+/** 取り込み後の畳み直し ([`foldAfterIngest`]) の結果。`alertReason` は失敗メールに
+ * 載せる理由、`mailLine` は成功メールの 2 行目 (`scrape-alert-email.ts` の固定の語)。 */
+interface FoldOutcome {
+  alertReason: string | null;
+  mailLine: string | null;
+}
 
 /** ETC 手動実行 (`/ws/scraper?kind=etc|etc-all`) の「今月/先月」ボタン選択を
  * URL query (`month=previous`) から読む。`previous` 以外 (未指定含む) は
@@ -1879,9 +1889,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         await this.recalcPendingAfterIngest(account, sharedSecret, logBase),
       );
       if (recalcReason) alertReasons.push(recalcReason);
+      let foldMailLine: string | null = null;
       try {
-        const foldReason = await this.foldAfterIngest(account, range, jobKey, outcome);
-        if (foldReason) alertReasons.push(foldReason);
+        const fold = await this.foldAfterIngest(account, range, jobKey, outcome);
+        if (fold.alertReason) alertReasons.push(fold.alertReason);
+        foldMailLine = fold.mailLine;
       } catch (foldErr) {
         console.error(
           JSON.stringify({
@@ -1898,7 +1910,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         await sendScrapeAlertEmail(
           scrapeAlertEmailDeps(this.env),
           buildScrapeSuccessSubject(range.startDate, range.endDate),
-          buildScrapeSuccessBody(account.comp_id, range.startDate, range.endDate),
+          buildScrapeSuccessBody(account.comp_id, range.startDate, range.endDate, foldMailLine),
           logBase,
         );
       }
@@ -2218,7 +2230,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     range: { startDate: string; endDate: string },
     jobKey: string,
     uploadOutcome: AlcUploadOutcome | null,
-  ): Promise<string | null> {
+  ): Promise<FoldOutcome> {
     try {
       // **`KINTAI_COMP_ID` / `KINTAI_COMP_IDS` の宣言をそのまま判定に使う** (値をコピーしない、
       // Refs #633-22)。対象外の会社で fold を回すと畳み先が 403 を返し、恒久的な
@@ -2237,7 +2249,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           fold_state: FOLD_SKIP_STATE[decision.reason],
           fold_skip_reason: decision.detail,
         });
-        return null;
+        return { alertReason: null, mailLine: foldSkippedMailLine(decision.reason) };
       }
 
       const months = monthsCoveredByRange(range.startDate, range.endDate);
@@ -2246,7 +2258,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           fold_state: "failed",
           fold_error: `不正な日付範囲: ${range.startDate}..${range.endDate}`,
         });
-        return ALERT_REASON_FOLD_FAILED;
+        return { alertReason: ALERT_REASON_FOLD_FAILED, mailLine: null };
       }
 
       // 同一 comp_id (= この DO インスタンス) 内で fold の多重起動を防ぐ
@@ -2260,7 +2272,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           error: describeUnknownError(err),
         }),
       );
-      return null;
+      return { alertReason: null, mailLine: null };
     }
   }
 
@@ -2312,7 +2324,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     account: DtakoAccountRaw,
     jobKey: string,
     months: string[],
-  ): Promise<string | null> {
+  ): Promise<FoldOutcome> {
+    const startedMs = Date.now();
     await this.recordFold(jobKey, {
       fold_state: "running",
       fold_started_at: new Date().toISOString(),
@@ -2323,7 +2336,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const scope = await this.kintaiScopeFor(true);
       if (!kintaiReader(this.env, account.comp_id, scope)) {
         await this.recordFold(jobKey, { fold_state: "not_configured", fold_error: KINTAI_WORKER_UNAVAILABLE });
-        return ALERT_REASON_FOLD_NOT_CONFIGURED;
+        return { alertReason: ALERT_REASON_FOLD_NOT_CONFIGURED, mailLine: null };
       }
       const writeToken = await this.kintaiWriteTokenFor(account.comp_id, "kintai_fold");
       const deps = buildDeps({ kintai: this.env.KINTAI, compId: account.comp_id, scope, writeToken });
@@ -2346,14 +2359,24 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         fold_pages: totalPages,
         fold_drivers_written: totalDriversWritten,
       });
-      return null;
+      return {
+        alertReason: null,
+        mailLine: anyCapped
+          ? FOLD_CAPPED_MAIL_LINE
+          : foldDoneMailLine({
+              months,
+              driversWritten: totalDriversWritten,
+              pages: totalPages,
+              elapsedMs: Date.now() - startedMs,
+            }),
+      };
     } catch (err) {
       const message = describeUnknownError(err);
       console.error(
         JSON.stringify({ kintai_fold: "failed", comp_id: account.comp_id, months, message }),
       );
       await this.recordFold(jobKey, { fold_state: "failed", fold_error: message });
-      return ALERT_REASON_FOLD_FAILED;
+      return { alertReason: ALERT_REASON_FOLD_FAILED, mailLine: null };
     }
   }
 

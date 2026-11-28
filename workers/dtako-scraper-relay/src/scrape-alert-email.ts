@@ -27,6 +27,7 @@
 import { createMimeMessage } from "mimetext/browser";
 import type { RecalcPendingResult } from "./alc-internal-upload";
 import { DTAKO_ACCOUNTS_EMPTY_DETAIL, type CronRunResult } from "./cron";
+import type { FoldSkipReason } from "./kintai-relay";
 import { formatReadingDateRange } from "./scrape-alert";
 
 /** 設定を置く KV (`DTAKO_CONFIG_KV`) のキー。値は `{"from": "...", "to": "..."}`。 */
@@ -110,9 +111,49 @@ export function buildScrapeSuccessSubject(startDate: string, endDate: string): s
   return `[dtako] 取り込み成功 ${formatReadingDateRange(startDate, endDate)}`;
 }
 
-/** 成功の本文。会社と読取日だけ (失敗の本文と同じく運行NO・key は載せない)。 */
-export function buildScrapeSuccessBody(compId: string, startDate: string, endDate: string): string {
-  return `【dtako スクレイプ】comp_id ${compId} の ${formatReadingDateRange(startDate, endDate)}分の自動取り込みに成功しました。`;
+/** 成功の本文。会社と読取日だけ (失敗の本文と同じく運行NO・key は載せない)。
+ * `foldLine` (勤怠の畳み直しの結果の 1 行。下の `foldDoneMailLine` 等で作る) があれば
+ * 2 行目に足す。畳み直しを呼ばなかった経路では渡さない = 1 行だけの本文のまま。 */
+export function buildScrapeSuccessBody(
+  compId: string,
+  startDate: string,
+  endDate: string,
+  foldLine?: string | null,
+): string {
+  const head = `【dtako スクレイプ】comp_id ${compId} の ${formatReadingDateRange(startDate, endDate)}分の自動取り込みに成功しました。`;
+  return foldLine ? `${head}\n${foldLine}` : head;
+}
+
+// ---------------------------------------------------------------------------
+// 成功メールの 2 行目 = 勤怠の畳み直しの結果 (固定の語 + 月と件数)。失敗と
+// `not_configured` は今どおり失敗メールの理由 (`ALERT_REASON_FOLD_*`) に入る。
+// ---------------------------------------------------------------------------
+
+/** 畳み直しが最後まで回った (`fold_state: "done"`)。所要は秒に丸める。 */
+export function foldDoneMailLine(r: {
+  months: string[];
+  driversWritten: number;
+  pages: number;
+  elapsedMs: number;
+}): string {
+  const sec = Math.round(r.elapsedMs / 1000);
+  return `勤怠の畳み直し: 成功 (${r.months.join(", ")}、書き直し ${r.driversWritten} 人、勤怠 Worker の呼び出し ${r.pages} 回、所要 ${sec} 秒)`;
+}
+
+/** ページ数の上限で打ち切った (`fold_state: "capped"`)。 */
+export const FOLD_CAPPED_MAIL_LINE = "勤怠の畳み直し: 途中で打ち切り (ページ数の上限。続きは次回)";
+
+/** 回さなかった理由の固定の語。`decideFoldTrigger` の `detail` (生の文) は載せない。 */
+export const FOLD_SKIP_REASON_TEXT: Record<FoldSkipReason, string> = {
+  no_upload: "取り込んだ運行が無い",
+  split_failed: "CSV 分割の失敗が残っている",
+  out_of_scope: "勤怠の対象外の会社",
+  not_configured: "設定が未設定",
+};
+
+/** `decideFoldTrigger` が回さないと決めた。 */
+export function foldSkippedMailLine(reason: FoldSkipReason): string {
+  return `勤怠の畳み直し: 回していない (${FOLD_SKIP_REASON_TEXT[reason]})`;
 }
 
 export interface ScrapeAlertEmailDeps {

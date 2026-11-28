@@ -461,14 +461,15 @@ describe("recalc・window・stale-months は勤怠 Worker だけ (Refs ohishi-ex
 });
 
 describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-exp/rust-ichibanboshi#322)", () => {
+  type FoldOutcome = { alertReason: string | null; mailLine: string | null };
   type Priv = {
-    runFoldMonths(account: unknown, jobKey: string, months: string[]): Promise<string | null>;
+    runFoldMonths(account: unknown, jobKey: string, months: string[]): Promise<FoldOutcome>;
     foldAfterIngest(
       account: unknown,
       range: { startDate: string; endDate: string },
       jobKey: string,
       uploadOutcome: { splitFailed: number | null } | null,
-    ): Promise<string | null>;
+    ): Promise<FoldOutcome>;
     recordFold(jobKey: string, patch: Record<string, unknown>): Promise<void>;
   };
   function fold(setup: Setup, sharedSecret = true, account: unknown = { comp_id: COMP, tenant_id: TENANT }) {
@@ -502,7 +503,11 @@ describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-
 
   it("★ 取り込み後の fold: KINTAI_COMP_IDS に無い会社は skipped_out_of_scope で、勤怠 Worker を呼ばない (陰性対照)", async () => {
     const { afterIngest, states, made } = fold({}, true, { comp_id: OTHER_COMP, tenant_id: OTHER_TENANT });
-    expect(await afterIngest()).toBeNull();
+    // 失敗の理由は無く、成功メールの 2 行目は「回していない」(生の detail は載せない。Refs #1322)
+    expect(await afterIngest()).toEqual({
+      alertReason: null,
+      mailLine: "勤怠の畳み直し: 回していない (勤怠の対象外の会社)",
+    });
     expect(states).toEqual([
       expect.objectContaining({ fold_state: "skipped_out_of_scope", fold_skip_reason: expect.stringContaining(OTHER_COMP) }),
     ]);
@@ -531,7 +536,7 @@ describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-
 
   it("token が読めなければ failed (auth-worker へ倒さない)", async () => {
     const { run, states, made } = fold({ writeToken: false });
-    expect(await run()).not.toBeNull();
+    expect(await run()).toEqual({ alertReason: "勤怠の畳み直しが失敗", mailLine: null });
     expect(states.at(-1)).toMatchObject({ fold_state: "failed" });
     expect(String(states.at(-1)!.fold_error)).toContain("KINTAI_WRITE_TOKEN が読めません");
     expect(made.authWorker).toEqual([]);
@@ -539,14 +544,20 @@ describe("取り込み後の畳み直し (runFoldMonths) の配線 (Refs ohishi-
 
   it("binding があれば not_configured にならず畳み直しまで進む", async () => {
     const { run, states } = fold({});
-    await run();
+    const outcome = await run();
+    // 回りきったら成功メールの 2 行目を返す (Refs #1322)
+    expect(states.at(-1)!.fold_state).toBe("done");
+    expect(outcome.alertReason).toBeNull();
+    expect(outcome.mailLine).toMatch(
+      new RegExp(`^勤怠の畳み直し: 成功 \\(${YM}、書き直し \\d+ 人、勤怠 Worker の呼び出し \\d+ 回、所要 \\d+ 秒\\)$`),
+    );
     expect(states.map((s) => s.fold_state)).not.toContain("not_configured");
     expect(states[0]!.fold_state).toBe("running");
   });
 
   it("binding が無ければ not_configured (勤怠 Worker が使えない)", async () => {
     const { run, states } = fold({ kintaiBinding: false });
-    expect(await run()).not.toBeNull();
+    expect(await run()).toEqual({ alertReason: "勤怠の畳み直しに要る設定が未設定", mailLine: null });
     expect(states.at(-1)!.fold_state).toBe("not_configured");
     expect(states.at(-1)!.fold_error).toBe("勤怠 Worker (KINTAI) が使えません");
   });
