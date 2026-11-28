@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildEmployeeInfoMap, countByCode, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
+import { buildEmployeeInfoMap, countAlcoholByCode, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
 
 const L1 = '1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0'
 const L2 = '1026,0,43019,.1015856,"17101102261400001026.jpg","",0,0,0,0'
@@ -118,10 +118,15 @@ describe('searchDatr', () => {
   })
 })
 
-describe('countByCode', () => {
-  it('読み込んだ全件をコードごとに数える', () => {
-    const { records } = parseDatrFiles([{ name: 'a', text: [L1, L2, L3, L1.replace('43019', '43021')].join('\n') }])
-    expect([...countByCode(records)].sort()).toEqual([['1026', 1], ['1029', 2], ['1042', 1]])
+describe('countAlcoholByCode', () => {
+  it('アルコール値が 0 でない行だけをコードごとに数え、検知の無いコードは載せない', () => {
+    const { records } = parseDatrFiles([{ name: 'a', text: [
+      L1, L2, L3,
+      L1.replace(',0,43019', ',.062,43021'),
+      L1.replace(',0,43019', ',.1,43022'),
+      L3.replace(',0,43020', ',.05,43023'),
+    ].join('\n') }])
+    expect([...countAlcoholByCode(records)].sort()).toEqual([['1029', 2], ['1042', 1]])
   })
 })
 

@@ -159,10 +159,11 @@ export function searchDatr(records: DatrRecord[], q: DatrQuery): DatrSearchResul
   return { hits, perCode }
 }
 
-/** 読み込んだ全ログでのコードごとの件数 (= 通算回数。期間・アルコールの絞り込みに関係なく数える) */
-export function countByCode(records: DatrRecord[]): Map<string, number> {
+/** 読み込んだ全ログでのコードごとのアルコール検知 (値が 0 でない行) の件数 = 通算回数。
+ * 期間などの絞り込みに関係なく数える。検知の無いコードは載らない */
+export function countAlcoholByCode(records: DatrRecord[]): Map<string, number> {
   const counts = new Map<string, number>()
-  for (const r of records) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
+  for (const r of records) if (hasAlcohol(r)) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
   return counts
 }
 
