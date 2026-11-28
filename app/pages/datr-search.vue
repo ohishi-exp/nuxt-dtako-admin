@@ -67,6 +67,15 @@ const missing = computed(() => result.value.perCode.filter(c => c.count === 0).m
 const noImage = computed(() => images.value.size === 0 ? 0 : result.value.hits.filter(r => !images.value.has(r.image)).length)
 const shown = computed(() => result.value.hits.slice(0, MAX_ROWS))
 
+// 写真は loading="lazy" なので、画面外の行は読み込まれないまま紙に出ることがある。
+// 印刷の前に全部読み込ませてから印刷ダイアログを開く
+async function printPage() {
+  const imgs = [...document.querySelectorAll<HTMLImageElement>('.datr-table img')]
+  for (const img of imgs) img.loading = 'eager'
+  await Promise.all(imgs.map(img => img.decode().catch(() => {})))
+  window.print()
+}
+
 async function handleFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const files = input.files ? Array.from(input.files) : []
@@ -116,11 +125,22 @@ async function handleFileChange(e: Event) {
 </script>
 
 <template>
-  <div class="max-w-7xl">
-    <h1 class="text-2xl font-bold mb-1">
-      datr 一括検索
-    </h1>
-    <p class="text-sm text-gray-500 mb-6">
+  <div class="max-w-7xl datr-search">
+    <div class="flex items-center justify-between gap-3 mb-1">
+      <h1 class="text-2xl font-bold">
+        datr 一括検索
+      </h1>
+      <UButton
+        v-if="result.hits.length > 0"
+        label="印刷 (A4 縦)"
+        icon="i-lucide-printer"
+        color="neutral"
+        variant="outline"
+        class="print:hidden"
+        @click="printPage"
+      />
+    </div>
+    <p class="text-sm text-gray-500 mb-6 print:hidden">
       測定ログ (<code>.dat</code> / <code>.bak</code>、2017 年ごろは <code>.datr</code> / <code>.bakr</code>) と画像 <code>.jpg</code> をまとめて読み込み、
       コード (複数可)・期間・アルコール値の有無で検索します。アルコール値が 0 でない行は赤字です。
       「その他の列」は意味の分かっていない列をそのまま出したものです。
@@ -131,7 +151,7 @@ async function handleFileChange(e: Event) {
       読み込みはブラウザ内で完結し、ファイルはサーバーに送信されません。
     </p>
 
-    <UCard class="mb-4">
+    <UCard class="mb-4 print:hidden">
       <div class="flex flex-wrap items-center gap-3">
         <UButton
           label="ファイルを選択 (複数可)"
@@ -197,7 +217,7 @@ async function handleFileChange(e: Event) {
       </details>
     </UCard>
 
-    <UCard v-if="records.length > 0" class="mb-4">
+    <UCard v-if="records.length > 0" class="mb-4 print:hidden">
       <div class="grid gap-4 md:grid-cols-[1fr_auto]">
         <UFormField label="コード (改行・カンマ・空白区切りで複数。空なら全件)">
           <UTextarea v-model="codeText" :rows="4" class="w-full font-mono" placeholder="例: 1029, 1026 (改行区切りでも可)" />
@@ -218,6 +238,10 @@ async function handleFileChange(e: Event) {
     </UCard>
 
     <template v-if="records.length > 0">
+      <!-- 紙では入力欄が消えるので、何で絞った結果かを文字で残す -->
+      <div class="hidden print:block text-xs mb-2">
+        条件: コード {{ codes.length > 0 ? codes.join(', ') : '全件' }} / 期間 {{ from || '指定なし' }} 〜 {{ to || '指定なし' }}<template v-if="alcoholOnly"> / アルコール値が 0 でない行だけ</template><template v-if="excludeDefault"> / コード {{ DEFAULT_EXCLUDED_CODES.join(', ') }} を除外</template>
+      </div>
       <UCard v-if="result.perCode.length > 0" class="mb-4">
         <div class="text-sm font-semibold mb-2">
           コード別件数
@@ -241,8 +265,8 @@ async function handleFileChange(e: Event) {
         <template v-if="noImage > 0">(うち写真なし {{ noImage }} 件 — jpg は約 1 年で消えます)</template>
         <template v-if="result.hits.length > MAX_ROWS">(先頭 {{ MAX_ROWS }} 件を表示。コードか期間で絞ってください)</template>
       </div>
-      <div class="overflow-x-auto">
-        <table class="min-w-full text-sm">
+      <div class="overflow-x-auto print:overflow-visible">
+        <table class="min-w-full text-sm datr-table">
           <thead class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
             <tr>
               <th class="py-1 pr-4">
@@ -335,3 +359,19 @@ async function handleFileChange(e: Event) {
     </div>
   </div>
 </template>
+
+<style>
+/* A4 縦 (印字幅 約 718px) に表が収まるよう詰める。**`@page` は書かない** — 素の `@page` は SPA で他の画面の
+   印刷にも残り、粗利・拘束×賃金の `@page { size: A4 landscape }` とぶつかる (`app/pages/fuel/intank.vue` と同じ作法)。
+   A4 縦は印刷ダイアログの既定。`aside` (サイドバー) は scoped では効かないので非 scoped */
+@media print {
+  aside { display: none !important; }
+  main:has(> .datr-search) { padding: 0 !important; }
+  .datr-search { max-width: none; }
+  .datr-search .datr-table { font-size: 9px; }
+  .datr-search .datr-table th,
+  .datr-search .datr-table td { padding: 1px 4px 1px 0 !important; }
+  .datr-search .datr-table tr { break-inside: avoid; }
+  .datr-search .datr-table img { height: 2rem; }
+}
+</style>
