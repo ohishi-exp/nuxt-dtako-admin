@@ -609,7 +609,7 @@ function storedZip(name: string, data: Uint8Array): ArrayBuffer {
  * その zip の KUDGURI から成功メールの本文へ足すか」だけ。
  * CSV は UTF-8 で渡す (Shift_JIS の判定は etc-card-register.test.ts の decodeCsvBytes が固定している)。
  */
-describe("取り込み成功のメールに乗務員未登録の運行を載せる (Refs ippoan/alc-app#676)", () => {
+describe("取り込みのメール (成功・取り込み後の失敗) に乗務員未登録の運行を載せる (Refs ippoan/alc-app#676)", () => {
   // 載せるのは日次 cron から来た取り込み (`daily` = true) だけ。
   const KUDGURI = new TextEncoder().encode(
     [
@@ -680,6 +680,43 @@ describe("取り込み成功のメールに乗務員未登録の運行を載せ�
     errs.restore();
     expect(mails).toHaveLength(1);
     expect(mailBody(mails[0]!.raw)).toBe(BASE_BODY);
+  });
+
+  const D0_LINES = [
+    "乗務員未登録のまま 10km 以上走った運行: 1 件",
+    "・運行NO U1 / 車輌 テスト1号 / 出庫 2026/08/28 07:00 / 帰庫 2026/08/28 18:00 / 52.3km",
+  ];
+
+  it("★ 取り込み後に失敗 (分割の失敗) した日次は、失敗のメールの末尾に足す。LINE WORKS の文面には足さない", async () => {
+    const { sent, mails, run } = makeDO({ splitFailed: 3 });
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-7", true);
+    errs.restore();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body.text).toContain("CSV の分割が 3 件失敗");
+    expect(sent[0]!.body.text).not.toContain("乗務員未登録");
+    expect(mails).toHaveLength(1);
+    expect(mailBody(mails[0]!.raw)).toBe([sent[0]!.body.text, ...D0_LINES].join("\n"));
+  });
+
+  it("★ 陰性対照: 取り込み後に失敗した日次でも該当が無ければ、失敗のメールは今の本文 (LINE WORKS と同じ)", async () => {
+    const { sent, mails, run } = makeDO({ splitFailed: 3 });
+    const none = new TextEncoder().encode("運行NO,対象乗務員CD,総走行距離\r\nU3,1234,300");
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", none));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-8", true);
+    errs.restore();
+    expect(mailBody(mails[0]!.raw)).toBe(sent[0]!.body.text);
+  });
+
+  it("★ 手動の取り直しで取り込み後に失敗しても、失敗のメールには足さない", async () => {
+    const { sent, mails, run } = makeDO({ splitFailed: 3 });
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-9");
+    errs.restore();
+    expect(mailBody(mails[0]!.raw)).toBe(sent[0]!.body.text);
   });
 
   it("★ 日次 cron の印 (origin) だけが queue の daily になり、drain した取り込みの成功メールに載る", async () => {

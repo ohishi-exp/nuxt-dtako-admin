@@ -592,6 +592,7 @@ import {
   ALERT_REASON_FOLD_NOT_CONFIGURED,
   ALERT_REASON_NO_SHARED_SECRET,
   buildScrapeAlertSubject,
+  buildScrapeFailureMailBody,
   buildScrapeSuccessBody,
   buildScrapeSuccessSubject,
   FOLD_CAPPED_MAIL_LINE,
@@ -1880,7 +1881,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // ETC カード追加登録の確認段 (Refs #1287)。取り込みは上で記録済み。この呼び出しは
       // 例外を外へ出さない (`confirmEtcRunsFromZip` の doc) — 取り込みの結果を道連れにしない。
       await this.confirmEtcRunsFromZip(account, zip, range, jobKey);
-      // 乗務員未登録のまま走った運行を成功メールに載せる行 (Refs ippoan/alc-app#676)。throw しない。
+      // 乗務員未登録のまま走った運行をメール (成功・取り込み後の失敗) に載せる行 (Refs ippoan/alc-app#676)。throw しない。
       // 日次 cron の経路だけ — 手動の取り直し (scrape-dispatch / MCP) では同じ読取日を再び載せない。
       const driver0Lines = daily ? await this.driver0MailLinesFromZip(logBase, zip) : [];
       // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
@@ -1916,7 +1917,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         );
       }
       if (alertReasons.length > 0) {
-        await this.notifyScrapeFailure(logBase, account, range, alertReasons.join(" / "), false, sharedSecret);
+        // 取り込みは成功して zip が手元にあるので、乗務員未登録の運行は失敗のメールにも載せる (Refs ippoan/alc-app#676)
+        await this.notifyScrapeFailure(logBase, account, range, alertReasons.join(" / "), false, sharedSecret, driver0Lines);
       } else {
         // 成功もメールで知らせる (LINE WORKS には送らない)。届かなければ経路の故障と分かる
         await sendScrapeAlertEmail(
@@ -1993,6 +1995,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     message: string,
     artifactSaved: boolean,
     sharedSecret: string,
+    /** 乗務員未登録のまま走った運行の行 (`driver0MailLinesFromZip`)。メールの本文の末尾にだけ足す。 */
+    driver0Lines: readonly string[] = [],
   ): Promise<void> {
     const text = buildScrapeFailureNotification({
       compId: account.comp_id,
@@ -2008,14 +2012,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       sendScrapeAlertEmail(
         scrapeAlertEmailDeps(this.env),
         buildScrapeAlertSubject(range.startDate, range.endDate),
-        text,
+        buildScrapeFailureMailBody(text, driver0Lines),
         logBase,
       ),
     ]);
   }
 
   /**
-   * 乗務員未登録 (対象乗務員CD=0) のまま 10km 以上走った運行を、成功メールの本文に足す行にする
+   * 乗務員未登録 (対象乗務員CD=0) のまま 10km 以上走った運行を、成功・失敗のメールの本文に足す行にする
    * (Refs ippoan/alc-app#676)。**グルーだけ** — 拾い方と文面は `driver0-alert.ts` (100% gate)。
    *
    * 材料は取り込んだばかりの日次 zip の KUDGURI.csv (= 前日の読取日 1 日分) なので、状態を持たずに
