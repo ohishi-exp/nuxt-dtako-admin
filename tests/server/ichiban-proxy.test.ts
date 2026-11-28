@@ -402,17 +402,18 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     ['api/costs/vehicle-daily', 'app/utils/margin.ts:153'],
     ['api/costs/vehicle-daily', 'app/utils/profit-actual-wage.ts:99'],
     ['api/employees', 'app/pages/restraint-wage.vue:3122'],
+    ['api/leave/employees', 'app/pages/datr-search.vue:47'],
   ]
 
-  it('★ 陽性対照: front の 8 site / 6 distinct path が全部 upstream に届く', () => {
-    expect(FRONT_CALL_SITES).toHaveLength(8)
-    expect(new Set(FRONT_CALL_SITES.map(([path]) => path)).size).toBe(6)
+  it('★ 陽性対照: front の 9 site / 7 distinct path が全部 upstream に届く', () => {
+    expect(FRONT_CALL_SITES).toHaveLength(9)
+    expect(new Set(FRONT_CALL_SITES.map(([path]) => path)).size).toBe(7)
     for (const [path, site] of FRONT_CALL_SITES) {
       expect(isAllowedIchibanProxyPath(path), `${site} の ${path} が allowlist から漏れている`).toBe(true)
     }
   })
 
-  it('★ 陽性対照: allowlist の 6 件を実際に handler へ通すと 6 件とも upstream を叩く', async () => {
+  it('★ 陽性対照: allowlist の 7 件を実際に handler へ通すと 7 件とも upstream を叩く', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(new Response('{"data":[]}', {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -430,10 +431,11 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     )
   })
 
-  it('allowlist は front が叩く 6 件ちょうど (増減したら front と突き合わせ直す)', () => {
+  it('allowlist は front が叩く 7 件ちょうど (増減したら front と突き合わせ直す)', () => {
     expect([...ICHIBAN_PROXY_ALLOWED_PATHS].sort()).toEqual([
       'api/costs/vehicle-daily',
       'api/employees',
+      'api/leave/employees',
       'api/sales/departments',
       'api/sales/vehicle-daily',
       'api/vehicles',

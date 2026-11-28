@@ -60,7 +60,7 @@
  * いまは認可なしの Worker への Service Binding) を貸す**ので、中継先は画面が実際に使う口に固定する。
  *
  * 許す path は `ICHIBAN_PROXY_ALLOWED_PATHS` (`server/utils/ichiban-upstream.ts`) の
- * **完全一致 6 件**。前方一致にしない理由・front を数えた手順は全部そちらの JSDoc に書いてある。**照合するのは path 部分だけで、
+ * **完全一致 7 件**。前方一致にしない理由・front を数えた手順は全部そちらの JSDoc に書いてある。**照合するのは path 部分だけで、
  * query string は今までどおり素通し。**
  *
  * ★ **範囲はこのファイル = GET だけ。**`.get.ts` なので書き込み系は元から通らない。

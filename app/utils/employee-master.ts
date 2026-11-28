@@ -445,6 +445,18 @@ export interface IchibanEmployeeRow {
   employee_r: string
 }
 
+/** 一番星 `GET /api/leave/employees` の 1 行 (社員ﾏｽﾀを社員C で 1 行に潰したもの)。
+ * 日付は `YYYY-MM-DD`、未設定は null (rust-ichibanboshi `workers/ichiban/logic/src/leave.rs`)。 */
+export interface IchibanLeaveEmployeeRow {
+  employee_code: string
+  employee_name: string
+  dept_code: string
+  /** 入社年月日 */
+  hire_date: string | null
+  /** 退職年月日 */
+  retire_date: string | null
+}
+
 /** 一番星突合の提案 (どれも「保存」まではローカル)。 */
 export interface IchibanMatchPlan {
   /** 氏名が一意に決まった行 — 社員C を埋めてよい。 */

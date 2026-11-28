@@ -16,7 +16,7 @@
  * どのファイルに入っていたかは `sources` に残す。
  */
 
-import type { IchibanEmployeeRow } from './employee-master'
+import type { IchibanLeaveEmployeeRow } from './employee-master'
 
 export interface DatrRecord {
   code: string
@@ -159,20 +159,35 @@ export function searchDatr(records: DatrRecord[], q: DatrQuery): DatrSearchResul
   return { hits, perCode }
 }
 
+/** 読み込んだ全ログでのコードごとのアルコール検知 (値が 0 でない行) の件数 = 通算回数。
+ * 期間などの絞り込みに関係なく数える。検知の無いコードは載らない */
+export function countAlcoholByCode(records: DatrRecord[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const r of records) if (hasAlcohol(r)) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
+  return counts
+}
+
+export interface EmployeeInfo {
+  name: string
+  /** 入社年月日 (`YYYY-MM-DD`)。未設定は null */
+  hireDate: string | null
+  /** 退職年月日 (`YYYY-MM-DD`)。在籍中・未設定は null */
+  retireDate: string | null
+}
+
 /**
- * 一番星 社員ﾏｽﾀ (`GET /api/employees`) から「コード → 氏名」の表を作る。
+ * 一番星 社員ﾏｽﾀ (`GET /api/leave/employees`) から「コード → 氏名・入社日・退職日」の表を作る。
  * ログのコードは一番星の社員C と同じ番号体系 (dtako 乗務員CD と同じ。
  * `app/utils/employee-master.ts` の `IchibanEmployeeRow` 参照)。
  *
  * 退職者は一番星で氏名の先頭に `×` が付くが、古いログはその人の記録なので落とさず
- * そのまま出す。氏名が空なら表示名 (社員R) を使う。
+ * そのまま出す。コードが空の行は捨てる (氏名が空でも日付があれば残す)。
  */
-export function buildEmployeeNameMap(rows: IchibanEmployeeRow[]): Map<string, string> {
-  const map = new Map<string, string>()
+export function buildEmployeeInfoMap(rows: IchibanLeaveEmployeeRow[]): Map<string, EmployeeInfo> {
+  const map = new Map<string, EmployeeInfo>()
   for (const row of rows) {
     const code = row.employee_code.trim()
-    const name = row.employee_name.trim() || row.employee_r.trim()
-    if (code && name) map.set(code, name)
+    if (code) map.set(code, { name: row.employee_name.trim(), hireDate: row.hire_date, retireDate: row.retire_date })
   }
   return map
 }
