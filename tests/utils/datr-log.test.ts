@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseDatrLine, parseDatrFiles, parseCodeList, searchDatr } from '~/utils/datr-log'
+import { parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
 
 const L1 = '1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0'
 const L2 = '1026,0,43019,.1015856,"17101102261400001026.jpg","",0,0,0,0'
@@ -9,6 +9,7 @@ describe('parseDatrLine', () => {
   it('Excel シリアルと日割り時刻を日付・時刻に直す', () => {
     expect(parseDatrLine(L1)).toEqual({
       code: '1029', date: '2017-10-11', time: '01:58:18', image: '17101101581600001029.jpg',
+      alcohol: '0', extra: ['', '0', '0', '0', '0'],
     })
     expect(parseDatrLine('310,0,43019,.3068634,"a.jpg","",0,0,0,0')?.time).toBe('07:21:53')
   })
@@ -47,6 +48,33 @@ describe('parseDatrFiles', () => {
   })
 })
 
+describe('DatrIndex', () => {
+  it('ファイルを足すたびに records() が増える (途中経過を出せる)', () => {
+    const index = new DatrIndex()
+    index.add({ name: 'b', text: L3 })
+    expect(index.records().map(r => r.code)).toEqual(['1042'])
+    index.add({ name: 'a', text: `${L1}\n${L3}` })
+    expect(index.records().map(r => [r.code, r.sources])).toEqual([['1029', ['a']], ['1042', ['b', 'a']]])
+  })
+})
+
+describe('hasAlcohol', () => {
+  it('0 は無し、.062 のような値は有り。空や数値でないものは見落とさないよう有り', () => {
+    expect(hasAlcohol({ alcohol: '0' })).toBe(false)
+    expect(hasAlcohol({ alcohol: '0.000' })).toBe(false)
+    expect(hasAlcohol({ alcohol: '.062' })).toBe(true)
+    expect(hasAlcohol({ alcohol: '' })).toBe(true)
+    expect(hasAlcohol({ alcohol: 'abc' })).toBe(true)
+  })
+})
+
+describe('isDatrLogFile', () => {
+  it('2017 年の .datr/.bakr と 2026 年の .dat/.bak を対象にする', () => {
+    expect(['a.datr', 'a.bakr', 'a.dat', 'A.BAK'].map(isDatrLogFile)).toEqual([true, true, true, true])
+    expect(['a.jpg', 'a.txt', 'a.data', 'a.datrx'].map(isDatrLogFile)).toEqual([false, false, false, false])
+  })
+})
+
 describe('parseCodeList', () => {
   it('改行・カンマ・空白・読点で区切り、重複を除く', () => {
     expect(parseCodeList(' 1029\n1026, 1029、310\t\n')).toEqual(['1029', '1026', '310'])
@@ -69,6 +97,12 @@ describe('searchDatr', () => {
     expect(r.perCode).toEqual([
       { code: '1042', count: 1 }, { code: '9999', count: 0 }, { code: '1029', count: 1 },
     ])
+  })
+
+  it('alcoholOnly はアルコール値が 0 でない行だけ', () => {
+    const r = parseDatrFiles([{ name: 'a.dat', text: [L1, '1729,.062,46354,.2807871,"x.jpg","",0,0,0,0'].join('\n') }])
+    const hits = searchDatr(r.records, { codes: [], from: '', to: '', alcoholOnly: true }).hits
+    expect(hits.map(x => [x.code, x.date, x.time, x.alcohol])).toEqual([['1729', '2026-11-28', '06:44:20', '.062']])
   })
 
   it('期間は両端を含む', () => {

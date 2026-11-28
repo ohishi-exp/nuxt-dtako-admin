@@ -1,14 +1,18 @@
 /**
- * `.datr` / `.bakr` ログ (1 行 = 1 撮影) の解析と一括検索。
+ * 撮影ログ (1 行 = 1 回の測定) の解析と一括検索。拡張子は年代で違い、
+ * 2017 年は `.datr` / `.bakr`、2026 年は `.dat` / `.bak` (中身の形は同じ)。
  *
  * 1 行の形 (カンマ区切り、ファイル名だけ "" 囲み):
  *   `1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0`
  *   - 列 1: コード
+ *   - 列 2: アルコール値 (2026-11-28 のファイルで `.062` の行があり、同じコードが
+ *     約 30 分後に測り直して 0。単位はファイルに無く未確認)
  *   - 列 3: 日付 (Excel シリアル。43019 = 2017-10-11)
  *   - 列 4: 時刻 (1 日に対する割合。0.5 = 12:00:00)
  *   - 列 5: 画像ファイル名
+ *   - 列 6 以降: 意味が未確定 (手元のデータは全部 "" か 0)。`extra` にそのまま残す
  *
- * `.bakr` は `.datr` の控えで中身が同じことが多い。同じ行は 1 件に畳み、
+ * `.bakr` / `.bak` は `.datr` / `.dat` の控えで中身が同じことが多い。同じ行は 1 件に畳み、
  * どのファイルに入っていたかは `sources` に残す。
  */
 
@@ -19,6 +23,10 @@ export interface DatrRecord {
   /** `HH:MM:SS` */
   time: string
   image: string
+  /** アルコール値 (列 2 の生の文字列。`.062` のように先頭の 0 が無いことがある) */
+  alcohol: string
+  /** 意味が未確定の列 (列 6 以降) の生の値 */
+  extra: string[]
   /** この行が入っていたファイル名 (重複を畳んだ数だけ並ぶ) */
   sources: string[]
 }
@@ -43,11 +51,21 @@ function fractionToTime(fraction: number): string {
 export function parseDatrLine(line: string): Omit<DatrRecord, 'sources'> | null {
   const cols = line.trim().split(',').map(c => c.replace(/^"|"$/g, ''))
   if (cols.length < 5) return null
-  const [code, , dateCol, timeCol, image] = cols as [string, string, string, string, string]
+  const [code, alcohol, dateCol, timeCol, image] = cols as [string, string, string, string, string]
   const serial = Number(dateCol)
   const fraction = Number(timeCol)
   if (!code || !Number.isInteger(serial) || serial <= 0 || !Number.isFinite(fraction) || fraction < 0 || fraction >= 1) return null
-  return { code, date: serialToDate(serial), time: fractionToTime(fraction), image }
+  return { code, date: serialToDate(serial), time: fractionToTime(fraction), image, alcohol, extra: cols.slice(5) }
+}
+
+/** アルコール値が 0 でないか (空や数値でないものも「0 でない」に数えて見落とさない) */
+export function hasAlcohol(r: Pick<DatrRecord, 'alcohol'>): boolean {
+  return Number(r.alcohol || 'x') !== 0
+}
+
+/** 対象のログファイルか (拡張子で判定) */
+export function isDatrLogFile(name: string): boolean {
+  return /\.(datr?|bakr?)$/i.test(name)
 }
 
 export interface DatrParseResult {
@@ -57,12 +75,15 @@ export interface DatrParseResult {
 }
 
 /**
- * 複数ファイルを読んで 1 本にまとめる。同じ行は 1 件に畳み、日時順に並べる。
+ * 読み込みの途中でも結果を出せるよう、ファイルを 1 本ずつ足していく入れ物。
+ * 同じ行は 1 件に畳み、`records()` で日時順の配列を返す。
  */
-export function parseDatrFiles(files: { name: string, text: string }[]): DatrParseResult {
-  const byKey = new Map<string, DatrRecord>()
-  const skipped: DatrParseResult['skipped'] = []
-  for (const file of files) {
+export class DatrIndex {
+  private byKey = new Map<string, DatrRecord>()
+  readonly skipped: DatrParseResult['skipped'] = []
+
+  add(file: { name: string, text: string }): void {
+    const { byKey, skipped } = this
     file.text.split(/\r?\n/).forEach((text, i) => {
       if (!text.trim()) return
       const rec = parseDatrLine(text)
@@ -76,9 +97,22 @@ export function parseDatrFiles(files: { name: string, text: string }[]): DatrPar
       else byKey.set(key, { ...rec, sources: [file.name] })
     })
   }
-  const records = [...byKey.values()].sort((a, b) =>
-    `${a.date} ${a.time} ${a.code}`.localeCompare(`${b.date} ${b.time} ${b.code}`))
-  return { records, skipped }
+
+  records(): DatrRecord[] {
+    // 数十万件になるので localeCompare は使わず、キーを先に作って比べる。
+    // キーは Map のキーと同じ要素から作るので重複しない (同値の比較は起きない)
+    return [...this.byKey.values()]
+      .map(r => [`${r.date} ${r.time} ${r.code} ${r.image}`, r] as const)
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([, r]) => r)
+  }
+}
+
+/** 複数ファイルを読んで 1 本にまとめる。同じ行は 1 件に畳み、日時順に並べる。 */
+export function parseDatrFiles(files: { name: string, text: string }[]): DatrParseResult {
+  const index = new DatrIndex()
+  for (const file of files) index.add(file)
+  return { records: index.records(), skipped: index.skipped }
 }
 
 /** 改行・カンマ・空白・読点で区切ったコードの一覧 (重複除去、入力順) */
@@ -93,6 +127,8 @@ export interface DatrQuery {
   from: string
   /** `yyyy-mm-dd`。空なら上限なし */
   to: string
+  /** true ならアルコール値が 0 でない行だけ */
+  alcoholOnly?: boolean
 }
 
 export interface DatrSearchResult {
@@ -106,7 +142,8 @@ export function searchDatr(records: DatrRecord[], q: DatrQuery): DatrSearchResul
   const hits = records.filter(r =>
     (wanted.size === 0 || wanted.has(r.code))
     && (!q.from || r.date >= q.from)
-    && (!q.to || r.date <= q.to))
+    && (!q.to || r.date <= q.to)
+    && (!q.alcoholOnly || hasAlcohol(r)))
   const counts = new Map<string, number>()
   for (const r of hits) counts.set(r.code, (counts.get(r.code) ?? 0) + 1)
   const perCode = q.codes.map(code => ({ code, count: counts.get(code) ?? 0 }))
