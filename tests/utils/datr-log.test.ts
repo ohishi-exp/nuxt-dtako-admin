@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildEmployeeNameMap, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
+import { buildEmployeeInfoMap, countByCode, DEFAULT_EXCLUDED_CODES, parseDatrLine, parseDatrFiles, parseCodeList, searchDatr, hasAlcohol, isDatrLogFile, DatrIndex } from '~/utils/datr-log'
 
 const L1 = '1029,0,43019,8.215278E-02,"17101101581600001029.jpg","",0,0,0,0'
 const L2 = '1026,0,43019,.1015856,"17101102261400001026.jpg","",0,0,0,0'
@@ -118,15 +118,23 @@ describe('searchDatr', () => {
   })
 })
 
-describe('buildEmployeeNameMap', () => {
-  it('社員C → 氏名。氏名が空なら社員R、× 付き (退職) もそのまま、コードか名前が空の行は捨てる', () => {
-    const map = buildEmployeeNameMap([
-      { employee_code: ' 1029 ', employee_name: '甲 太郎', employee_r: '甲' },
-      { employee_code: '1026', employee_name: ' ', employee_r: '乙' },
-      { employee_code: '1005', employee_name: '×丙', employee_r: '丙' },
-      { employee_code: '', employee_name: '丁', employee_r: '丁' },
-      { employee_code: '1042', employee_name: '', employee_r: '' },
+describe('countByCode', () => {
+  it('読み込んだ全件をコードごとに数える', () => {
+    const { records } = parseDatrFiles([{ name: 'a', text: [L1, L2, L3, L1.replace('43019', '43021')].join('\n') }])
+    expect([...countByCode(records)].sort()).toEqual([['1026', 1], ['1029', 2], ['1042', 1]])
+  })
+})
+
+describe('buildEmployeeInfoMap', () => {
+  it('社員C → 氏名・入社日・退職日。× 付き (退職) もそのまま、コードが空の行は捨てる', () => {
+    const map = buildEmployeeInfoMap([
+      { employee_code: ' 1029 ', employee_name: ' 甲 太郎 ', dept_code: '010', hire_date: '2010-04-01', retire_date: null },
+      { employee_code: '1005', employee_name: '×丙', dept_code: '010', hire_date: '2001-05-01', retire_date: '2018-03-31' },
+      { employee_code: '', employee_name: '丁', dept_code: '010', hire_date: null, retire_date: null },
     ])
-    expect([...map]).toEqual([['1029', '甲 太郎'], ['1026', '乙'], ['1005', '×丙']])
+    expect([...map]).toEqual([
+      ['1029', { name: '甲 太郎', hireDate: '2010-04-01', retireDate: null }],
+      ['1005', { name: '×丙', hireDate: '2001-05-01', retireDate: '2018-03-31' }],
+    ])
   })
 })

@@ -32,7 +32,7 @@ export class IchibanUpstreamError extends Error {
  * ★ **中身は front が実際に叩いている path の集合。front が正で、この一覧が front に
  * 合わせる** (逆ではない)。2026-08-28 に `a028078` で
  * `git grep -n "/api/ichiban" -- 'app/**'` = 25 行を実読し、**コメント/JSDoc を除いた
- * 実リテラル 8 site / 6 distinct** を数えた:
+ * 実リテラル 8 site / 6 distinct** を数えた (その後の追加は表の下の行):
  *
  * | path | 呼び出し元 (site) |
  * |---|---|
@@ -42,6 +42,7 @@ export class IchibanUpstreamError extends Error {
  * | `api/vehicles` | `app/utils/ichiban-health.ts` |
  * | `api/sales/vehicle-daily` | `app/utils/ichiban.ts` |
  * | `api/costs/vehicle-daily` | `app/utils/margin.ts` / `app/utils/profit-actual-wage.ts` |
+ * | `api/leave/employees` | `app/pages/datr-search.vue` (入社日・退職日。2026-11-28 追加) |
  *
  * **front は path を動的に組んでいない** (全部 string literal)。陽性対照として、同じ
  * 探索が `/api/kyuyo/` 側では template literal 組み立て
@@ -61,6 +62,7 @@ export const ICHIBAN_PROXY_ALLOWED_PATHS: readonly string[] = [
   'api/sales/departments',
   'api/sales/vehicle-daily',
   'api/costs/vehicle-daily',
+  'api/leave/employees',
 ]
 
 /**

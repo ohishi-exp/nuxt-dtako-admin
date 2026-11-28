@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { IchibanEmployeeRow } from '~/utils/employee-master'
-import { buildEmployeeNameMap, DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord } from '~/utils/datr-log'
+import type { IchibanLeaveEmployeeRow } from '~/utils/employee-master'
+import { buildEmployeeInfoMap, countByCode, DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord, type EmployeeInfo } from '~/utils/datr-log'
 
 const MAX_ROWS = 2000
 /** 読み込み中に画面へ途中結果を出す間隔 (ms) */
@@ -38,14 +38,14 @@ function clearAll() {
 }
 onBeforeUnmount(clearAll)
 
-// 一番星 社員ﾏｽﾀ: コード (= 社員C) → 氏名。取れなくても検索はできるので、失敗は注記だけ出す。
-// proxy の base に `/api` が含まれないため `/api/ichiban/api/employees` と二重に書く
-const employeeNames = shallowRef(new Map<string, string>())
+// 一番星 社員ﾏｽﾀ: コード (= 社員C) → 氏名・入社日・退職日。取れなくても検索はできるので、失敗は注記だけ出す。
+// proxy の base に `/api` が含まれないため `/api/ichiban/api/leave/employees` と二重に書く
+const employees = shallowRef(new Map<string, EmployeeInfo>())
 const employeeError = ref<string | null>(null)
 onMounted(async () => {
   try {
-    const res = await $fetch<{ data: IchibanEmployeeRow[] }>('/api/ichiban/api/employees')
-    employeeNames.value = buildEmployeeNameMap(res.data ?? [])
+    const res = await $fetch<{ data: IchibanLeaveEmployeeRow[] }>('/api/ichiban/api/leave/employees')
+    employees.value = buildEmployeeInfoMap(res.data ?? [])
   }
   catch (err) {
     employeeError.value = err instanceof Error ? err.message : String(err)
@@ -60,6 +60,8 @@ const excludeDefault = ref(true)
 
 const codes = computed(() => parseCodeList(codeText.value))
 const result = computed(() => searchDatr(records.value, { codes: codes.value, from: from.value, to: to.value, alcoholOnly: alcoholOnly.value, excludeCodes: excludeDefault.value ? DEFAULT_EXCLUDED_CODES : [] }))
+// 通算回数: 読み込んだ全ログでの件数 (絞り込みに関係なく数える)
+const totals = computed(() => countByCode(records.value))
 const missing = computed(() => result.value.perCode.filter(c => c.count === 0).map(c => c.code))
 // jpg は 1 年しか残らないので、古い行は写真が無いのが普通
 const noImage = computed(() => images.value.size === 0 ? 0 : result.value.hits.filter(r => !images.value.has(r.image)).length)
@@ -122,6 +124,7 @@ async function handleFileChange(e: Event) {
       測定ログ (<code>.dat</code> / <code>.bak</code>、2017 年ごろは <code>.datr</code> / <code>.bakr</code>) と画像 <code>.jpg</code> をまとめて読み込み、
       コード (複数可)・期間・アルコール値の有無で検索します。アルコール値が 0 でない行は赤字です。
       「その他の列」は意味の分かっていない列をそのまま出したものです。
+      氏名・入社日・退職日は一番星の社員マスタから、通算回数は読み込んだログ全体でのそのコードの件数です (期間などの絞り込みに関係なく数えます)。
       同じ行が複数ファイルにある場合 (<code>.bak</code> は <code>.dat</code> の控え) は 1 件に畳みます。
       画像 (jpg フォルダはフォルダごと選べます) も読み込むと、ログの画像ファイル名と一致する写真を各行に表示します。
       ログと画像は別々に何回かに分けて選んでも足し込まれます。
@@ -178,7 +181,7 @@ async function handleFileChange(e: Event) {
         </span>
       </div>
       <div v-if="employeeError" class="mt-3 text-sm text-amber-700 dark:text-amber-300">
-        一番星の社員マスタを読めなかったため、氏名は出ません ({{ employeeError }})。
+        一番星の社員マスタを読めなかったため、氏名・入社日・退職日は出ません ({{ employeeError }})。
       </div>
       <div v-if="error" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
         <UIcon name="i-lucide-alert-circle" class="size-4 inline-block mr-1" />
@@ -225,7 +228,8 @@ async function handleFileChange(e: Event) {
             :key="c.code"
             class="px-2 py-0.5 rounded font-mono"
             :class="c.count === 0 ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300' : 'bg-gray-100 dark:bg-gray-800'"
-          >{{ [c.code, employeeNames.get(c.code)].filter(Boolean).join(' ') }}: {{ c.count }}</span>
+          >{{ [c.code, employees.get(c.code)?.name].filter(Boolean).join(' ') }}: {{ c.count }}
+            <span class="text-gray-500">(通算 {{ totals.get(c.code) ?? 0 }} 回<template v-if="employees.get(c.code)?.hireDate">・入社 {{ employees.get(c.code)!.hireDate }}</template><template v-if="employees.get(c.code)?.retireDate">・退職 {{ employees.get(c.code)!.retireDate }}</template>)</span></span>
         </div>
         <div v-if="missing.length > 0" class="mt-2 text-sm text-red-600">
           見つからなかったコード: {{ missing.join(', ') }}
@@ -254,6 +258,15 @@ async function handleFileChange(e: Event) {
                 氏名 (一番星)
               </th>
               <th class="py-1 pr-4">
+                通算回数
+              </th>
+              <th class="py-1 pr-4">
+                入社日
+              </th>
+              <th class="py-1 pr-4">
+                退職日
+              </th>
+              <th class="py-1 pr-4">
                 画像
               </th>
               <th class="py-1 pr-4">
@@ -279,7 +292,16 @@ async function handleFileChange(e: Event) {
                 {{ r.code }}
               </td>
               <td class="py-1 pr-4">
-                {{ employeeNames.get(r.code) ?? '' }}
+                {{ employees.get(r.code)?.name ?? '' }}
+              </td>
+              <td class="py-1 pr-4 font-mono text-right">
+                {{ totals.get(r.code) }}
+              </td>
+              <td class="py-1 pr-4 font-mono">
+                {{ employees.get(r.code)?.hireDate ?? '' }}
+              </td>
+              <td class="py-1 pr-4 font-mono">
+                {{ employees.get(r.code)?.retireDate ?? '' }}
               </td>
               <td class="py-1 pr-4 font-mono">
                 <div class="flex items-center gap-2">
