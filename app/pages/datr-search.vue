@@ -67,6 +67,17 @@ const missing = computed(() => result.value.perCode.filter(c => c.count === 0).m
 const noImage = computed(() => images.value.size === 0 ? 0 : result.value.hits.filter(r => !images.value.has(r.image)).length)
 const shown = computed(() => result.value.hits.slice(0, MAX_ROWS))
 
+// 紙の向き: 粗利・拘束×賃金・訴訟の画面は非 scoped の `@page { size: A4 landscape }` を持ち、SPA では
+// 一度開くとこの画面の印刷にも残って横になる。この画面を開いている間だけ <head> の最後に縦の指定を足し、
+// 後から書いた @page が勝つことで縦にする (離れるときに外すので、他の画面の横向きは壊さない)
+let portraitStyle: HTMLStyleElement | null = null
+onMounted(() => {
+  portraitStyle = document.createElement('style')
+  portraitStyle.textContent = '@media print { @page { size: A4 portrait; } }'
+  document.head.appendChild(portraitStyle)
+})
+onBeforeUnmount(() => portraitStyle?.remove())
+
 // 写真は loading="lazy" なので、画面外の行は読み込まれないまま紙に出ることがある。
 // 印刷の前に全部読み込ませてから印刷ダイアログを開く
 async function printPage() {
@@ -361,9 +372,9 @@ async function handleFileChange(e: Event) {
 </template>
 
 <style>
-/* A4 縦 (印字幅 約 718px) に表が収まるよう詰める。**`@page` は書かない** — 素の `@page` は SPA で他の画面の
-   印刷にも残り、粗利・拘束×賃金の `@page { size: A4 landscape }` とぶつかる (`app/pages/fuel/intank.vue` と同じ作法)。
-   A4 縦は印刷ダイアログの既定。`aside` (サイドバー) は scoped では効かないので非 scoped */
+/* A4 縦 (印字幅 約 718px) に表が収まるよう詰める。**ここに `@page` は書かない** — 素の `@page` は SPA で他の画面の
+   印刷にも残り、粗利・拘束×賃金の `@page { size: A4 landscape }` を壊す。縦の指定は script の onMounted で
+   この画面を開いている間だけ足す。`aside` (サイドバー) は scoped では効かないので非 scoped */
 @media print {
   aside { display: none !important; }
   main:has(> .datr-search) { padding: 0 !important; }
