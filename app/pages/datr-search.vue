@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { IchibanLeaveEmployeeRow } from '~/utils/employee-master'
+import { clearDatrFiles, loadDatrFiles, saveDatrFiles, type StoredImage, type StoredLog } from '~/utils/datr-store'
 import { alcoholDayCountUntil, alcoholDaysByCode, buildEmployeeInfoMap, DEFAULT_EXCLUDED_CODES, DatrIndex, hasAlcohol, isDatrLogFile, parseCodeList, searchDatr, type DatrRecord, type EmployeeInfo } from '~/utils/datr-log'
 
 const MAX_ROWS = 2000
@@ -29,14 +30,32 @@ function flush() {
 const images = shallowRef(new Map<string, string>())
 const preview = ref<string | null>(null)
 
-function clearAll() {
+function resetView() {
   for (const url of images.value.values()) URL.revokeObjectURL(url)
   images.value = new Map()
   index = new DatrIndex()
   loadedLogs = new Set()
   flush()
 }
-onBeforeUnmount(clearAll)
+// 画面を離れるときは表示だけ片付ける (保存したファイルは残し、開き直したら戻す)
+onBeforeUnmount(resetView)
+
+// 読み込んだファイルはこの端末のブラウザ (IndexedDB) に取っておき、F5 や開き直しで自動で戻す。
+// 保存に失敗しても検索はできるので、注記だけ出す
+const storeNote = ref<string | null>(null)
+
+// 「クリア」は保存したファイルも消す
+async function clearAll() {
+  resetView()
+  storeNote.value = null
+  try {
+    await clearDatrFiles()
+  }
+  catch {
+    // 保存できない環境では消すものも無い
+  }
+}
+
 
 // 一番星 社員ﾏｽﾀ: コード (= 社員C) → 氏名・入社日・退職日。取れなくても検索はできるので、失敗は注記だけ出す。
 // proxy の base に `/api` が含まれないため `/api/ichiban/api/leave/employees` と二重に書く
@@ -68,15 +87,27 @@ const noImage = computed(() => images.value.size === 0 ? 0 : result.value.hits.f
 const shown = computed(() => result.value.hits.slice(0, MAX_ROWS))
 
 // 紙の向き: 粗利・拘束×賃金・訴訟の画面は非 scoped の `@page { size: A4 landscape }` を持ち、SPA では
-// 一度開くとこの画面の印刷にも残って横になる。この画面を開いている間だけ <head> の最後に縦の指定を足し、
-// 後から書いた @page が勝つことで縦にする (離れるときに外すので、他の画面の横向きは壊さない)
+// 一度開くとこの画面の印刷にも残って横になる。この画面を開いている間だけ <head> の最後に縦の指定を置き、
+// 後から書いた @page が勝つことで縦にする (離れるときに外すので、他の画面の横向きは壊さない)。
+// 後から <head> に stylesheet が足されると負けるので、足されるたびと印刷の直前に最後へ置き直す
 let portraitStyle: HTMLStyleElement | null = null
+let headObserver: MutationObserver | null = null
+function placePortraitLast() {
+  if (portraitStyle && document.head.lastElementChild !== portraitStyle) document.head.appendChild(portraitStyle)
+}
 onMounted(() => {
   portraitStyle = document.createElement('style')
   portraitStyle.textContent = '@media print { @page { size: A4 portrait; } }'
-  document.head.appendChild(portraitStyle)
+  placePortraitLast()
+  headObserver = new MutationObserver(placePortraitLast)
+  headObserver.observe(document.head, { childList: true })
+  window.addEventListener('beforeprint', placePortraitLast)
 })
-onBeforeUnmount(() => portraitStyle?.remove())
+onBeforeUnmount(() => {
+  headObserver?.disconnect()
+  window.removeEventListener('beforeprint', placePortraitLast)
+  portraitStyle?.remove()
+})
 
 // 写真は loading="lazy" なので、画面外の行は読み込まれないまま紙に出ることがある。
 // 印刷の前に全部読み込ませてから印刷ダイアログを開く
@@ -84,8 +115,76 @@ async function printPage() {
   const imgs = [...document.querySelectorAll<HTMLImageElement>('.datr-table img')]
   for (const img of imgs) img.loading = 'eager'
   await Promise.all(imgs.map(img => img.decode().catch(() => {})))
+  placePortraitLast()
   window.print()
 }
+
+/**
+ * ログと写真を画面に足す。ファイル選択と、保存しておいた分の復元の両方が通る。
+ * `save` が true なら読み込んだ分を IndexedDB に取っておく
+ */
+async function ingest(logFiles: { name: string, read: () => Promise<string> }[], imageFiles: StoredImage[], save: boolean) {
+  const next = new Map(images.value)
+  for (const f of imageFiles) {
+    const old = next.get(f.name)
+    if (old) URL.revokeObjectURL(old)
+    next.set(f.name, URL.createObjectURL(f.blob))
+  }
+  images.value = next
+
+  // 読み込み済みと同名のログは飛ばす (二重に足すと「ファイル」列が重複するため)
+  const logs = logFiles.filter(f => !loadedLogs.has(f.name))
+  const added: StoredLog[] = []
+  let last = performance.now()
+  for (let i = 0; i < logs.length; i++) {
+    const f = logs[i]!
+    const text = await f.read()
+    index.add({ name: f.name, text })
+    loadedLogs.add(f.name)
+    added.push({ name: f.name, text })
+    if (performance.now() - last >= FLUSH_MS) {
+      progress.value = `${i + 1} / ${logs.length} ファイル読み込み中…`
+      flush()
+      // 描画させてから続きを読む
+      await new Promise(r => setTimeout(r, 0))
+      last = performance.now()
+    }
+  }
+  flush()
+
+  if (save && (added.length > 0 || imageFiles.length > 0)) {
+    try {
+      await saveDatrFiles(added, imageFiles)
+    }
+    catch (err) {
+      storeNote.value = `読み込んだファイルをこのブラウザに保存できませんでした。開き直すと選び直しになります (${err instanceof Error ? err.message : String(err)})`
+    }
+  }
+}
+
+// 保存しておいたファイルを戻す
+onMounted(async () => {
+  let stored: Awaited<ReturnType<typeof loadDatrFiles>>
+  try {
+    stored = await loadDatrFiles()
+  }
+  catch {
+    return
+  }
+  if (stored.logs.length === 0 && stored.images.length === 0) return
+  loading.value = true
+  try {
+    await ingest(stored.logs.map(l => ({ name: l.name, read: async () => l.text })), stored.images, false)
+  }
+  catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+    flush()
+  }
+  finally {
+    loading.value = false
+    progress.value = ''
+  }
+})
 
 async function handleFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -98,31 +197,11 @@ async function handleFileChange(e: Event) {
     // 追加読み込み: ログと画像を別々に何回かに分けて選んでもよい。
     // フォルダ選択では関係ないファイルも来るので拡張子で振り分ける
     const isImage = (f: File) => /\.jpe?g$/i.test(f.name)
-
-    const next = new Map(images.value)
-    for (const f of files.filter(isImage)) {
-      const old = next.get(f.name)
-      if (old) URL.revokeObjectURL(old)
-      next.set(f.name, URL.createObjectURL(f))
-    }
-    images.value = next
-
-    // 読み込み済みと同名のログは飛ばす (二重に足すと「ファイル」列が重複するため)
-    const logs = files.filter(f => isDatrLogFile(f.name) && !loadedLogs.has(f.name))
-    let last = performance.now()
-    for (let i = 0; i < logs.length; i++) {
-      const f = logs[i]!
-      index.add({ name: f.name, text: await f.text() })
-      loadedLogs.add(f.name)
-      if (performance.now() - last >= FLUSH_MS) {
-        progress.value = `${i + 1} / ${logs.length} ファイル読み込み中…`
-        flush()
-        // 描画させてから続きを読む
-        await new Promise(r => setTimeout(r, 0))
-        last = performance.now()
-      }
-    }
-    flush()
+    await ingest(
+      files.filter(f => isDatrLogFile(f.name)).map(f => ({ name: f.name, read: () => f.text() })),
+      files.filter(isImage).map(f => ({ name: f.name, blob: f })),
+      true,
+    )
   }
   catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -160,6 +239,7 @@ async function handleFileChange(e: Event) {
       画像 (jpg フォルダはフォルダごと選べます) も読み込むと、ログの画像ファイル名と一致する写真を各行に表示します。
       ログと画像は別々に何回かに分けて選んでも足し込まれます。
       読み込みはブラウザ内で完結し、ファイルはサーバーに送信されません。
+      読み込んだファイルはこのブラウザに保存され、開き直したり更新したりしても自動で戻ります (消すときは「クリア」)。
     </p>
 
     <UCard class="mb-4 print:hidden">
@@ -210,6 +290,9 @@ async function handleFileChange(e: Event) {
           <UIcon name="i-lucide-loader-circle" class="animate-spin size-4 inline-block mr-1" />
           {{ progress }} (読み込んだ分から検索できます)
         </span>
+      </div>
+      <div v-if="storeNote" class="mt-3 text-sm text-amber-700 dark:text-amber-300">
+        {{ storeNote }}
       </div>
       <div v-if="employeeError" class="mt-3 text-sm text-amber-700 dark:text-amber-300">
         一番星の社員マスタを読めなかったため、氏名・入社日・退職日は出ません ({{ employeeError }})。
