@@ -83,6 +83,7 @@ export default defineConfig({
         'src/netprint-cron.ts',
         'src/kosoku-daily.ts',
         'src/scrape-alert.ts',
+        'src/driver0-alert.ts',
         'src/scrape-alert-email.ts',
         'src/driver-master-run.ts',
         'src/dvr-ingest.ts',

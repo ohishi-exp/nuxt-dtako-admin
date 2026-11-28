@@ -93,6 +93,11 @@ import {
 } from "./etc-card-register";
 import { readZipFile } from "./zip-entry";
 import {
+  buildDriver0Notification,
+  findDriver0Runs,
+  resolveDriver0AlertTarget,
+} from "./driver0-alert";
+import {
   confirmRunsFromTollCsv,
   rescanNoteText,
   rescanRunsForRow,
@@ -104,7 +109,7 @@ import {
   type CardRegisterReport,
   type CardRegisterTarget,
 } from "./etc-card-register-run";
-import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveKvConfigRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import { CronConfigError, DTAKO_DAILY_ORIGIN, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveKvConfigRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
   buildScrapeHistoryEntries,
   expandScrapeDateRange,
@@ -1133,6 +1138,9 @@ export interface RelayEnv {
    * **未設定は fail-closed** (通知を送らず、送らなかったことを `console.error`
    * に出す)。検証は `scrape-alert.ts` の `resolveScrapeAlertTarget`。 */
   SCRAPE_ALERT_TARGET?: string;
+  /** 乗務員未登録のまま走った運行の LINE WORKS の宛先 (Refs ippoan/alc-app#676)。作法・形・
+   * fail-closed は `SCRAPE_ALERT_TARGET` と同じ。検証は `driver0-alert.ts` の `resolveDriver0AlertTarget`。 */
+  DRIVER0_ALERT_TARGET?: string;
   /** 取り込み失敗のメール (Refs #1206)。Email Routing の `send_email` binding で、
    * **本番 (トップレベル) にだけ**ある。宛先・送り元は KV `scrape_alert_email`
    * (`scrape-alert-email.ts`)。無ければメールは送らず、送らなかったことを
@@ -1674,7 +1682,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * executeScrape と同じ scrapeViaHttp + alc-internal-proxy アップロードを、
    * WS なしで実行する。 */
   private async handleCronDtako(request: Request): Promise<Response> {
-    let body: { comp_id?: unknown; start_date?: unknown; end_date?: unknown };
+    let body: { comp_id?: unknown; start_date?: unknown; end_date?: unknown; origin?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -1715,7 +1723,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 引き継ぐ。
     const jobKey = scrapeJobKey(startDate, endDate);
     await recordScrapeJob(this.ctx.storage, jobKey, { state: "pending" });
-    await pushScrapeQueueItem(this.ctx.storage, { jobKey, compId, startDate, endDate });
+    await pushScrapeQueueItem(this.ctx.storage, {
+      jobKey,
+      compId,
+      startDate,
+      endDate,
+      ...(body.origin === DTAKO_DAILY_ORIGIN ? { daily: true } : {}),
+    });
     return Response.json({ accepted: true, comp_id: compId }, { status: 202 });
   }
 
@@ -1723,6 +1737,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     account: DtakoAccountRaw,
     range: { startDate: string; endDate: string },
     jobKey: string,
+    /** 日次 cron から来た取り込みか (`QueuedDtakoScrapeItem.daily`)。乗務員未登録の通知はこれが true のときだけ。 */
+    daily = false,
   ): Promise<void> {
     const logBase = { cron: "dtako", comp_id: account.comp_id, range: `${range.startDate}..${range.endDate}` };
     // started_at / phase を記録する (Refs #205-55 条件3)。phase は "pre_upload"
@@ -1861,6 +1877,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // ETC カード追加登録の確認段 (Refs #1287)。取り込みは上で記録済み。この呼び出しは
       // 例外を外へ出さない (`confirmEtcRunsFromZip` の doc) — 取り込みの結果を道連れにしない。
       await this.confirmEtcRunsFromZip(account, zip, range, jobKey);
+      // 乗務員未登録のまま走った運行の通知 (Refs ippoan/alc-app#676)。throw しない。
+      // 日次 cron の経路だけ — 手動の取り直し (scrape-dispatch / MCP) では同じ読取日を再送しない。
+      if (daily) await this.notifyDriver0Runs(logBase, account, zip, range, sharedSecret);
       // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
       // 何をしようと、上の記録は変わらない (条件3: fold 失敗が取り込みを道連れ
       // にしない)。cron 経路は元々 ctx.waitUntil の中なので、ここで await して
@@ -1988,6 +2007,46 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         logBase,
       ),
     ]);
+  }
+
+  /**
+   * 乗務員未登録 (対象乗務員CD=0) のまま 10km 以上走った運行を LINE WORKS へ 1 通送る
+   * (Refs ippoan/alc-app#676)。**グルーだけ** — 拾い方と文面は `driver0-alert.ts` (100% gate)。
+   *
+   * 材料は取り込んだばかりの日次 zip の KUDGURI.csv (= 前日の読取日 1 日分) なので、状態を持たずに
+   * 同じ運行を 2 度送らない。0 件の日は送らない。**throw しない** (取り込みの記録は済んでいる)。
+   * 送らなかった / 送れなかった理由は `console.error` に 1 行出す (「来ない」と「0 件」を分ける)。
+   */
+  private async notifyDriver0Runs(
+    logBase: Record<string, unknown>,
+    account: DtakoAccountRaw,
+    zip: ArrayBuffer,
+    range: { startDate: string; endDate: string },
+    sharedSecret: string,
+  ): Promise<void> {
+    const base = { ...logBase, step: "driver0_alert" };
+    try {
+      const csv = await readZipFile(zip, "KUDGURI.csv");
+      if (!csv) {
+        console.error(JSON.stringify({ ...base, status: "driver0_alert_not_checked", reason: "zip に KUDGURI.csv がありません" }));
+        return;
+      }
+      const runs = findDriver0Runs(decodeCsvBytes(csv));
+      const text = buildDriver0Notification({ compId: account.comp_id, readingDate: range.startDate, runs });
+      console.log(JSON.stringify({ ...base, status: "checked", driver0_runs: runs.length }));
+      if (text === null) return;
+      const target = resolveDriver0AlertTarget(this.env.DRIVER0_ALERT_TARGET);
+      if (!target.ok) {
+        console.error(JSON.stringify({ ...base, status: "driver0_alert_not_sent", reason: target.error }));
+        return;
+      }
+      await sendLineworksTextViaAlcInternalProxy(
+        { sharedSecret, destination: target.destination, text },
+        this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+      );
+    } catch (err) {
+      console.error(JSON.stringify({ ...base, status: "driver0_alert_failed", reason: describeUnknownError(err) }));
+    }
   }
 
   /** [`notifyScrapeFailure`] の LINE WORKS 側 (Refs #967)。throw しない。 */
@@ -12767,7 +12826,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return;
     }
     await this.enqueueScrape(() =>
-      this.runCronDtakoScrape(account, { startDate: item.startDate, endDate: item.endDate }, item.jobKey),
+      this.runCronDtakoScrape(
+        account,
+        { startDate: item.startDate, endDate: item.endDate },
+        item.jobKey,
+        item.daily === true,
+      ),
     );
   }
 

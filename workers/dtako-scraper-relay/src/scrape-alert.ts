@@ -64,12 +64,26 @@ export type ScrapeAlertTargetResolution = LineworksDestinationResolution;
  * [`resolveLineworksDestination`] が持つ — netprint cron と同じ規則・同じ文言。
  */
 export function resolveScrapeAlertTarget(raw: unknown): ScrapeAlertTargetResolution {
+  return resolveAlertTargetVar(raw, SCRAPE_ALERT_TARGET_VAR, "スクレイプ失敗の通知");
+}
+
+/**
+ * 通知の宛先 1 件を置く plain 変数 (JSON 1 件 `{"channel_id":"…"}` または `{"recipient_id":"…"}`) を解決する。
+ * [`resolveScrapeAlertTarget`] の本体で、乗務員未登録の運行の通知 (`driver0-alert.ts` の
+ * `DRIVER0_ALERT_TARGET`) も同じ規則・同じ文言で使う。`varName` はログの文言に埋める変数名、
+ * `purpose` は未設定のとき「何を送っていないか」の語。
+ */
+export function resolveAlertTargetVar(
+  raw: unknown,
+  varName: string,
+  purpose: string,
+): LineworksDestinationResolution {
   if (typeof raw !== "string") {
-    return { ok: false, error: describeUnsetTarget() };
+    return { ok: false, error: describeUnsetTarget(varName, purpose) };
   }
   const trimmed = raw.trim();
   if (trimmed === "") {
-    return { ok: false, error: describeUnsetTarget() };
+    return { ok: false, error: describeUnsetTarget(varName, purpose) };
   }
   let parsed: unknown;
   try {
@@ -77,40 +91,40 @@ export function resolveScrapeAlertTarget(raw: unknown): ScrapeAlertTargetResolut
   } catch {
     return {
       ok: false,
-      error: `${SCRAPE_ALERT_TARGET_VAR} が JSON としてパースできません`,
+      error: `${varName} が JSON としてパースできません`,
     };
   }
   if (parsed === null) {
-    return { ok: false, error: describeNotAnObject() };
+    return { ok: false, error: describeNotAnObject(varName) };
   }
   if (Array.isArray(parsed)) {
-    return { ok: false, error: describeNotAnObject() };
+    return { ok: false, error: describeNotAnObject(varName) };
   }
   if (typeof parsed !== "object") {
-    return { ok: false, error: describeNotAnObject() };
+    return { ok: false, error: describeNotAnObject(varName) };
   }
   const resolved = resolveLineworksDestination(parsed as LineworksDestinationConfig);
   if (resolved.ok) {
     return resolved;
   }
-  return { ok: false, error: `${SCRAPE_ALERT_TARGET_VAR}: ${resolved.error}` };
+  return { ok: false, error: `${varName}: ${resolved.error}` };
 }
 
 /** 未設定の理由。**「送っていない」と「どこに何を入れれば送れるようになるか」の
  * 両方**を書く — この 1 行を読む人は、通知が来ないことに気づいて Tail Worker を
  * 覗いた運用者で、次にやることが決まる形でないと意味が無い。 */
-function describeUnsetTarget(): string {
+function describeUnsetTarget(varName: string, purpose: string): string {
   return (
-    `${SCRAPE_ALERT_TARGET_VAR} が未設定のため、スクレイプ失敗の通知を送っていません ` +
+    `${varName} が未設定のため、${purpose}を送っていません ` +
     `(Cloudflare dashboard の plain 変数に {"channel_id":"<uuid>"} か {"recipient_id":"<uuid>"} を 1 件入れてください)`
   );
 }
 
 /** JSON ではあるが 1 件のオブジェクトではない時の理由。**配列を名指しする** —
  * `NETPRINT_TARGETS` が JSON 配列なので、そちらの形をそのまま貼る間違いが起きうる。 */
-function describeNotAnObject(): string {
+function describeNotAnObject(varName: string): string {
   return (
-    `${SCRAPE_ALERT_TARGET_VAR} は JSON オブジェクト 1 件である必要があります ` +
+    `${varName} は JSON オブジェクト 1 件である必要があります ` +
     `(NETPRINT_TARGETS のような配列ではありません)`
   );
 }

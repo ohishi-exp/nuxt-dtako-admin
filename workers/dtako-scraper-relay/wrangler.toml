@@ -290,6 +290,12 @@ UPSTREAM_CACHE = "on"
 #                         なので送っていない」を console.error に出す
 #                         (status: "scrape_alert_not_sent"、Tail Worker で読む)。
 
+# 乗務員未登録 (対象乗務員CD=0) のまま 10km 以上走った運行を知らせる LINE WORKS の宛先
+# (DRIVER0_ALERT_TARGET、Refs ippoan/alc-app#676)。形・作法・fail-closed は
+# SCRAPE_ALERT_TARGET と同じ (値はここに書かない。dashboard の plain 変数 + keep_vars)。
+# 送るのは DTAKO_CRON の取り込みが成功した直後、その zip (前日の読取日) に該当があった日だけ。
+# 未設定なら status: "driver0_alert_not_sent" を console.error に出して送らない。
+
 # 「全社 (DTAKO_ACCOUNTS の全会社) を見てよい人」の設定は**ここには無い**
 # (Refs #1049)。正本は **auth-worker の `USER_ACL`** で、relay は
 # `/auth/introspect` の応答 `org_wide` を聞きに行くだけ — 写しを持たない

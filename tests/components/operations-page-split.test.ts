@@ -37,6 +37,13 @@ vi.mock('~/utils/api', async (importOriginal) => ({
   splitCsvAllStream: (...a: unknown[]) => splitCsvAllStream(...a),
 }))
 
+// 乗務員未登録の警告帯 (Refs ippoan/alc-app#676) は別の口 (同じ getOperations を driver_cd=0 で引く)。
+// この表の観点に混ぜない — 警告帯は operations-page-driver0-alert.test.ts の担当。
+vi.mock('~/utils/driver0-alert', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('~/utils/driver0-alert')>()),
+  loadDriver0Alerts: async () => [],
+}))
+
 mockNuxtImport('useRouter', () => () => ({ push: vi.fn() }))
 
 import Page from '~/pages/operations/index.vue'
