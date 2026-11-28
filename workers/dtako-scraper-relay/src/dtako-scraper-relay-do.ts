@@ -1760,19 +1760,33 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 中身は固定の語 + 件数だけ (生のエラー文・key・運行NO は入れない)。
     const alertReasons: string[] = [];
     try {
-      const zip = await scrapeViaHttp(
-        {
-          compId: account.comp_id,
-          userName: account.user_name,
-          userPass: account.user_pass,
-          startDate: range.startDate,
-          endDate: range.endDate,
-        },
-        (step) => console.log(JSON.stringify({ ...logBase, step })),
-        undefined,
-        {},
-        timer,
-      );
+      const scrape = () =>
+        scrapeViaHttp(
+          {
+            compId: account.comp_id,
+            userName: account.user_name,
+            userPass: account.user_pass,
+            startDate: range.startDate,
+            endDate: range.endDate,
+          },
+          (step) => console.log(JSON.stringify({ ...logBase, step })),
+          undefined,
+          {},
+          timer,
+        );
+      // ログイン直後に theearth がセッションを切ることがある (75700192 の 2026-11-27: ログインの直後に
+      // ログイン画面への 302)。ここはまだ phase: pre_upload (alc に何も送っていない) なので、**1 回だけ**
+      // ログインし直して取り直す (scrapeViaHttp は呼ぶたびに新しくログインする)。2 回目も切れたら下の catch で
+      // 今までどおり failed + 通知。1 回の job のログインは最大 2 回 (人のセッションを蹴る回数を増やしすぎない)。
+      // アップロードより後では再試行しない (取り込みは壊す操作。#205-55 の fail-closed と同じ理由)。
+      let zip: ArrayBuffer;
+      try {
+        zip = await scrape();
+      } catch (err) {
+        if (!(err instanceof VenusSessionExpiredError)) throw err;
+        console.warn(JSON.stringify({ ...logBase, status: "session_expired_relogin", message: err.message }));
+        zip = await scrape();
+      }
       // 日次 zip に料金所 (KUDGSIR.csv) が入っているか (Refs #1287)。ETC カードの走行日の確認段
       // (`confirmEtcRunsFromZip`) の材料で、無いと確認が一度も動かない (本番の cron の zip で実際に
       // 4 日続けて無かった)。**取得の段で 1 行だけ warn し、失敗にはしない** — 料金所を通らない日も
