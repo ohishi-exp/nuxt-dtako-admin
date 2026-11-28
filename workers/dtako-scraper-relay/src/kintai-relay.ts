@@ -888,9 +888,11 @@ export function monthsCoveredByRange(startDate: string, endDate: string): string
   return months;
 }
 
-/** 1 ページの乗務員数。**524 を避けるための安全値** — rust-ichibanboshi 側の
- * 実測 (`src/routes/kintai_recalc.rs` の docs: 100 名/ページで 109 秒、524 実測
- * あり) を踏まえ、収束フェーズは 50 に固定する。 */
+/** 1 ページの乗務員数。[`foldMonth`] では、最初の 150 名の 1 回で回りきらない
+ * (母集団が 150 を超える) 会社の続きのページにだけ使う。50 の根拠だった
+ * 「100 名/ページで 109 秒、524 実測あり」は旧オンプレ (Tunnel) 経路の実測で、
+ * 今の DO → Service Binding → 勤怠 Worker の経路には当たらない
+ * (Refs ohishi-exp/nuxt-dtako-admin#1322)。値は変えていない。 */
 export const FOLD_PAGE_MAX_DRIVERS = 50;
 
 /** 1 回の fold 起動で許すページング呼び出しの上限 (収束フェーズのみ、封じる
@@ -942,14 +944,19 @@ export interface FoldMonthReport {
  * 月まるごとを完結させた回だけ」digest を書く (`after_driver_cd` 無し・次ページ
  * 無し・`stale_only` でない・warnings 空の 5 条件)。[`FOLD_PAGE_MAX_DRIVERS`]
  * (50) でページングすると個々のページ単体はこの条件を満たさないため、月ゲートが
- * 一切書かれないままになる。よって:
+ * 一切書かれないままになる。また勤怠 Worker の recalc は何人ぶんのページでも毎回
+ * その月の全員分を読み直す (1 回約 120 秒) ので、呼ぶ回数がそのまま所要時間になる。
+ * よって (Refs ohishi-exp/nuxt-dtako-admin#1322):
  *
- * 1. `maxDrivers: 50` で `next_after_driver_cd` が `null` になるまでページング
- *    (実際の書き込みはここで完結する)
- * 2. 続けてページングなしの単発呼び出しをもう 1 回 (`maxDrivers: 150`)。1 で
- *    収束済みなら全員 unchanged で高速に終わり、5 条件を満たして月ゲートが
- *    書かれる (母集団が 150 を超えるテナントではこの最適化は成立しないが、
- *    正しさには影響しない — 次回また全量読みになるだけ)。
+ * 1. まず `after_driver_cd` 無し・`maxDrivers: 150` ([`FOLD_CLOSE_MAX_DRIVERS`])
+ *    で 1 回呼ぶ。`next_after_driver_cd` が `null` (母集団 ≤ 150) なら、その 1 回で
+ *    書き込みも月ゲートの封 (5 条件) も済むので終える。この 1 回は封じる呼び出し
+ *    として数え、`pages: 0`・`attemptedGateClose: true` を返す
+ * 2. `null` でない (母集団 > 150) ときだけ、その next から `maxDrivers: 50` で
+ *    `null` になるまでページングし (1 回目は `pages` に数えない)、最後に
+ *    ページングなしの単発呼び出し (`maxDrivers: 150`) で封じる。母集団が 150 を
+ *    超えるテナントではこの封じは 5 条件を満たせないが、正しさには影響しない —
+ *    次回また全量読みになるだけ。
  *
  * ページ数が [`MAX_FOLD_PAGES`] を超えたら打ち切る (`capped: true`、無限ループの
  * 歯止め)。**打ち切った回は封じる呼び出しを試みない** — 収束していないのに
@@ -960,9 +967,28 @@ export async function foldMonth(
   deps: Pick<KintaiRelayDeps, "gcp">,
   input: { month: string; apply: boolean; now?: number },
 ): Promise<FoldMonthReport> {
-  let afterDriverCd: number | undefined;
+  const first = parseRecalcPage(
+    await relayKintaiRecalc(deps, {
+      month: input.month,
+      maxDrivers: FOLD_CLOSE_MAX_DRIVERS,
+      apply: input.apply,
+      now: input.now,
+    }),
+  );
+  if (first.nextAfterDriverCd === null) {
+    // 1 回目が封じる呼び出しを兼ねた (母集団 ≤ 150)。pages は封じる 1 回を含まない。
+    return {
+      month: input.month,
+      pages: 0,
+      driversWritten: first.driversWritten,
+      attemptedGateClose: true,
+      capped: false,
+    };
+  }
+
+  let afterDriverCd: number = first.nextAfterDriverCd;
   let pages = 0;
-  let driversWritten = 0;
+  let driversWritten = first.driversWritten;
   let capped = false;
   for (;;) {
     pages++;
