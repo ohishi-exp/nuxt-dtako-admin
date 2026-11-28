@@ -18,6 +18,9 @@
  * **本文に生のエラー文・R2 の key・運行NO を載せない。** 理由は下の固定の語 + 件数で
  * 組み、例外の message を使う経路 (取り込み本体の catch) は `scrape-alert.ts` の
  * `sanitizeScrapeFailureDetail` を通した文面をそのまま本文にする。
+ * **例外は成功・失敗の本文の末尾に足す「乗務員未登録のまま走った運行」の行だけ** (`driver0-alert.ts` の
+ * `driver0MailLines`) で、運行NO を載せる — ユーザーの指示 (「運行NO も載せる」「失敗のメールにも載せる」、
+ * Refs ippoan/alc-app#676)。
  */
 
 // ★ `mimetext/browser` を使う (既定の `mimetext` は node 版)。node 版は `mime-types` 経由で
@@ -111,17 +114,29 @@ export function buildScrapeSuccessSubject(startDate: string, endDate: string): s
   return `[dtako] 取り込み成功 ${formatReadingDateRange(startDate, endDate)}`;
 }
 
-/** 成功の本文。会社と読取日だけ (失敗の本文と同じく運行NO・key は載せない)。
+/** 成功の本文。会社と読取日だけ (失敗の本文と同じく key は載せない)。
  * `foldLine` (勤怠の畳み直しの結果の 1 行。下の `foldDoneMailLine` 等で作る) があれば
- * 2 行目に足す。畳み直しを呼ばなかった経路では渡さない = 1 行だけの本文のまま。 */
+ * 2 行目に足す。畳み直しを呼ばなかった経路では渡さない = 1 行だけの本文のまま。
+ * `driver0Lines` (乗務員未登録のまま走った運行。`driver0-alert.ts` の `driver0MailLines`) は
+ * その後ろに足す。日次 cron の経路だけが渡し、0 件なら空 = 本文は今のまま。**この行だけは運行NO を
+ * 載せる** — ユーザーの指示 (「運行NO も載せる」、Refs ippoan/alc-app#676)。 */
 export function buildScrapeSuccessBody(
   compId: string,
   startDate: string,
   endDate: string,
   foldLine?: string | null,
+  driver0Lines: readonly string[] = [],
 ): string {
   const head = `【dtako スクレイプ】comp_id ${compId} の ${formatReadingDateRange(startDate, endDate)}分の自動取り込みに成功しました。`;
-  return foldLine ? `${head}\n${foldLine}` : head;
+  return [head, ...(foldLine ? [foldLine] : []), ...driver0Lines].join("\n");
+}
+
+/** 失敗のメールの本文。`text` (LINE WORKS と同じ失敗の文面) の後ろに `driver0Lines`
+ * (乗務員未登録のまま走った運行。日次 cron で zip が手元にある日だけ渡る) を足す。空なら `text` のまま。
+ * **運行NO を載せるのは足す行だけ** — `text` の規約 (生のエラー文・key を載せない) は変えない。
+ * LINE WORKS の文面には足さない (メールだけ。Refs ippoan/alc-app#676)。 */
+export function buildScrapeFailureMailBody(text: string, driver0Lines: readonly string[] = []): string {
+  return [text, ...driver0Lines].join("\n");
 }
 
 // ---------------------------------------------------------------------------

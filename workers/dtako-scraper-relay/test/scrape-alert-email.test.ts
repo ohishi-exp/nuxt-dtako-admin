@@ -5,6 +5,7 @@ import {
   buildIchibanMakecsvEmail,
   buildScrapeAlertEmail,
   buildScrapeAlertSubject,
+  buildScrapeFailureMailBody,
   buildScrapeSuccessBody,
   buildScrapeSuccessSubject,
   dtakoCronAlertReason,
@@ -146,6 +147,26 @@ describe("buildScrapeAlertEmail", () => {
       "【dtako スクレイプ】comp_id 12345678 の 2026/10/05分の自動取り込みに成功しました。\n" +
         "勤怠の畳み直し: 途中で打ち切り (ページ数の上限。続きは次回)",
     );
+  });
+
+  it("成功の本文: 乗務員未登録の運行の行は畳み直しの行の後ろに足す。空なら本文は変わらない (Refs ippoan/alc-app#676)", () => {
+    const head = "【dtako スクレイプ】comp_id 12345678 の 2026/10/05分の自動取り込みに成功しました。";
+    const d0 = ["乗務員未登録のまま 10km 以上走った運行: 1 件", "・運行NO A / 車輌 X / 出庫 - / 帰庫 - / 10.0km"];
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", FOLD_CAPPED_MAIL_LINE, [])).toBe(
+      `${head}\n${FOLD_CAPPED_MAIL_LINE}`,
+    );
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", FOLD_CAPPED_MAIL_LINE, d0)).toBe(
+      [head, FOLD_CAPPED_MAIL_LINE, ...d0].join("\n"),
+    );
+    expect(buildScrapeSuccessBody("12345678", "2026-10-05", "2026-10-05", null, d0)).toBe([head, ...d0].join("\n"));
+  });
+
+  it("失敗のメールの本文: 乗務員未登録の運行の行を末尾に足す。空・省略なら失敗の文面のまま (Refs ippoan/alc-app#676)", () => {
+    const text = "【dtako スクレイプ失敗】…";
+    const d0 = ["乗務員未登録のまま 10km 以上走った運行: 1 件", "・運行NO A / 車輌 X / 出庫 - / 帰庫 - / 10.0km"];
+    expect(buildScrapeFailureMailBody(text)).toBe(text);
+    expect(buildScrapeFailureMailBody(text, [])).toBe(text);
+    expect(buildScrapeFailureMailBody(text, d0)).toBe([text, ...d0].join("\n"));
   });
 
   it("成功の本文: 回していないなら理由の固定の語 (4 理由とも)", () => {
