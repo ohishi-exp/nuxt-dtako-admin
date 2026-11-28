@@ -129,6 +129,8 @@ export interface DatrQuery {
   to: string
   /** true ならアルコール値が 0 でない行だけ */
   alcoholOnly?: boolean
+  /** 結果から外すコード (コード指定より優先) */
+  excludeCodes?: string[]
 }
 
 export interface DatrSearchResult {
@@ -137,10 +139,15 @@ export interface DatrSearchResult {
   perCode: { code: string, count: number }[]
 }
 
+/** 既定で外すコード (2017 年のデータに混ざっていた 99999999。画面のチェックで外せる) */
+export const DEFAULT_EXCLUDED_CODES = ['99999999']
+
 export function searchDatr(records: DatrRecord[], q: DatrQuery): DatrSearchResult {
   const wanted = new Set(q.codes)
+  const excluded = new Set(q.excludeCodes)
   const hits = records.filter(r =>
     (wanted.size === 0 || wanted.has(r.code))
+    && !excluded.has(r.code)
     && (!q.from || r.date >= q.from)
     && (!q.to || r.date <= q.to)
     && (!q.alcoholOnly || hasAlcohol(r)))
