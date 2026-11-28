@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { getOperations, getDrivers, getVehicles, splitCsvAllStream } from '~/utils/api'
+import { getOperation, getOperations, getDrivers, getVehicles, splitCsvAllStream } from '~/utils/api'
+import { DRIVER0_MIN_DISTANCE_KM, DRIVER0_WINDOW_DAYS, formatWallClock, loadDriver0Alerts, type Driver0Alert } from '~/utils/driver0-alert'
 import type { OperationListItem, Driver, Vehicle } from '~/types'
 import { describeListFailure } from '~/utils/api-error'
 
@@ -99,11 +100,28 @@ async function loadVehicles() {
   }
 }
 
+// 乗務員未登録 (乗務員CD=0) のまま走った運行の警告帯 (Refs ippoan/alc-app#676)。表の絞り込みとは
+// 独立に、直近の読取日を見る。**失敗は 0 件と分けて持つ** — 帯が出ないのを「該当なし」と読ませない。
+const driver0Alerts = ref<Driver0Alert[]>([])
+const driver0Error = ref<string | null>(null)
+
+async function loadDriver0() {
+  try {
+    driver0Alerts.value = await loadDriver0Alerts({ getOperations, getOperation }, new Date())
+  }
+  catch (e) {
+    driver0Alerts.value = []
+    driver0Error.value = describeListFailure(e, RETRY_RELOAD)
+  }
+}
+
 // Fetch filter options
 // **`Promise.all` のまま並行に取る** (直列にすると初回表示が遅くなる)。
 // **片方が落ちてももう片方は読める** — catch はそれぞれの中にあるので、
 // `.catch(() => {})` 時代と同じ性質。変えたのは**理由を捨てずに持つ**ところだけ。
 onMounted(async () => {
+  // 警告帯は表を待たせない (待たずに並べて走らせる)。
+  void loadDriver0()
   await Promise.all([loadDrivers(), loadVehicles()])
   await fetchData()
 })
@@ -257,6 +275,52 @@ async function splitAll() {
       icon="i-lucide-circle-x"
       variant="subtle"
     />
+
+    <!-- 乗務員未登録のまま走った運行 (Refs ippoan/alc-app#676)。0 件なら出さない。
+         確かめられなかった回は 0 件と分けて出す (帯が無いのを「該当なし」と読ませない)。 -->
+    <UAlert
+      v-if="driver0Error"
+      :title="`乗務員未登録の運行を確かめられませんでした (${driver0Error})`"
+      description="警告の帯が出ていないのは 0 件を意味しません"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
+    <UAlert
+      v-if="driver0Alerts.length > 0"
+      :title="`乗務員未登録のまま走った運行が ${driver0Alerts.length} 件 (直近 ${DRIVER0_WINDOW_DAYS} 日、${DRIVER0_MIN_DISTANCE_KM}km 以上)`"
+      color="warning"
+      icon="i-lucide-triangle-alert"
+      variant="subtle"
+    >
+      <template #description>
+        <details>
+          <summary class="cursor-pointer">一覧を表示</summary>
+          <table class="mt-2 text-xs">
+            <thead>
+              <tr class="text-left">
+                <th class="pr-4">運行NO</th>
+                <th class="pr-4">車両</th>
+                <th class="pr-4">始業 (出庫)</th>
+                <th class="pr-4">終業 (帰庫)</th>
+                <th class="text-right">距離</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="a in driver0Alerts" :key="a.unko_no">
+                <td class="pr-4 font-mono">
+                  <NuxtLink :to="`/operations/${a.unko_no}`" class="underline">{{ a.unko_no }}</NuxtLink>
+                </td>
+                <td class="pr-4">{{ a.vehicle_name || '-' }}</td>
+                <td class="pr-4">{{ formatWallClock(a.garage_out_at) }}</td>
+                <td class="pr-4">{{ formatWallClock(a.garage_in_at) }}</td>
+                <td class="text-right">{{ formatDistance(a.total_distance) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </details>
+      </template>
+    </UAlert>
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-3 items-end">

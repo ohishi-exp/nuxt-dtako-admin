@@ -137,6 +137,9 @@ export interface QueuedDtakoScrapeItem {
   compId: string;
   startDate: string;
   endDate: string;
+  /** 日次 cron から積まれた item (`/cron/dtako` の body の `origin` が `DTAKO_DAILY_ORIGIN`)。
+   * 乗務員未登録の運行の通知はこれが true のときだけ送る (Refs ippoan/alc-app#676)。省略 = 手動の取り直し。 */
+  daily?: boolean;
 }
 
 /** ETC カード 1 行の「走行日を探し直す」(Refs #1287)。**メモリ上の `waitUntil` に載せていた間、

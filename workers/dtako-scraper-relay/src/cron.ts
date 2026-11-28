@@ -28,6 +28,8 @@ import { isCardRegisterTick } from "./etc-card-register";
 
 /** dtako 日次スクレイプの cron 式 (UTC)。VPS cron `0 1 * * *` JST と同時刻。 */
 export const DTAKO_CRON = "0 16 * * *";
+/** 日次 cron が `/cron/dtako` の body に付ける `origin` (Refs ippoan/alc-app#676)。 */
+export const DTAKO_DAILY_ORIGIN = "daily_cron";
 /** ETC 明細スクレイプの cron 式 (UTC)。GCE cron と同じ JST 6,7,8,9 時。 */
 export const ETC_CRON = "0 21,22,23,0 * * *";
 /** 拘束サマリ (R2 `kintai/` prefix) の日次同期 cron 式 (UTC)。JST 4:00 —
@@ -611,6 +613,9 @@ export async function runScheduledCron(
             comp_id: account.comp_id,
             start_date: date,
             end_date: date,
+            // 日次 cron から来た印。乗務員未登録の運行の通知はこの経路でだけ送る
+            // (取り直しの scrape-dispatch は付けない = 同じ読取日を再送しない。Refs ippoan/alc-app#676)
+            origin: DTAKO_DAILY_ORIGIN,
           });
           return {
             kind: "dtako",

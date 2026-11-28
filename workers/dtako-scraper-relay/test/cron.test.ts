@@ -151,7 +151,8 @@ describe('runScheduledCron: dtako', () => {
     expect(calls[0]).toEqual({
       doKey: 'scraper-comp-27324455',
       path: '/cron/dtako',
-      body: { comp_id: '27324455', start_date: '2026-07-02', end_date: '2026-07-02' },
+      // origin: 日次 cron の印 (乗務員未登録の運行の通知はこの経路だけ、Refs ippoan/alc-app#676)
+      body: { comp_id: '27324455', start_date: '2026-07-02', end_date: '2026-07-02', origin: 'daily_cron' },
     })
     expect(calls[1].doKey).toBe('scraper-comp-99999999')
   })

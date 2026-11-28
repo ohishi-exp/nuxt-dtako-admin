@@ -32,7 +32,8 @@ vi.mock("../src/kintai-relay", async (importOriginal) => ({
 
 import { DtakoScraperRelayDO } from "../src/dtako-scraper-relay-do";
 import { LINEWORKS_SEND_PATH } from "../src/lineworks-notify";
-import { SCRAPE_JOB_KEY_PREFIX } from "../src/scrape-queue";
+import { SCRAPE_JOB_KEY_PREFIX, SCRAPE_QUEUE_KEY } from "../src/scrape-queue";
+import { DTAKO_DAILY_ORIGIN } from "../src/cron";
 import { RECALC_PENDING_PATH } from "../src/alc-internal-upload";
 
 (globalThis as unknown as { WebSocketRequestResponsePair: unknown }).WebSocketRequestResponsePair =
@@ -77,6 +78,10 @@ function makeDO(
     pendingBody?: unknown;
     /** fold を回す (`KINTAI_COMP_ID` を対象会社にする)。`configured` で畳み先 (勤怠 Worker の binding) も置く。 */
     fold?: "not_configured" | "configured";
+    /** `DRIVER0_ALERT_TARGET` (乗務員未登録の運行の通知、Refs ippoan/alc-app#676)。既定は置かない。 */
+    driver0AlertTarget?: string;
+    /** KV `dtako_accounts` に ACCOUNT を置く (`/cron/dtako` の受理と queue の drain が会社を引ける)。 */
+    accounts?: boolean;
   } = {},
 ) {
   const sent: SentRequest[] = [];
@@ -87,7 +92,7 @@ function makeDO(
         key === "scrape_alert_email"
           ? ("emailConfig" in opts ? opts.emailConfig : EMAIL_CONFIG)
           : // 畳み先へ名乗る会社のテナント (kintaiWorkerFor) の引き先
-            key === "dtako_accounts" && opts.fold === "configured"
+            key === "dtako_accounts" && (opts.fold === "configured" || opts.accounts)
             ? JSON.stringify([ACCOUNT])
             : null,
     },
@@ -110,6 +115,7 @@ function makeDO(
       : "sharedSecret" in opts
         ? opts.sharedSecret
         : "shared-secret",
+    DRIVER0_ALERT_TARGET: opts.driver0AlertTarget,
     SCRAPE_ALERT_TARGET:
       "scrapeAlertTarget" in opts ? opts.scrapeAlertTarget : `{"channel_id":"${CHANNEL_ID}"}`,
     AUTH_WORKER: {
@@ -150,6 +156,10 @@ function makeDO(
         stored.set(key, value);
       },
       delete: async () => {},
+      list: async ({ prefix = "" }: { prefix?: string } = {}) =>
+        new Map([...stored].filter(([k]) => k.startsWith(prefix))),
+      getAlarm: async () => null,
+      setAlarm: async () => {},
     },
   };
   const relay = new DtakoScraperRelayDO(ctx as never, env as never);
@@ -159,10 +169,21 @@ function makeDO(
         account: typeof ACCOUNT,
         range: typeof RANGE,
         jobKey: string,
+        daily?: boolean,
       ): Promise<void>;
     }
   ).runCronDtakoScrape.bind(relay);
-  return { sent, mails, stored, run };
+  const internals = relay as unknown as {
+    runQueuedScrapeJob(item: Record<string, unknown>): Promise<void>;
+  };
+  return {
+    sent,
+    mails,
+    stored,
+    run,
+    fetch: (req: Request) => relay.fetch(req),
+    runQueued: (item: Record<string, unknown>) => internals.runQueuedScrapeJob(item),
+  };
 }
 
 function captureConsoleError() {
@@ -552,5 +573,144 @@ describe("取り込みの失敗をメールでも届ける (Refs #1206)", () => 
     expect(mails).toHaveLength(1);
     const body = mailBody(mails[0]!.raw);
     expect(body).toContain("CSV の分割が 4 件失敗 / 要再計算が 1 件失敗");
+  });
+});
+
+/** method 0 (stored) だけの最小の zip (do-etc-card-register.test.ts と同じ形)。CRC は読まないので 0。 */
+function storedZip(name: string, data: Uint8Array): ArrayBuffer {
+  const n = new TextEncoder().encode(name);
+  const lh = new DataView(new ArrayBuffer(30));
+  lh.setUint32(0, 0x04034b50, true);
+  lh.setUint32(18, data.length, true);
+  lh.setUint32(22, data.length, true);
+  lh.setUint16(26, n.length, true);
+  const ch = new DataView(new ArrayBuffer(46));
+  ch.setUint32(0, 0x02014b50, true);
+  ch.setUint32(20, data.length, true);
+  ch.setUint32(24, data.length, true);
+  ch.setUint16(28, n.length, true);
+  const cdOffset = 30 + n.length + data.length;
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, 1, true);
+  eocd.setUint16(10, 1, true);
+  eocd.setUint32(12, 46 + n.length, true);
+  eocd.setUint32(16, cdOffset, true);
+  const parts = [new Uint8Array(lh.buffer), n, data, new Uint8Array(ch.buffer), n, new Uint8Array(eocd.buffer)];
+  const out = new Uint8Array(parts.reduce((k, p) => k + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out.buffer;
+}
+
+/**
+ * ★ 乗務員未登録の運行の通知 (Refs ippoan/alc-app#676) の**配線**。拾い方と文面は
+ * `driver0-alert.ts` (100% gate) 側、ここは「取り込みが成功した後に、その zip の KUDGURI から送るか」だけ。
+ * CSV は UTF-8 で渡す (Shift_JIS の判定は etc-card-register.test.ts の decodeCsvBytes が固定している)。
+ */
+describe("取り込み成功の後に乗務員未登録の運行を知らせる (Refs ippoan/alc-app#676)", () => {
+  // 送るのは日次 cron から来た取り込み (`daily` = true) だけ。
+  const TARGET = `{"recipient_id":"${CHANNEL_ID}"}`;
+  const KUDGURI = new TextEncoder().encode(
+    [
+      "運行NO,事業所名,車輌名,対象乗務員CD,出庫日時,帰庫日時,総走行距離",
+      "U1,本社,テスト1号,0,2026/08/28 7:00:00,2026/08/28 18:00:00,52.3",
+      "U2,本社,テスト2号,0,2026/08/28 7:00:00,2026/08/28 7:05:00,0.1",
+      "U3,本社,テスト3号,1234,2026/08/28 7:00:00,2026/08/28 18:00:00,300",
+    ].join("\r\n"),
+  );
+
+  it("★ 該当があれば宛先へ 1 通 (10km 以上の乗務員CD=0 だけ)", async () => {
+    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-1", true);
+    errs.restore();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.secret).toBe("shared-secret");
+    expect(sent[0]!.body.recipient_id).toBe(CHANNEL_ID);
+    expect(sent[0]!.body.text).toBe(
+      [
+        "【dtako 乗務員未登録】comp_id 27324455 の読取日 2026/08/28 に、乗務員未登録のまま 10km 以上走った運行が 1 件あります",
+        "・運行NO U1 / 本社 / テスト1号 / 始業(出庫) 2026/08/28 07:00 / 終業(帰庫) 2026/08/28 18:00 / 52.3km",
+      ].join("\n"),
+    );
+  });
+
+  it("★ 宛先が未設定なら送らず、送っていないことを console.error に出す (fail-closed)", async () => {
+    const { sent, run } = makeDO();
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-2", true);
+    errs.restore();
+    expect(sent).toHaveLength(0);
+    expect(String(errs.find("driver0_alert_not_sent")?.reason)).toContain("DRIVER0_ALERT_TARGET が未設定");
+  });
+
+  it("★ 陰性対照: 該当が無い日は宛先があっても送らない", async () => {
+    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+    const none = new TextEncoder().encode("運行NO,対象乗務員CD,総走行距離\r\nU3,1234,300");
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", none));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-3", true);
+    errs.restore();
+    expect(sent).toHaveLength(0);
+    expect(errs.find("driver0_alert_not_sent")).toBeUndefined();
+  });
+
+  it("★ zip に KUDGURI.csv が無ければ「確かめていない」と出す (0 件と分ける)", async () => {
+    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGIVT.csv", new Uint8Array()));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-4", true);
+    errs.restore();
+    expect(sent).toHaveLength(0);
+    expect(errs.find("driver0_alert_not_checked")).toBeDefined();
+  });
+
+  it("★ 日次 cron でない取り込み (画面・MCP からの取り直し) では送らない — 同じ読取日を再送しない", async () => {
+    const { sent, run } = makeDO({ driver0AlertTarget: TARGET });
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-6");
+    errs.restore();
+    expect(sent).toHaveLength(0);
+    expect(errs.find("driver0_alert_not_sent")).toBeUndefined();
+  });
+
+  it("★ 日次 cron の印 (origin) だけが queue の daily になり、drain した取り込みで送る", async () => {
+    const { sent, stored, fetch, runQueued } = makeDO({ driver0AlertTarget: TARGET, accounts: true });
+    const post = (body: Record<string, string>) =>
+      fetch(new Request("https://relay.internal/cron/dtako", { method: "POST", body: JSON.stringify(body) }));
+    const base = { comp_id: ACCOUNT.comp_id, start_date: RANGE.startDate, end_date: RANGE.endDate };
+    expect((await post({ ...base, origin: DTAKO_DAILY_ORIGIN })).status).toBe(202);
+    const daily = { ...(stored.get(SCRAPE_QUEUE_KEY) as Array<Record<string, unknown>>).at(-1)! };
+    expect(daily).toMatchObject({ compId: ACCOUNT.comp_id, daily: true });
+    // 取り直し (scrape-dispatch と同じ body = origin 無し) は daily を持たない
+    await post(base);
+    const manual = (stored.get(SCRAPE_QUEUE_KEY) as Array<Record<string, unknown>>).at(-1)!;
+    expect(manual).not.toHaveProperty("daily");
+
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await runQueued(manual);
+    expect(sent).toHaveLength(0);
+    await runQueued(daily);
+    errs.restore();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("★ 送信が落ちても取り込みの記録は done のまま (throw しない)", async () => {
+    const { sent, stored, run } = makeDO({ driver0AlertTarget: TARGET, sendOk: false });
+    scrapeViaHttp.mockResolvedValue(storedZip("KUDGURI.csv", KUDGURI));
+    const errs = captureConsoleError();
+    await run(ACCOUNT, RANGE, "job-d0-5", true);
+    errs.restore();
+    expect(sent).toHaveLength(1);
+    expect(errs.find("driver0_alert_failed")).toBeDefined();
+    expect(stored.get(`${SCRAPE_JOB_KEY_PREFIX}job-d0-5`)).toMatchObject({ state: "done" });
   });
 });
